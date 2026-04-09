@@ -1,0 +1,1006 @@
+package com.ge.gevisualaid;
+
+import com.google.inject.Provides;
+import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Client;
+import net.runelite.api.GameState;
+import net.runelite.api.GrandExchangeOffer;
+import net.runelite.api.GrandExchangeOfferState;
+import net.runelite.api.ItemComposition;
+import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
+import net.runelite.api.events.GrandExchangeOfferChanged;
+import net.runelite.api.widgets.Widget;
+import net.runelite.client.config.ConfigManager;
+import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.game.ItemManager;
+import net.runelite.client.plugins.Plugin;
+import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.plugins.PluginManager;
+import net.runelite.client.ui.ClientToolbar;
+import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.ui.overlay.OverlayManager;
+
+import javax.inject.Inject;
+import java.awt.*;
+import java.awt.image.BufferedImage;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+
+@Slf4j
+@PluginDescriptor(
+        name = "GE Visual Aid",
+        description = "A Grand Exchange accessibility and notification assistant. " +
+                "Draws configurable pulsing highlight overlays around active GE actions to assist players " +
+                "with visual impairments. Plays audio beeps for action cues. Sends real-time notifications " +
+                "via Discord and Pushover including priority alerts that bypass phone silent mode. " +
+                "Tracks all 8 GE slots with live progress bars and persistent profit/loss history. " +
+                "Outputs full GE state each tick for integration with assistive technology — from Philips Hue " +
+                "lights that change colour when action is required, to haptic feedback devices that pulse when " +
+                "your offer completes, to custom screen readers and voice announcement systems.",
+        tags = {"accessibility", "ge", "grand exchange", "notification", "discord", "overlay", "visual"}
+)
+public class GEVisualAidPlugin extends Plugin
+{
+    @Inject private Client             client;
+    @Inject private PluginManager      pluginManager;
+    @Inject private GEVisualAidConfig  config;
+    @Inject private OverlayManager     overlayManager;
+    @Inject private GEVisualAidOverlay overlay;
+    @Inject private GEVisualAidPanel   panel;
+    @Inject private DiscordNotifier    discord;
+    @Inject private PushoverNotifier   pushover;
+    @Inject private SoundAlert         sound;
+    @Inject private SessionTracker     session;
+    @Inject private ClientToolbar      clientToolbar;
+    @Inject private ItemManager        itemManager;
+
+    private Object           suggestionManager    = null;
+    private Object           accountStatusManager = null;
+    private NavigationButton navButton;
+
+    private final SlotState[] slots = new SlotState[8];
+
+    private String  lastAction    = "";
+    private String  lastItemName  = "";
+    private boolean lastDumpAlert = false;
+    private long    actionSinceMs = 0;
+
+    private static final DateTimeFormatter TS_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    @Provides
+    GEVisualAidConfig provideConfig(ConfigManager cm)
+    {
+        return cm.getConfig(GEVisualAidConfig.class);
+    }
+
+    // -----------------------------------------------------------------------
+    // Start / Stop
+    // -----------------------------------------------------------------------
+    @Override
+    protected void startUp()
+    {
+        for (int i = 0; i < 8; i++) slots[i] = new SlotState();
+        session.load();
+        overlayManager.add(overlay);
+        linkToCopilot();
+
+        BufferedImage icon = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = icon.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setColor(new Color(0, 200, 255));
+        g.fillOval(1, 5, 14, 7);
+        g.setColor(new Color(0, 80, 140));
+        g.fillOval(5, 6, 6, 5);
+        g.setColor(Color.WHITE);
+        g.fillOval(7, 7, 2, 2);
+        g.dispose();
+
+        navButton = NavigationButton.builder()
+                .tooltip("GE Visual Aid")
+                .icon(icon)
+                .priority(10)
+                .panel(panel)
+                .build();
+
+        clientToolbar.addNavigation(navButton);
+        panel.setOnReset(() -> { session.reset(); refreshSessionPanel(); });
+        writeIdle();
+    }
+
+    @Override
+    protected void shutDown()
+    {
+        overlayManager.remove(overlay);
+        clientToolbar.removeNavigation(navButton);
+        overlay.clearHighlight();
+        session.save();
+        writeIdle();
+        suggestionManager    = null;
+        accountStatusManager = null;
+    }
+
+    // -----------------------------------------------------------------------
+    // Game state change — instant logout detection
+    // -----------------------------------------------------------------------
+    @Subscribe
+    public void onGameStateChanged(GameStateChanged event)
+    {
+        if (event.getGameState() == GameState.LOGIN_SCREEN
+                || event.getGameState() == GameState.HOPPING)
+        {
+            overlay.clearHighlight();
+            writeRaw("timestamp=" + LocalDateTime.now().format(TS_FORMAT) + "\n"
+                    + "account=\n"
+                    + "logged_in=false\n"
+                    + "world_x=0\n"
+                    + "world_y=0\n"
+                    + "plane=0\n"
+                    + "ge_main_page=false\n"
+                    + "ge_offer_screen=false\n"
+                    + "ge_offer_type=none\n"
+                    + "ge_slot_open=0\n"
+                    + "ge_history_open=false\n"
+                    + "bank_open=false\n"
+                    + "bank_pin_open=false\n"
+                    + "inventory_open=false\n"
+                    + "equipment_open=false\n"
+                    + "prayer_open=false\n"
+                    + "magic_open=false\n"
+                    + "combat_options_open=false\n"
+                    + "skills_open=false\n"
+                    + "quest_list_open=false\n"
+                    + "friends_open=false\n"
+                    + "clan_open=false\n"
+                    + "logout_open=false\n"
+                    + "settings_open=false\n"
+                    + buildSlotState()
+                    + "action_required=false\n"
+                    + "action=logged_out\n"
+                    + "copilot_status=not_found\n"
+                    + "item_name=\nitem_id=\noffer_type=\ntarget_price=\ntarget_quantity=\nis_dump_alert=false\n"
+                    + "x1=0\ny1=0\nx2=0\ny2=0\n");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // GrandExchangeOfferChanged — independent of Copilot
+    // -----------------------------------------------------------------------
+    @Subscribe
+    public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event)
+    {
+        int            slotIndex = event.getSlot();
+        GrandExchangeOffer offer = event.getOffer();
+        SlotState      s         = slots[slotIndex];
+        String         prevStatus = s.getStatus();
+
+        s.setQuantityDone(offer.getQuantitySold());
+        s.setQuantityTotal(offer.getTotalQuantity());
+        s.setPriceEach(offer.getPrice());
+        s.setLastChangedMs(System.currentTimeMillis());
+
+        GrandExchangeOfferState state = offer.getState();
+
+        if (offer.getItemId() > 0)
+        {
+            s.setItemId(offer.getItemId());
+            try
+            {
+                s.setItemName(itemManager.getItemComposition(offer.getItemId()).getName());
+            }
+            catch (Exception e) { s.setItemName("Unknown"); }
+        }
+
+        switch (state)
+        {
+            case BUYING:
+            case BOUGHT:
+                s.setOfferType("buy");
+                break;
+            case SELLING:
+            case SOLD:
+                s.setOfferType("sell");
+                break;
+            default:
+                break;
+        }
+
+        switch (state)
+        {
+            case EMPTY:
+                s.setStatus("empty");
+                s.setItemId(-1);
+                s.setItemName("");
+                s.setQuantityDone(0);
+                s.setQuantityTotal(0);
+                break;
+            case BUYING:
+                s.setStatus("buying");
+                if (config.profitTrackingEnabled())
+                    session.recordBuy(s.getItemId(), offer.getPrice());
+                break;
+            case BOUGHT:
+                s.setStatus("complete");
+                handleOfferComplete(slotIndex, s, prevStatus);
+                break;
+            case SELLING:
+                s.setStatus("selling");
+                break;
+            case SOLD:
+                s.setStatus("complete");
+                handleOfferComplete(slotIndex, s, prevStatus);
+                break;
+            case CANCELLED_BUY:
+            case CANCELLED_SELL:
+                s.setStatus("cancelled");
+                break;
+        }
+
+        panel.updateSlot(slotIndex, s.getStatus(), s.getItemName(),
+                s.getQuantityDone(), s.getQuantityTotal());
+        checkGEFull();
+    }
+
+    private void handleOfferComplete(int slotIndex, SlotState s, String prevStatus)
+    {
+        if ("complete".equals(prevStatus)) return;
+
+        long profit = 0;
+        if (config.profitTrackingEnabled() && "sell".equals(s.getOfferType()))
+            profit = session.recordSell(s.getItemId(), s.getPriceEach(), s.getQuantityDone());
+
+        refreshSessionPanel();
+        sound.playOfferComplete();
+        discord.sendOfferComplete(s.getItemName(), s.getOfferType(),
+                s.getQuantityDone(), s.getPriceEach(), profit);
+
+        if (config.pushoverEnabled() && config.pushoverNotifyOfferComplete())
+        {
+            String msg = s.getOfferType() + " " + s.getItemName()
+                    + " x" + s.getQuantityDone()
+                    + " @ " + String.format("%,d", s.getPriceEach()) + "gp"
+                    + (profit != 0 ? " | Profit: " + session.formatGp(profit) : "");
+            pushover.send("Offer Complete", msg, false);
+        }
+    }
+
+    private void checkGEFull()
+    {
+        if (!config.geFullAlertEnabled()) return;
+        boolean full = true;
+        for (SlotState s : slots)
+            if ("empty".equals(s.getStatus())) { full = false; break; }
+        if (full)
+        {
+            discord.sendGEFull();
+            if (config.pushoverEnabled())
+                pushover.send("GE Full", "All 8 slots are occupied.", false);
+        }
+    }
+
+    private void refreshSessionPanel()
+    {
+        if (config.sessionSummaryEnabled())
+            panel.updateSession(session.getTotalProfit(), session.getTotalFlips(),
+                    session.getBestFlip(), session);
+    }
+
+    // -----------------------------------------------------------------------
+    // Game tick
+    // -----------------------------------------------------------------------
+    @Subscribe
+    public void onGameTick(GameTick tick)
+    {
+        if (suggestionManager == null)
+        {
+            linkToCopilot();
+            if (suggestionManager == null)
+            {
+                panel.setDisconnected();
+                overlay.clearHighlight();
+                writeError("copilot_not_found");
+                return;
+            }
+        }
+
+        checkStuckOffers();
+
+        try { resolveAndWrite(); }
+        catch (Exception e)
+        {
+            log.warn("GEVisualAid resolve error: {}", e.getMessage());
+        }
+    }
+
+    private void checkStuckOffers()
+    {
+        if (!config.offerStuckEnabled()) return;
+        long now       = System.currentTimeMillis();
+        long threshold = config.offerStuckMinutes() * 60_000L;
+        for (int i = 0; i < 8; i++)
+        {
+            SlotState s = slots[i];
+            if (!"buying".equals(s.getStatus()) && !"selling".equals(s.getStatus())) continue;
+            if (s.getQuantityDone() == 0) continue;
+            if (s.getQuantityDone() >= s.getQuantityTotal()) continue;
+            if (now - s.getLastChangedMs() > threshold)
+            {
+                discord.sendOfferStuck(s.getItemName(), i);
+                if (config.pushoverEnabled())
+                    pushover.send("Offer Stuck",
+                            "Slot " + (i + 1) + " (" + s.getItemName() + ") may be stuck.", false);
+                s.setLastChangedMs(now);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Core resolver
+    // -----------------------------------------------------------------------
+    private void resolveAndWrite() throws Exception
+    {
+        String  ui     = buildUiState();
+        String  slotStr = buildSlotState();
+        boolean geOpen = isVisible(465, 7) || isVisible(465, 26) || isVisible(465, 4);
+
+        if (!geOpen)
+        {
+            overlay.clearHighlight();
+            panel.updateStatus("idle", "", false, false);
+            writeRaw(ui + slotStr + idleFields());
+            return;
+        }
+
+        Object suggestion = invoke(suggestionManager, "getSuggestion");
+        Object error      = invoke(suggestionManager, "getSuggestionError");
+
+        if (suggestion == null || error != null || isWait(suggestion))
+        {
+            overlay.clearHighlight();
+            checkIdleAlert("");
+            panel.updateStatus("idle", "", false, false);
+            writeRaw(ui + slotStr + idleFields());
+            return;
+        }
+
+        String  itemName    = getStringSafe(suggestion, "getName");
+        int     itemId      = getIntSafe(suggestion, "getItemId");
+        String  offerType   = getStringSafe(suggestion, "offerType");
+        int     targetPrice = getIntSafe(suggestion, "getPrice");
+        int     targetQty   = getIntSafe(suggestion, "getQuantity");
+        boolean dumpAlert   = getBoolSafe(suggestion, "isDumpAlert");
+
+        String sugMeta = "item_name=" + itemName + "\n"
+                + "item_id=" + itemId + "\n"
+                + "offer_type=" + offerType + "\n"
+                + "target_price=" + targetPrice + "\n"
+                + "target_quantity=" + targetQty + "\n"
+                + "is_dump_alert=" + dumpAlert + "\n";
+
+        boolean slotOpen = getOpenSlot() != -1;
+        if (!slotOpen)
+            resolveHomeScreen(suggestion, ui, slotStr, sugMeta, itemName, dumpAlert);
+        else
+            resolveOfferScreen(suggestion, ui, slotStr, sugMeta, itemName, dumpAlert);
+    }
+
+    private void resolveHomeScreen(Object sug, String ui, String slotStr,
+                                   String sugMeta, String itemName,
+                                   boolean dumpAlert) throws Exception
+    {
+        Object  accountStatus = invoke(accountStatusManager, "getAccountStatus");
+        Widget  confirmWidget = getOfferChild(58);
+        boolean setupOpen     = confirmWidget != null && !confirmWidget.isHidden();
+        boolean collectNeeded = (boolean) invoke(accountStatus, "isCollectNeeded", sug, setupOpen);
+
+        if (collectNeeded)
+        {
+            Widget topBar = client.getWidget(465, 6);
+            if (topBar != null)
+            {
+                Widget btn = topBar.getChild(2);
+                if (btn != null)
+                {
+                    emit("master_collect", "collect", btn,
+                            new Rectangle(2, 1, 81, 18),
+                            ui, slotStr, sugMeta, itemName, dumpAlert);
+                    discord.sendCollectNeeded();
+                    if (config.pushoverEnabled())
+                        pushover.send("Collect Needed",
+                                "Items ready to collect from the GE.", false);
+                    return;
+                }
+            }
+        }
+        else if (isAbort(sug))
+        {
+            int    boxId = (int) invoke(sug, "getBoxId");
+            Widget slot  = client.getWidget(465, 7 + boxId);
+            if (slot != null)
+            {
+                emit("abort_slot_" + (boxId + 1), "abort", slot,
+                        fullBounds(slot), ui, slotStr, sugMeta, itemName, dumpAlert);
+                return;
+            }
+        }
+        else if (isModify(sug))
+        {
+            int    boxId = (int) invoke(sug, "getBoxId");
+            Widget slot  = client.getWidget(465, 7 + boxId);
+            if (slot != null && !slot.isHidden())
+            {
+                emit("modify_slot_" + (boxId + 1), "modify", slot,
+                        fullBounds(slot), ui, slotStr, sugMeta, itemName, dumpAlert);
+                return;
+            }
+        }
+        else if (isBuy(sug))
+        {
+            int slotId = (int) invoke(accountStatus, "findEmptySlot");
+            if (slotId != -1)
+            {
+                Widget slotWidget = client.getWidget(465, 7 + slotId);
+                if (slotWidget != null)
+                {
+                    Widget buyBtn = slotWidget.getChild(0);
+                    if (buyBtn != null && !buyBtn.isHidden())
+                    {
+                        emit("buy_slot_" + (slotId + 1), "normal", buyBtn,
+                                new Rectangle(0, 0, 45, 44),
+                                ui, slotStr, sugMeta, itemName, dumpAlert);
+                        return;
+                    }
+                }
+            }
+        }
+        else if (isSell(sug))
+        {
+            int    itemId = (int) invoke(sug, "getItemId");
+            Widget inv    = client.getWidget(467, 0);
+            if (inv == null) inv = client.getWidget(149, 0);
+            if (inv != null)
+            {
+                Widget item = findInventoryItem(inv, itemId);
+                if (item != null && !item.isHidden())
+                {
+                    emit("inventory_slot_" + (item.getIndex() + 1), "normal", item,
+                            new Rectangle(0, 0, 34, 32),
+                            ui, slotStr, sugMeta, itemName, dumpAlert);
+                    return;
+                }
+            }
+        }
+
+        overlay.clearHighlight();
+        panel.updateStatus("idle", itemName, false, false);
+        writeRaw(ui + slotStr + "action_required=false\naction=idle\ncopilot_status=idle\n"
+                + sugMeta + "x1=0\ny1=0\nx2=0\ny2=0\n");
+    }
+
+    private void resolveOfferScreen(Object sug, String ui, String slotStr,
+                                    String sugMeta, String itemName,
+                                    boolean dumpAlert) throws Exception
+    {
+        String  offerType     = client.getVarbitValue(4397) == 1 ? "sell" : "buy";
+        int     currentItemId = client.getVarpValue(1151);
+        int     offerPrice    = client.getVarbitValue(4398);
+        int     offerQuantity = client.getVarbitValue(4396);
+        boolean searchOpen    = client.getWidget(10616884) != null
+                && !client.getWidget(10616884).isHidden();
+
+        String  sugType   = (String) invoke(sug, "offerType");
+        int     sugItemId = (int)    invoke(sug, "getItemId");
+        int     sugPrice  = (int)    invoke(sug, "getPrice");
+        int     sugQty    = (int)    invoke(sug, "getQuantity");
+
+        boolean typeMatches = offerType.equals(sugType);
+        boolean itemMatches = currentItemId == sugItemId;
+
+        if (typeMatches && itemMatches && offerPrice == sugPrice && offerQuantity == sugQty)
+        {
+            Widget confirm = getOfferChild(58);
+            if (confirm != null)
+            {
+                emit("confirm", "normal", confirm, new Rectangle(1, 1, 150, 38),
+                        ui, slotStr, sugMeta, itemName, dumpAlert);
+                return;
+            }
+        }
+
+        if (typeMatches && itemMatches)
+        {
+            if (offerPrice != sugPrice)
+            {
+                Widget priceBtn = getOfferChild(54);
+                if (priceBtn != null)
+                {
+                    emit("set_price", "normal", priceBtn, new Rectangle(1, 6, 33, 23),
+                            ui, slotStr, sugMeta, itemName, dumpAlert);
+                    return;
+                }
+            }
+            if (offerQuantity != sugQty)
+            {
+                Widget  inv    = client.getWidget(467, 0);
+                if (inv == null) inv = client.getWidget(149, 0);
+                boolean useAll = inv != null && inventoryCount(inv, sugItemId) == sugQty;
+                Widget  qtyBtn = useAll ? getOfferChild(50) : getOfferChild(51);
+                if (qtyBtn != null)
+                {
+                    emit(useAll ? "qty_all" : "set_qty", "normal", qtyBtn,
+                            new Rectangle(1, 6, 33, 23),
+                            ui, slotStr, sugMeta, itemName, dumpAlert);
+                    return;
+                }
+            }
+        }
+        else if (typeMatches && currentItemId == -1 && searchOpen)
+        {
+            Widget results = client.getWidget(10616884);
+            if (results != null)
+            {
+                String name = (String) invoke(sug, "getName");
+                for (Widget w : results.getDynamicChildren())
+                {
+                    if (w.getName().equals("<col=ff9040>" + name + "</col>"))
+                    {
+                        emit("search_item", "normal", w, fullBounds(w),
+                                ui, slotStr, sugMeta, itemName, dumpAlert);
+                        return;
+                    }
+                }
+                Widget first = results.getChild(3);
+                if (first != null && first.getItemId() == sugItemId)
+                {
+                    emit("search_item", "normal", first, fullBounds(first),
+                            ui, slotStr, sugMeta, itemName, dumpAlert);
+                    return;
+                }
+            }
+        }
+        else
+        {
+            Widget back = client.getWidget(465, 4);
+            if (back != null)
+            {
+                emit("back", "normal", back, fullBounds(back),
+                        ui, slotStr, sugMeta, itemName, dumpAlert);
+                return;
+            }
+        }
+
+        overlay.clearHighlight();
+        panel.updateStatus("idle", itemName, false, false);
+        writeRaw(ui + slotStr + "action_required=false\naction=idle\ncopilot_status=idle\n"
+                + sugMeta + "x1=0\ny1=0\nx2=0\ny2=0\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Idle alert
+    // -----------------------------------------------------------------------
+    private void checkIdleAlert(String itemName)
+    {
+        if (!config.idleAlertEnabled()) return;
+        if (actionSinceMs == 0) return;
+        long elapsed = System.currentTimeMillis() - actionSinceMs;
+        if (elapsed > config.idleAlertSeconds() * 1000L)
+        {
+            discord.sendIdleAlert(itemName);
+            if (config.pushoverEnabled())
+                pushover.send("Action Pending",
+                        "Still waiting for action" +
+                                (itemName.isEmpty() ? "." : " on " + itemName + "."), false);
+            actionSinceMs = 0;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Emit
+    // -----------------------------------------------------------------------
+    private void emit(String action, String actionType, Widget w, Rectangle rel,
+                      String ui, String slotStr, String sugMeta,
+                      String itemName, boolean dumpAlert)
+    {
+        Rectangle b = w.getBounds();
+        if (b == null)
+        {
+            overlay.clearHighlight();
+            writeRaw(ui + slotStr + "action_required=false\naction=idle\ncopilot_status=idle\n"
+                    + sugMeta + "x1=0\ny1=0\nx2=0\ny2=0\n");
+            return;
+        }
+
+        overlay.setHighlight(
+                new Rectangle(b.x + rel.x, b.y + rel.y, rel.width, rel.height),
+                dumpAlert ? "dump" : actionType
+        );
+
+        java.awt.Canvas              canvas = client.getCanvas();
+        java.awt.Point               loc    = canvas.getLocationOnScreen();
+        java.awt.GraphicsConfiguration gc   = canvas.getGraphicsConfiguration();
+        double sx = gc.getDefaultTransform().getScaleX();
+        double sy = gc.getDefaultTransform().getScaleY();
+
+        int x1 = (int)((loc.x + b.x + rel.x)              * sx);
+        int y1 = (int)((loc.y + b.y + rel.y)              * sy);
+        int x2 = (int)((loc.x + b.x + rel.x + rel.width)  * sx);
+        int y2 = (int)((loc.y + b.y + rel.y + rel.height) * sy);
+
+        if (!action.equals(lastAction) || dumpAlert != lastDumpAlert
+                || !itemName.equals(lastItemName))
+        {
+            lastAction    = action;
+            lastItemName  = itemName;
+            lastDumpAlert = dumpAlert;
+            actionSinceMs = System.currentTimeMillis();
+
+            if (dumpAlert)
+            {
+                sound.playDumpAlert();
+                if (config.discordNotifyDumpAlert())
+                    discord.sendActionRequired(action, itemName, true);
+                if (config.pushoverEnabled() && config.pushoverNotifyDumpAlert())
+                    pushover.send("DUMP ALERT", itemName, true);
+            }
+            else
+            {
+                sound.playAction();
+                discord.sendActionRequired(action, itemName, false);
+                if (config.pushoverEnabled() && config.pushoverNotifyActionRequired())
+                    pushover.send("Action Required",
+                            action.replace("_", " ") +
+                                    (itemName.isEmpty() ? "" : " — " + itemName), false);
+            }
+        }
+
+        panel.updateStatus(action, itemName, true, dumpAlert);
+        if (config.sessionSummaryEnabled())
+            panel.updateSession(session.getTotalProfit(), session.getTotalFlips(),
+                    session.getBestFlip(), session);
+
+        if (config.fileOutputEnabled())
+        {
+            writeRaw(ui + slotStr
+                    + "action_required=true\n"
+                    + "action=" + action + "\n"
+                    + "copilot_status=active\n"
+                    + sugMeta
+                    + "x1=" + x1 + "\n"
+                    + "y1=" + y1 + "\n"
+                    + "x2=" + x2 + "\n"
+                    + "y2=" + y2 + "\n");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // UI state builder
+    // -----------------------------------------------------------------------
+    private boolean isVisible(int id, int child)
+    {
+        Widget w = client.getWidget(id, child);
+        return w != null && !w.isHidden();
+    }
+
+    private String buildUiState()
+    {
+        boolean loggedIn      = client.getGameState() == GameState.LOGGED_IN;
+        boolean geMainPage    = isVisible(465, 7);
+        boolean geOfferScreen = isVisible(465, 26);
+        boolean geHistoryOpen = isVisible(383, 0);
+        boolean bankOpen      = isVisible(12, 0);
+        boolean bankPinOpen   = isVisible(213, 0);
+
+        boolean invStandalone = isVisible(149, 0) && !geMainPage && !bankOpen;
+        boolean invGE         = isVisible(467, 0);
+        boolean inventoryOpen = invStandalone || invGE;
+
+        boolean equipOpen    = isVisible(387, 0);
+        boolean prayerOpen   = isVisible(541, 0);
+        boolean magicOpen    = isVisible(218, 0);
+        boolean combatOpen   = isVisible(593, 0);
+        boolean skillsOpen   = isVisible(320, 0);
+        boolean questOpen    = isVisible(399, 0);
+        boolean friendsOpen  = isVisible(429, 0);
+        boolean clanOpen     = isVisible(707, 0);
+        boolean logoutOpen   = isVisible(182, 0);
+        boolean settingsOpen = isVisible(116, 0);
+
+        String geOfferType = "none";
+        int    geSlotOpen  = 0;
+        if (geOfferScreen)
+        {
+            geOfferType = client.getVarbitValue(4397) == 1 ? "sell" : "buy";
+            geSlotOpen  = getOpenSlot() + 1;
+            if (geSlotOpen < 0) geSlotOpen = 0;
+        }
+
+        int    worldX = 0;
+        int    worldY = 0;
+        int    plane  = 0;
+        String playerName = "";
+        if (client.getLocalPlayer() != null)
+        {
+            if (client.getLocalPlayer().getName() != null)
+                playerName = client.getLocalPlayer().getName();
+            WorldPoint wp = client.getLocalPlayer().getWorldLocation();
+            worldX = wp.getX();
+            worldY = wp.getY();
+            plane  = wp.getPlane();
+        }
+
+        return "timestamp=" + LocalDateTime.now().format(TS_FORMAT) + "\n"
+                + "account=" + playerName + "\n"
+                + "logged_in=" + loggedIn + "\n"
+                + "world_x=" + worldX + "\n"
+                + "world_y=" + worldY + "\n"
+                + "plane=" + plane + "\n"
+                + "ge_main_page=" + geMainPage + "\n"
+                + "ge_offer_screen=" + geOfferScreen + "\n"
+                + "ge_offer_type=" + geOfferType + "\n"
+                + "ge_slot_open=" + geSlotOpen + "\n"
+                + "ge_history_open=" + geHistoryOpen + "\n"
+                + "bank_open=" + bankOpen + "\n"
+                + "bank_pin_open=" + bankPinOpen + "\n"
+                + "inventory_open=" + inventoryOpen + "\n"
+                + "equipment_open=" + equipOpen + "\n"
+                + "prayer_open=" + prayerOpen + "\n"
+                + "magic_open=" + magicOpen + "\n"
+                + "combat_options_open=" + combatOpen + "\n"
+                + "skills_open=" + skillsOpen + "\n"
+                + "quest_list_open=" + questOpen + "\n"
+                + "friends_open=" + friendsOpen + "\n"
+                + "clan_open=" + clanOpen + "\n"
+                + "logout_open=" + logoutOpen + "\n"
+                + "settings_open=" + settingsOpen + "\n";
+    }
+
+    private String buildSlotState()
+    {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 8; i++)
+        {
+            SlotState s = slots[i];
+            sb.append("slot_").append(i + 1).append("_status=").append(s.getStatus()).append("\n");
+            sb.append("slot_").append(i + 1).append("_item=").append(s.getItemName()).append("\n");
+            sb.append("slot_").append(i + 1).append("_type=").append(s.getOfferType()).append("\n");
+            sb.append("slot_").append(i + 1).append("_done=").append(s.getQuantityDone()).append("\n");
+            sb.append("slot_").append(i + 1).append("_total=").append(s.getQuantityTotal()).append("\n");
+            sb.append("slot_").append(i + 1).append("_price=").append(s.getPriceEach()).append("\n");
+        }
+        return sb.toString();
+    }
+
+    // -----------------------------------------------------------------------
+    // File output helpers
+    // -----------------------------------------------------------------------
+    private String idleFields()
+    {
+        String copilotStatus = suggestionManager == null ? "not_found" : "idle";
+        return "action_required=false\n"
+                + "action=idle\n"
+                + "copilot_status=" + copilotStatus + "\n"
+                + "item_name=\n"
+                + "item_id=\n"
+                + "offer_type=\n"
+                + "target_price=\n"
+                + "target_quantity=\n"
+                + "is_dump_alert=false\n"
+                + "x1=0\ny1=0\nx2=0\ny2=0\n";
+    }
+
+    private void writeIdle()
+    {
+        writeRaw("timestamp=" + LocalDateTime.now().format(TS_FORMAT) + "\n"
+                + "account=\n"
+                + "logged_in=false\n"
+                + "world_x=0\n"
+                + "world_y=0\n"
+                + "plane=0\n"
+                + "ge_main_page=false\n"
+                + "ge_offer_screen=false\n"
+                + "ge_offer_type=none\n"
+                + "ge_slot_open=0\n"
+                + "ge_history_open=false\n"
+                + "bank_open=false\n"
+                + "bank_pin_open=false\n"
+                + "inventory_open=false\n"
+                + "equipment_open=false\n"
+                + "prayer_open=false\n"
+                + "magic_open=false\n"
+                + "combat_options_open=false\n"
+                + "skills_open=false\n"
+                + "quest_list_open=false\n"
+                + "friends_open=false\n"
+                + "clan_open=false\n"
+                + "logout_open=false\n"
+                + "settings_open=false\n"
+                + buildSlotState()
+                + idleFields());
+    }
+
+    private void writeError(String reason)
+    {
+        writeRaw("timestamp=" + LocalDateTime.now().format(TS_FORMAT) + "\n"
+                + "account=\n"
+                + "logged_in=false\n"
+                + "world_x=0\n"
+                + "world_y=0\n"
+                + "plane=0\n"
+                + "ge_main_page=false\n"
+                + "ge_offer_screen=false\n"
+                + "ge_offer_type=none\n"
+                + "ge_slot_open=0\n"
+                + "ge_history_open=false\n"
+                + "bank_open=false\n"
+                + "bank_pin_open=false\n"
+                + "inventory_open=false\n"
+                + "equipment_open=false\n"
+                + "prayer_open=false\n"
+                + "magic_open=false\n"
+                + "combat_options_open=false\n"
+                + "skills_open=false\n"
+                + "quest_list_open=false\n"
+                + "friends_open=false\n"
+                + "clan_open=false\n"
+                + "logout_open=false\n"
+                + "settings_open=false\n"
+                + buildSlotState()
+                + "action_required=false\n"
+                + "action=" + reason + "\n"
+                + "copilot_status=not_found\n"
+                + "x1=0\ny1=0\nx2=0\ny2=0\n");
+    }
+
+    private void writeRaw(String content)
+    {
+        if (!config.fileOutputEnabled()) return;
+
+        String playerName = "";
+        if (client.getLocalPlayer() != null
+                && client.getLocalPlayer().getName() != null)
+            playerName = client.getLocalPlayer().getName() + "_";
+
+        String folder = config.outputFolder();
+        if (!folder.endsWith("\\") && !folder.endsWith("/"))
+            folder += "\\";
+        String path = folder + playerName + "ge_visual_aid.txt";
+
+        try
+        {
+            java.io.File dir = new java.io.File(folder);
+            if (!dir.exists()) dir.mkdirs();
+        }
+        catch (Exception e)
+        {
+            log.warn("GEVisualAid could not create folder: {}", e.getMessage());
+        }
+
+        try (FileWriter fw = new FileWriter(path, false))
+        {
+            fw.write(content);
+        }
+        catch (IOException e)
+        {
+            log.warn("GEVisualAid write error: {}", e.getMessage());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Widget helpers
+    // -----------------------------------------------------------------------
+    private Widget getOfferChild(int child)
+    {
+        Widget c = client.getWidget(465, 26);
+        return c == null ? null : c.getChild(child);
+    }
+
+    private Rectangle fullBounds(Widget w)
+    {
+        return new Rectangle(0, 0, w.getWidth(), w.getHeight());
+    }
+
+    private Widget findInventoryItem(Widget inv, int unnotedId)
+    {
+        Widget noted = null, unnoted = null;
+        for (Widget w : inv.getDynamicChildren())
+        {
+            int id = w.getItemId();
+            if (id < 0) continue;
+            ItemComposition c = client.getItemDefinition(id);
+            if (c.getNote() != -1 && c.getLinkedNoteId() == unnotedId) noted = w;
+            else if (id == unnotedId) unnoted = w;
+        }
+        return noted != null ? noted : unnoted;
+    }
+
+    private int inventoryCount(Widget inv, int itemId)
+    {
+        int total = 0;
+        for (Widget w : inv.getDynamicChildren())
+            if (w.getItemId() == itemId) total += w.getItemQuantity();
+        return total;
+    }
+
+    // -----------------------------------------------------------------------
+    // Suggestion type checks
+    // -----------------------------------------------------------------------
+    private boolean isBuy(Object s)    throws Exception { return (boolean) invoke(s, "isBuySuggestion"); }
+    private boolean isSell(Object s)   throws Exception { return (boolean) invoke(s, "isSellSuggestion"); }
+    private boolean isAbort(Object s)  throws Exception { return (boolean) invoke(s, "isAbortSuggestion"); }
+    private boolean isModify(Object s) throws Exception { return (boolean) invoke(s, "isModifySuggestion"); }
+    private boolean isWait(Object s)   throws Exception { return (boolean) invoke(s, "isWaitSuggestion"); }
+    private int     getOpenSlot()      { return client.getVarbitValue(4439) - 1; }
+
+    private String getStringSafe(Object o, String m)
+    {
+        try { return (String) invoke(o, m); } catch (Exception e) { return ""; }
+    }
+
+    private int getIntSafe(Object o, String m)
+    {
+        try { return (int) invoke(o, m); } catch (Exception e) { return -1; }
+    }
+
+    private boolean getBoolSafe(Object o, String m)
+    {
+        try { return (boolean) invoke(o, m); } catch (Exception e) { return false; }
+    }
+
+    // -----------------------------------------------------------------------
+    // Reflection — Copilot link (optional enhancement)
+    // -----------------------------------------------------------------------
+    private void linkToCopilot()
+    {
+        for (Plugin p : pluginManager.getPlugins())
+        {
+            if (!p.getClass().getName().equals(
+                    "com.flippingcopilot.controller.FlippingCopilotPlugin")) continue;
+
+            log.info("GEVisualAid: found FlippingCopilotPlugin, linking...");
+            suggestionManager    = getField(p, "suggestionManager");
+            accountStatusManager = getField(p, "accountStatusManager");
+
+            if (suggestionManager != null)
+                log.info("GEVisualAid: linked to Copilot successfully");
+            else
+                log.warn("GEVisualAid: could not read Copilot fields");
+            return;
+        }
+        log.warn("GEVisualAid: FlippingCopilotPlugin not loaded — running in GE monitor mode only");
+    }
+
+    private Object getField(Object obj, String name)
+    {
+        try
+        {
+            Field f = obj.getClass().getDeclaredField(name);
+            f.setAccessible(true);
+            return f.get(obj);
+        }
+        catch (Exception e)
+        {
+            log.warn("getField({}) failed: {}", name, e.getMessage());
+            return null;
+        }
+    }
+
+    private Object invoke(Object obj, String methodName, Object... args) throws Exception
+    {
+        for (Method m : obj.getClass().getDeclaredMethods())
+        {
+            if (m.getName().equals(methodName) && m.getParameterCount() == args.length)
+            {
+                m.setAccessible(true);
+                return m.invoke(obj, args);
+            }
+        }
+        throw new NoSuchMethodException(methodName + " not found on "
+                + obj.getClass().getSimpleName());
+    }
+}

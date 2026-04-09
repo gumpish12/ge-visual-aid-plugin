@@ -1,0 +1,6 @@
+{
+  "displayName": "GE Visual Aid",
+  "description": "Grand Exchange accessibility and notification assistant with overlay highlights, audio alerts, Discord and Pushover notifications, offer progress tracking and assistive technology integration.",
+  "tags": ["accessibility", "ge", "grand exchange", "notification", "discord", "overlay", "visual"],
+  "hidden": false
+}

@@ -14,7 +14,7 @@ repositories {
 }
 
 def runeLiteVersion = 'latest.release'
-def pluginMainClass = 'com.example.ExamplePluginTest'
+def pluginMainClass = 'com.ge.gevisualaid.GEVisualAidTest'
 
 dependencies {
 	compileOnly group: 'net.runelite', name:'client', version: runeLiteVersion
@@ -27,7 +27,7 @@ dependencies {
 	testImplementation group: 'net.runelite', name:'jshell', version: runeLiteVersion
 }
 
-group = 'com.example'
+group = 'com.ge.gevisualaid'
 version = '1.0-SNAPSHOT'
 
 tasks.withType(JavaCompile).configureEach {
@@ -40,7 +40,11 @@ tasks.register('run', JavaExec) {
 	mainClass = pluginMainClass
 
 	jvmArgs "-ea"
-	args "--developer-mode", "--debug"
+	args "--developer-mode", "--debug", "--insecure-skip-tls-verification"
+
+	doFirst {
+		println "Launching RuneLite with credentials from: ${System.getProperty('user.home')}\\.runelite\\credentials.properties"
+	}
 }
 
 tasks.register('shadowJar', Jar) {
