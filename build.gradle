@@ -43,7 +43,8 @@ tasks.register('run', JavaExec) {
 	args "--developer-mode", "--debug", "--insecure-skip-tls-verification"
 
 	doFirst {
-		println "Launching RuneLite with credentials from: ${System.getProperty('user.home')}\\.runelite\\credentials.properties"
+		println "Launching RuneLite with credentials from: " +
+				"${System.getProperty('user.home')}\\.runelite\\credentials.properties"
 	}
 }
 
