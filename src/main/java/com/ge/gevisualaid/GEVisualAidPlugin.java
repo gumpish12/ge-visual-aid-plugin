@@ -6,11 +6,14 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
+import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
+import net.runelite.api.ItemContainer;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GrandExchangeOfferChanged;
+import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -31,6 +34,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 
 @Slf4j
 @PluginDescriptor(
@@ -64,7 +69,20 @@ public class GEVisualAidPlugin extends Plugin
     private Object           accountStatusManager = null;
     private NavigationButton navButton;
 
-    private final SlotState[] slots = new SlotState[8];
+    private final SlotState[]     slots          = new SlotState[8];
+    private final InventorySlot[] inventorySlots = new InventorySlot[28];
+
+    private long inventoryValueGp = 0;
+    private long bankValueGp      = 0;
+    private long equipmentValueGp = 0;
+
+    private long lastInputMs   = System.currentTimeMillis();
+    private long lastMouseTicks = 0;
+    private long lastKeyTicks   = 0;
+    private static final long LOGOUT_THRESHOLD_SECONDS = 1200; // 20 minutes
+
+    private long   lastSuggestionChangeMs = 0;
+    private String lastSuggestionKey      = "";
 
     private String  lastAction    = "";
     private String  lastItemName  = "";
@@ -86,7 +104,8 @@ public class GEVisualAidPlugin extends Plugin
     @Override
     protected void startUp()
     {
-        for (int i = 0; i < 8; i++) slots[i] = new SlotState();
+        for (int i = 0; i < 8; i++)  slots[i]          = new SlotState();
+        for (int i = 0; i < 28; i++) inventorySlots[i]  = new InventorySlot();
         session.load();
         overlayManager.add(overlay);
         linkToCopilot();
@@ -127,7 +146,7 @@ public class GEVisualAidPlugin extends Plugin
     }
 
     // -----------------------------------------------------------------------
-    // Game state change — instant logout detection
+    // Game state change
     // -----------------------------------------------------------------------
     @Subscribe
     public void onGameStateChanged(GameStateChanged event)
@@ -136,49 +155,90 @@ public class GEVisualAidPlugin extends Plugin
                 || event.getGameState() == GameState.HOPPING)
         {
             overlay.clearHighlight();
-            writeRaw("timestamp=" + LocalDateTime.now().format(TS_FORMAT) + "\n"
-                    + "account=\n"
-                    + "logged_in=false\n"
-                    + "world_x=0\n"
-                    + "world_y=0\n"
-                    + "plane=0\n"
-                    + "ge_main_page=false\n"
-                    + "ge_offer_screen=false\n"
-                    + "ge_offer_type=none\n"
-                    + "ge_slot_open=0\n"
-                    + "ge_history_open=false\n"
-                    + "bank_open=false\n"
-                    + "bank_pin_open=false\n"
-                    + "inventory_open=false\n"
-                    + "equipment_open=false\n"
-                    + "prayer_open=false\n"
-                    + "magic_open=false\n"
-                    + "combat_options_open=false\n"
-                    + "skills_open=false\n"
-                    + "quest_list_open=false\n"
-                    + "friends_open=false\n"
-                    + "clan_open=false\n"
-                    + "logout_open=false\n"
-                    + "settings_open=false\n"
-                    + buildSlotState()
-                    + "action_required=false\n"
-                    + "action=logged_out\n"
-                    + "copilot_status=not_found\n"
-                    + "item_name=\nitem_id=\noffer_type=\ntarget_price=\ntarget_quantity=\nis_dump_alert=false\n"
-                    + "x1=0\ny1=0\nx2=0\ny2=0\n");
+            writeLoggedOut();
         }
     }
 
     // -----------------------------------------------------------------------
-    // GrandExchangeOfferChanged — independent of Copilot
+    // Item container tracking — inventory (93), bank (95), equipment (94)
+    // -----------------------------------------------------------------------
+    @Subscribe
+    public void onItemContainerChanged(ItemContainerChanged event)
+    {
+        switch (event.getContainerId())
+        {
+            case 93: updateInventory(event.getItemContainer()); break;
+            case 95: updateBank(event.getItemContainer());      break;
+            case 94: updateEquipment(event.getItemContainer()); break;
+        }
+    }
+
+    private void updateInventory(ItemContainer container)
+    {
+        if (container == null) return;
+        Item[] items = container.getItems();
+        long totalValue = 0;
+        for (int i = 0; i < 28; i++)
+        {
+            InventorySlot slot = inventorySlots[i];
+            if (i >= items.length || items[i].getId() <= 0)
+            {
+                slot.setItemId(-1);
+                slot.setItemName("");
+                slot.setQuantity(0);
+                slot.setValueEach(0);
+                continue;
+            }
+            Item item  = items[i];
+            int  id    = item.getId();
+            int  qty   = item.getQuantity();
+            int  price = itemManager.getItemPrice(id);
+            String name = "";
+            try { name = itemManager.getItemComposition(id).getName(); }
+            catch (Exception e) { name = "Unknown"; }
+            slot.setItemId(id);
+            slot.setItemName(name);
+            slot.setQuantity(qty);
+            slot.setValueEach(price);
+            totalValue += (long) price * qty;
+        }
+        inventoryValueGp = totalValue;
+    }
+
+    private void updateBank(ItemContainer container)
+    {
+        if (container == null) return;
+        long totalValue = 0;
+        for (Item item : container.getItems())
+        {
+            if (item.getId() <= 0) continue;
+            totalValue += (long) itemManager.getItemPrice(item.getId()) * item.getQuantity();
+        }
+        bankValueGp = totalValue;
+    }
+
+    private void updateEquipment(ItemContainer container)
+    {
+        if (container == null) return;
+        long totalValue = 0;
+        for (Item item : container.getItems())
+        {
+            if (item.getId() <= 0) continue;
+            totalValue += (long) itemManager.getItemPrice(item.getId()) * item.getQuantity();
+        }
+        equipmentValueGp = totalValue;
+    }
+
+    // -----------------------------------------------------------------------
+    // GrandExchangeOfferChanged
     // -----------------------------------------------------------------------
     @Subscribe
     public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event)
     {
-        int            slotIndex = event.getSlot();
-        GrandExchangeOffer offer = event.getOffer();
-        SlotState      s         = slots[slotIndex];
-        String         prevStatus = s.getStatus();
+        int                slotIndex  = event.getSlot();
+        GrandExchangeOffer offer      = event.getOffer();
+        SlotState          s          = slots[slotIndex];
+        String             prevStatus = s.getStatus();
 
         s.setQuantityDone(offer.getQuantitySold());
         s.setQuantityTotal(offer.getTotalQuantity());
@@ -190,35 +250,23 @@ public class GEVisualAidPlugin extends Plugin
         if (offer.getItemId() > 0)
         {
             s.setItemId(offer.getItemId());
-            try
-            {
-                s.setItemName(itemManager.getItemComposition(offer.getItemId()).getName());
-            }
+            try { s.setItemName(itemManager.getItemComposition(offer.getItemId()).getName()); }
             catch (Exception e) { s.setItemName("Unknown"); }
         }
 
         switch (state)
         {
-            case BUYING:
-            case BOUGHT:
-                s.setOfferType("buy");
-                break;
-            case SELLING:
-            case SOLD:
-                s.setOfferType("sell");
-                break;
-            default:
-                break;
+            case BUYING: case BOUGHT:   s.setOfferType("buy");  break;
+            case SELLING: case SOLD:    s.setOfferType("sell"); break;
+            default: break;
         }
 
         switch (state)
         {
             case EMPTY:
                 s.setStatus("empty");
-                s.setItemId(-1);
-                s.setItemName("");
-                s.setQuantityDone(0);
-                s.setQuantityTotal(0);
+                s.setItemId(-1); s.setItemName("");
+                s.setQuantityDone(0); s.setQuantityTotal(0);
                 break;
             case BUYING:
                 s.setStatus("buying");
@@ -236,10 +284,9 @@ public class GEVisualAidPlugin extends Plugin
                 s.setStatus("complete");
                 handleOfferComplete(slotIndex, s, prevStatus);
                 break;
-            case CANCELLED_BUY:
-            case CANCELLED_SELL:
-                s.setStatus("cancelled");
-                break;
+            case CANCELLED_BUY: case CANCELLED_SELL:
+            s.setStatus("cancelled");
+            break;
         }
 
         panel.updateSlot(slotIndex, s.getStatus(), s.getItemName(),
@@ -250,7 +297,6 @@ public class GEVisualAidPlugin extends Plugin
     private void handleOfferComplete(int slotIndex, SlotState s, String prevStatus)
     {
         if ("complete".equals(prevStatus)) return;
-
         long profit = 0;
         if (config.profitTrackingEnabled() && "sell".equals(s.getOfferType()))
             profit = session.recordSell(s.getItemId(), s.getPriceEach(), s.getQuantityDone());
@@ -345,15 +391,16 @@ public class GEVisualAidPlugin extends Plugin
     // -----------------------------------------------------------------------
     private void resolveAndWrite() throws Exception
     {
-        String  ui     = buildUiState();
+        String  ui      = buildUiState();
         String  slotStr = buildSlotState();
-        boolean geOpen = isVisible(465, 7) || isVisible(465, 26) || isVisible(465, 4);
+        String  invStr  = buildInventoryState();
+        boolean geOpen  = isVisible(465, 7) || isVisible(465, 26) || isVisible(465, 4);
 
         if (!geOpen)
         {
             overlay.clearHighlight();
             panel.updateStatus("idle", "", false, false);
-            writeRaw(ui + slotStr + idleFields());
+            writeRaw(ui + slotStr + invStr + idleFields());
             return;
         }
 
@@ -365,7 +412,7 @@ public class GEVisualAidPlugin extends Plugin
             overlay.clearHighlight();
             checkIdleAlert("");
             panel.updateStatus("idle", "", false, false);
-            writeRaw(ui + slotStr + idleFields());
+            writeRaw(ui + slotStr + invStr + idleFields());
             return;
         }
 
@@ -376,6 +423,13 @@ public class GEVisualAidPlugin extends Plugin
         int     targetQty   = getIntSafe(suggestion, "getQuantity");
         boolean dumpAlert   = getBoolSafe(suggestion, "isDumpAlert");
 
+        String suggestionKey = itemName + offerType + targetPrice + targetQty + dumpAlert;
+        if (!suggestionKey.equals(lastSuggestionKey))
+        {
+            lastSuggestionKey      = suggestionKey;
+            lastSuggestionChangeMs = System.currentTimeMillis();
+        }
+
         String sugMeta = "item_name=" + itemName + "\n"
                 + "item_id=" + itemId + "\n"
                 + "offer_type=" + offerType + "\n"
@@ -385,12 +439,12 @@ public class GEVisualAidPlugin extends Plugin
 
         boolean slotOpen = getOpenSlot() != -1;
         if (!slotOpen)
-            resolveHomeScreen(suggestion, ui, slotStr, sugMeta, itemName, dumpAlert);
+            resolveHomeScreen(suggestion, ui, slotStr, invStr, sugMeta, itemName, dumpAlert);
         else
-            resolveOfferScreen(suggestion, ui, slotStr, sugMeta, itemName, dumpAlert);
+            resolveOfferScreen(suggestion, ui, slotStr, invStr, sugMeta, itemName, dumpAlert);
     }
 
-    private void resolveHomeScreen(Object sug, String ui, String slotStr,
+    private void resolveHomeScreen(Object sug, String ui, String slotStr, String invStr,
                                    String sugMeta, String itemName,
                                    boolean dumpAlert) throws Exception
     {
@@ -408,8 +462,9 @@ public class GEVisualAidPlugin extends Plugin
                 if (btn != null)
                 {
                     emit("master_collect", "collect", btn,
-                            new Rectangle(2, 1, 81, 18),
-                            ui, slotStr, sugMeta, itemName, dumpAlert);
+                            new Rectangle(2, 1, 81, 18), null, null,
+                            ui, slotStr, invStr, sugMeta, itemName, dumpAlert,
+                            new String[]{"master_collect"});
                     discord.sendCollectNeeded();
                     if (config.pushoverEnabled())
                         pushover.send("Collect Needed",
@@ -424,8 +479,10 @@ public class GEVisualAidPlugin extends Plugin
             Widget slot  = client.getWidget(465, 7 + boxId);
             if (slot != null)
             {
-                emit("abort_slot_" + (boxId + 1), "abort", slot,
-                        fullBounds(slot), ui, slotStr, sugMeta, itemName, dumpAlert);
+                emit("abort_slot_" + (boxId + 1), "abort", slot, fullBounds(slot),
+                        null, null,
+                        ui, slotStr, invStr, sugMeta, itemName, dumpAlert,
+                        new String[]{"abort_slot_" + (boxId + 1)});
                 return;
             }
         }
@@ -435,8 +492,10 @@ public class GEVisualAidPlugin extends Plugin
             Widget slot  = client.getWidget(465, 7 + boxId);
             if (slot != null && !slot.isHidden())
             {
-                emit("modify_slot_" + (boxId + 1), "modify", slot,
-                        fullBounds(slot), ui, slotStr, sugMeta, itemName, dumpAlert);
+                emit("modify_slot_" + (boxId + 1), "modify", slot, fullBounds(slot),
+                        null, null,
+                        ui, slotStr, invStr, sugMeta, itemName, dumpAlert,
+                        new String[]{"modify_slot_" + (boxId + 1)});
                 return;
             }
         }
@@ -452,8 +511,9 @@ public class GEVisualAidPlugin extends Plugin
                     if (buyBtn != null && !buyBtn.isHidden())
                     {
                         emit("buy_slot_" + (slotId + 1), "normal", buyBtn,
-                                new Rectangle(0, 0, 45, 44),
-                                ui, slotStr, sugMeta, itemName, dumpAlert);
+                                new Rectangle(0, 0, 45, 44), null, null,
+                                ui, slotStr, invStr, sugMeta, itemName, dumpAlert,
+                                new String[]{"buy_slot_" + (slotId + 1)});
                         return;
                     }
                 }
@@ -470,8 +530,9 @@ public class GEVisualAidPlugin extends Plugin
                 if (item != null && !item.isHidden())
                 {
                     emit("inventory_slot_" + (item.getIndex() + 1), "normal", item,
-                            new Rectangle(0, 0, 34, 32),
-                            ui, slotStr, sugMeta, itemName, dumpAlert);
+                            new Rectangle(0, 0, 34, 32), null, null,
+                            ui, slotStr, invStr, sugMeta, itemName, dumpAlert,
+                            new String[]{"inventory_slot_" + (item.getIndex() + 1)});
                     return;
                 }
             }
@@ -479,11 +540,15 @@ public class GEVisualAidPlugin extends Plugin
 
         overlay.clearHighlight();
         panel.updateStatus("idle", itemName, false, false);
-        writeRaw(ui + slotStr + "action_required=false\naction=idle\ncopilot_status=idle\n"
-                + sugMeta + "x1=0\ny1=0\nx2=0\ny2=0\n");
+        writeRaw(ui + slotStr + invStr
+                + "action_required=false\naction=idle\ncopilot_status=idle\n"
+                + "pending_actions=\n"
+                + "x1=0\ny1=0\nx2=0\ny2=0\n"
+                + "action2=\nx1_2=0\ny1_2=0\nx2_2=0\ny2_2=0\n"
+                + sugMeta);
     }
 
-    private void resolveOfferScreen(Object sug, String ui, String slotStr,
+    private void resolveOfferScreen(Object sug, String ui, String slotStr, String invStr,
                                     String sugMeta, String itemName,
                                     boolean dumpAlert) throws Exception
     {
@@ -502,13 +567,47 @@ public class GEVisualAidPlugin extends Plugin
         boolean typeMatches = offerType.equals(sugType);
         boolean itemMatches = currentItemId == sugItemId;
 
+        List<String> pending = new ArrayList<>();
+
+        if (typeMatches && itemMatches)
+        {
+            if (offerPrice != sugPrice)  pending.add("set_price");
+            if (offerQuantity != sugQty) pending.add("set_qty");
+            if (pending.isEmpty())       pending.add("confirm");
+        }
+        else if (typeMatches && currentItemId == -1 && searchOpen)
+        {
+            pending.add("search_item");
+        }
+        else
+        {
+            pending.add("back");
+        }
+
+        // Resolve widget for second action if two pending
+        Widget secondWidget = null;
+        Rectangle secondRel = null;
+        if (pending.size() >= 2)
+        {
+            // If both set_price and set_qty are pending,
+            // primary = set_price, secondary = set_qty
+            Widget inv = client.getWidget(467, 0);
+            if (inv == null) inv = client.getWidget(149, 0);
+            boolean useAll = inv != null && inventoryCount(inv, sugItemId) == sugQty;
+            secondWidget = useAll ? getOfferChild(50) : getOfferChild(51);
+            secondRel    = new Rectangle(1, 6, 33, 23);
+        }
+
+        String[] pendingArr = pending.toArray(new String[0]);
+
         if (typeMatches && itemMatches && offerPrice == sugPrice && offerQuantity == sugQty)
         {
             Widget confirm = getOfferChild(58);
             if (confirm != null)
             {
                 emit("confirm", "normal", confirm, new Rectangle(1, 1, 150, 38),
-                        ui, slotStr, sugMeta, itemName, dumpAlert);
+                        null, null,
+                        ui, slotStr, invStr, sugMeta, itemName, dumpAlert, pendingArr);
                 return;
             }
         }
@@ -521,7 +620,8 @@ public class GEVisualAidPlugin extends Plugin
                 if (priceBtn != null)
                 {
                     emit("set_price", "normal", priceBtn, new Rectangle(1, 6, 33, 23),
-                            ui, slotStr, sugMeta, itemName, dumpAlert);
+                            secondWidget, secondRel,
+                            ui, slotStr, invStr, sugMeta, itemName, dumpAlert, pendingArr);
                     return;
                 }
             }
@@ -533,9 +633,10 @@ public class GEVisualAidPlugin extends Plugin
                 Widget  qtyBtn = useAll ? getOfferChild(50) : getOfferChild(51);
                 if (qtyBtn != null)
                 {
-                    emit(useAll ? "qty_all" : "set_qty", "normal", qtyBtn,
-                            new Rectangle(1, 6, 33, 23),
-                            ui, slotStr, sugMeta, itemName, dumpAlert);
+                    String actionName = useAll ? "qty_all" : "set_qty";
+                    emit(actionName, "normal", qtyBtn, new Rectangle(1, 6, 33, 23),
+                            null, null,
+                            ui, slotStr, invStr, sugMeta, itemName, dumpAlert, pendingArr);
                     return;
                 }
             }
@@ -551,7 +652,8 @@ public class GEVisualAidPlugin extends Plugin
                     if (w.getName().equals("<col=ff9040>" + name + "</col>"))
                     {
                         emit("search_item", "normal", w, fullBounds(w),
-                                ui, slotStr, sugMeta, itemName, dumpAlert);
+                                null, null,
+                                ui, slotStr, invStr, sugMeta, itemName, dumpAlert, pendingArr);
                         return;
                     }
                 }
@@ -559,7 +661,8 @@ public class GEVisualAidPlugin extends Plugin
                 if (first != null && first.getItemId() == sugItemId)
                 {
                     emit("search_item", "normal", first, fullBounds(first),
-                            ui, slotStr, sugMeta, itemName, dumpAlert);
+                            null, null,
+                            ui, slotStr, invStr, sugMeta, itemName, dumpAlert, pendingArr);
                     return;
                 }
             }
@@ -570,15 +673,20 @@ public class GEVisualAidPlugin extends Plugin
             if (back != null)
             {
                 emit("back", "normal", back, fullBounds(back),
-                        ui, slotStr, sugMeta, itemName, dumpAlert);
+                        null, null,
+                        ui, slotStr, invStr, sugMeta, itemName, dumpAlert, pendingArr);
                 return;
             }
         }
 
         overlay.clearHighlight();
         panel.updateStatus("idle", itemName, false, false);
-        writeRaw(ui + slotStr + "action_required=false\naction=idle\ncopilot_status=idle\n"
-                + sugMeta + "x1=0\ny1=0\nx2=0\ny2=0\n");
+        writeRaw(ui + slotStr + invStr
+                + "action_required=false\naction=idle\ncopilot_status=idle\n"
+                + "pending_actions=\n"
+                + "x1=0\ny1=0\nx2=0\ny2=0\n"
+                + "action2=\nx1_2=0\ny1_2=0\nx2_2=0\ny2_2=0\n"
+                + sugMeta);
     }
 
     // -----------------------------------------------------------------------
@@ -603,16 +711,22 @@ public class GEVisualAidPlugin extends Plugin
     // -----------------------------------------------------------------------
     // Emit
     // -----------------------------------------------------------------------
-    private void emit(String action, String actionType, Widget w, Rectangle rel,
-                      String ui, String slotStr, String sugMeta,
-                      String itemName, boolean dumpAlert)
+    private void emit(String action, String actionType,
+                      Widget w, Rectangle rel,
+                      Widget w2, Rectangle rel2,
+                      String ui, String slotStr, String invStr, String sugMeta,
+                      String itemName, boolean dumpAlert, String[] pendingActions)
     {
         Rectangle b = w.getBounds();
         if (b == null)
         {
             overlay.clearHighlight();
-            writeRaw(ui + slotStr + "action_required=false\naction=idle\ncopilot_status=idle\n"
-                    + sugMeta + "x1=0\ny1=0\nx2=0\ny2=0\n");
+            writeRaw(ui + slotStr + invStr
+                    + "action_required=false\naction=idle\ncopilot_status=idle\n"
+                    + "pending_actions=\n"
+                    + "x1=0\ny1=0\nx2=0\ny2=0\n"
+                    + "action2=\nx1_2=0\ny1_2=0\nx2_2=0\ny2_2=0\n"
+                    + sugMeta);
             return;
         }
 
@@ -621,16 +735,32 @@ public class GEVisualAidPlugin extends Plugin
                 dumpAlert ? "dump" : actionType
         );
 
-        java.awt.Canvas              canvas = client.getCanvas();
-        java.awt.Point               loc    = canvas.getLocationOnScreen();
-        java.awt.GraphicsConfiguration gc   = canvas.getGraphicsConfiguration();
+        java.awt.Canvas            canvas = client.getCanvas();
+        java.awt.Point             loc    = canvas.getLocationOnScreen();
+        java.awt.GraphicsConfiguration gc = canvas.getGraphicsConfiguration();
         double sx = gc.getDefaultTransform().getScaleX();
         double sy = gc.getDefaultTransform().getScaleY();
 
-        int x1 = (int)((loc.x + b.x + rel.x)              * sx);
-        int y1 = (int)((loc.y + b.y + rel.y)              * sy);
-        int x2 = (int)((loc.x + b.x + rel.x + rel.width)  * sx);
-        int y2 = (int)((loc.y + b.y + rel.y + rel.height) * sy);
+        int x1 = (int)((loc.x + b.x + rel.x)             * sx);
+        int y1 = (int)((loc.y + b.y + rel.y)             * sy);
+        int x2 = (int)((loc.x + b.x + rel.x + rel.width) * sx);
+        int y2 = (int)((loc.y + b.y + rel.y + rel.height)* sy);
+
+        // Second action coordinates
+        int    x1_2 = 0, y1_2 = 0, x2_2 = 0, y2_2 = 0;
+        String action2 = "";
+        if (w2 != null && rel2 != null && pendingActions.length >= 2)
+        {
+            Rectangle b2 = w2.getBounds();
+            if (b2 != null)
+            {
+                x1_2   = (int)((loc.x + b2.x + rel2.x)              * sx);
+                y1_2   = (int)((loc.y + b2.y + rel2.y)              * sy);
+                x2_2   = (int)((loc.x + b2.x + rel2.x + rel2.width) * sx);
+                y2_2   = (int)((loc.y + b2.y + rel2.y + rel2.height)* sy);
+                action2 = pendingActions[1];
+            }
+        }
 
         if (!action.equals(lastAction) || dumpAlert != lastDumpAlert
                 || !itemName.equals(lastItemName))
@@ -666,15 +796,22 @@ public class GEVisualAidPlugin extends Plugin
 
         if (config.fileOutputEnabled())
         {
-            writeRaw(ui + slotStr
+            String pendingStr = String.join(",", pendingActions);
+            writeRaw(ui + slotStr + invStr
                     + "action_required=true\n"
                     + "action=" + action + "\n"
+                    + "pending_actions=" + pendingStr + "\n"
                     + "copilot_status=active\n"
                     + sugMeta
                     + "x1=" + x1 + "\n"
                     + "y1=" + y1 + "\n"
                     + "x2=" + x2 + "\n"
-                    + "y2=" + y2 + "\n");
+                    + "y2=" + y2 + "\n"
+                    + "action2=" + action2 + "\n"
+                    + "x1_2=" + x1_2 + "\n"
+                    + "y1_2=" + y1_2 + "\n"
+                    + "x2_2=" + x2_2 + "\n"
+                    + "y2_2=" + y2_2 + "\n");
         }
     }
 
@@ -685,6 +822,64 @@ public class GEVisualAidPlugin extends Plugin
     {
         Widget w = client.getWidget(id, child);
         return w != null && !w.isHidden();
+    }
+
+    private long getPlayerIdleSeconds()
+    {
+        long mouseTicks = client.getMouseIdleTicks();
+        long keyTicks   = client.getKeyboardIdleTicks();
+
+        if (mouseTicks < lastMouseTicks || keyTicks < lastKeyTicks)
+        {
+            lastInputMs = System.currentTimeMillis();
+        }
+
+        lastMouseTicks = mouseTicks;
+        lastKeyTicks   = keyTicks;
+
+        return (System.currentTimeMillis() - lastInputMs) / 1000L;
+    }
+
+    private long getCopilotIdleSeconds()
+    {
+        if (lastSuggestionChangeMs == 0) return 0;
+        return (System.currentTimeMillis() - lastSuggestionChangeMs) / 1000;
+    }
+
+    private long getGeSlotsTotalValue()
+    {
+        long v = 0;
+        for (SlotState s : slots)
+            if (!"empty".equals(s.getStatus()) && !"cancelled".equals(s.getStatus()))
+                v += (long) s.getPriceEach() * s.getQuantityTotal();
+        return v;
+    }
+
+    private int getServerRestartSeconds()
+    {
+        // Widget 229,1 contains the server restart countdown text
+        Widget w = client.getWidget(229, 1);
+        if (w == null || w.isHidden()) return -1;
+        try
+        {
+            String text = w.getText();
+            if (text == null) return -1;
+            // Text format is typically "System update in: X minutes, Y seconds"
+            text = text.replaceAll("[^0-9:]", " ").trim();
+            String[] parts = text.trim().split("\\s+");
+            if (parts.length >= 2)
+            {
+                int mins = Integer.parseInt(parts[0]);
+                int secs = Integer.parseInt(parts[1]);
+                return mins * 60 + secs;
+            }
+            else if (parts.length == 1)
+            {
+                return Integer.parseInt(parts[0]);
+            }
+        }
+        catch (Exception e) { /* ignore parse errors */ }
+        return -1;
     }
 
     private String buildUiState()
@@ -720,9 +915,7 @@ public class GEVisualAidPlugin extends Plugin
             if (geSlotOpen < 0) geSlotOpen = 0;
         }
 
-        int    worldX = 0;
-        int    worldY = 0;
-        int    plane  = 0;
+        int    worldX = 0, worldY = 0, plane = 0;
         String playerName = "";
         if (client.getLocalPlayer() != null)
         {
@@ -734,12 +927,35 @@ public class GEVisualAidPlugin extends Plugin
             plane  = wp.getPlane();
         }
 
+        // Camera
+        int cameraYaw   = client.getCameraYaw();   // 0-2047, 0=north, increases clockwise
+        int cameraPitch = client.getCameraPitch();  // vertical angle
+        int cameraZoom = client.getScale();
+
+        // Convert yaw to compass degrees (0=north, 90=east etc)
+        int compassDegrees = (int)((cameraYaw / 2048.0) * 360);
+
+        long geValue    = getGeSlotsTotalValue();
+        long totalWealth = inventoryValueGp + bankValueGp + equipmentValueGp + geValue;
+        long playerIdle      = getPlayerIdleSeconds();
+        long secsUntilLogout = Math.max(0, LOGOUT_THRESHOLD_SECONDS - playerIdle);
+        long copilotIdle = getCopilotIdleSeconds();
+        int  restartSecs = getServerRestartSeconds();
+
         return "timestamp=" + LocalDateTime.now().format(TS_FORMAT) + "\n"
                 + "account=" + playerName + "\n"
                 + "logged_in=" + loggedIn + "\n"
                 + "world_x=" + worldX + "\n"
                 + "world_y=" + worldY + "\n"
                 + "plane=" + plane + "\n"
+                + "camera_yaw=" + cameraYaw + "\n"
+                + "camera_pitch=" + cameraPitch + "\n"
+                + "camera_zoom=" + cameraZoom + "\n"
+                + "compass_degrees=" + compassDegrees + "\n"
+                + "player_idle_seconds=" + playerIdle + "\n"
+                + "logout_in_seconds=" + secsUntilLogout + "\n"
+                + "copilot_idle_seconds=" + copilotIdle + "\n"
+                + "server_restart_seconds=" + restartSecs + "\n"
                 + "ge_main_page=" + geMainPage + "\n"
                 + "ge_offer_screen=" + geOfferScreen + "\n"
                 + "ge_offer_type=" + geOfferType + "\n"
@@ -757,7 +973,12 @@ public class GEVisualAidPlugin extends Plugin
                 + "friends_open=" + friendsOpen + "\n"
                 + "clan_open=" + clanOpen + "\n"
                 + "logout_open=" + logoutOpen + "\n"
-                + "settings_open=" + settingsOpen + "\n";
+                + "settings_open=" + settingsOpen + "\n"
+                + "inventory_value_gp=" + inventoryValueGp + "\n"
+                + "bank_value_gp=" + bankValueGp + "\n"
+                + "equipment_value_gp=" + equipmentValueGp + "\n"
+                + "ge_slots_value_gp=" + geValue + "\n"
+                + "total_wealth_gp=" + totalWealth + "\n";
     }
 
     private String buildSlotState()
@@ -766,13 +987,32 @@ public class GEVisualAidPlugin extends Plugin
         for (int i = 0; i < 8; i++)
         {
             SlotState s = slots[i];
-            sb.append("slot_").append(i + 1).append("_status=").append(s.getStatus()).append("\n");
-            sb.append("slot_").append(i + 1).append("_item=").append(s.getItemName()).append("\n");
-            sb.append("slot_").append(i + 1).append("_type=").append(s.getOfferType()).append("\n");
-            sb.append("slot_").append(i + 1).append("_done=").append(s.getQuantityDone()).append("\n");
-            sb.append("slot_").append(i + 1).append("_total=").append(s.getQuantityTotal()).append("\n");
-            sb.append("slot_").append(i + 1).append("_price=").append(s.getPriceEach()).append("\n");
+            sb.append("slot_").append(i+1).append("_status=").append(s.getStatus()).append("\n");
+            sb.append("slot_").append(i+1).append("_item=").append(s.getItemName()).append("\n");
+            sb.append("slot_").append(i+1).append("_type=").append(s.getOfferType()).append("\n");
+            sb.append("slot_").append(i+1).append("_done=").append(s.getQuantityDone()).append("\n");
+            sb.append("slot_").append(i+1).append("_total=").append(s.getQuantityTotal()).append("\n");
+            sb.append("slot_").append(i+1).append("_price=").append(s.getPriceEach()).append("\n");
         }
+        return sb.toString();
+    }
+
+    private String buildInventoryState()
+    {
+        StringBuilder sb = new StringBuilder();
+        int itemCount = 0, freeSlots = 0;
+        for (int i = 0; i < 28; i++)
+        {
+            InventorySlot s = inventorySlots[i];
+            sb.append("inv_slot_").append(i+1).append("_id=").append(s.getItemId()).append("\n");
+            sb.append("inv_slot_").append(i+1).append("_item=").append(s.getItemName()).append("\n");
+            sb.append("inv_slot_").append(i+1).append("_qty=").append(s.getQuantity()).append("\n");
+            sb.append("inv_slot_").append(i+1).append("_value=").append(s.getValueEach()).append("\n");
+            if (s.getItemId() > 0) itemCount++;
+            else freeSlots++;
+        }
+        sb.append("inv_total_items=").append(itemCount).append("\n");
+        sb.append("inv_free_slots=").append(freeSlots).append("\n");
         return sb.toString();
     }
 
@@ -784,77 +1024,63 @@ public class GEVisualAidPlugin extends Plugin
         String copilotStatus = suggestionManager == null ? "not_found" : "idle";
         return "action_required=false\n"
                 + "action=idle\n"
+                + "pending_actions=\n"
                 + "copilot_status=" + copilotStatus + "\n"
-                + "item_name=\n"
-                + "item_id=\n"
-                + "offer_type=\n"
-                + "target_price=\n"
-                + "target_quantity=\n"
-                + "is_dump_alert=false\n"
-                + "x1=0\ny1=0\nx2=0\ny2=0\n";
+                + "item_name=\nitem_id=\noffer_type=\ntarget_price=\ntarget_quantity=\nis_dump_alert=false\n"
+                + "x1=0\ny1=0\nx2=0\ny2=0\n"
+                + "action2=\nx1_2=0\ny1_2=0\nx2_2=0\ny2_2=0\n";
+    }
+
+    private String baseIdleHeader()
+    {
+        long geValue     = getGeSlotsTotalValue();
+        long totalWealth = inventoryValueGp + bankValueGp + equipmentValueGp + geValue;
+        return "timestamp=" + LocalDateTime.now().format(TS_FORMAT) + "\n"
+                + "account=\n"
+                + "logged_in=false\n"
+                + "world_x=0\nworld_y=0\nplane=0\n"
+                + "camera_yaw=0\ncamera_pitch=0\ncamera_zoom=0\ncompass_degrees=0\n"
+                + "player_idle_seconds=0\ncopilot_idle_seconds=0\n"
+                + "server_restart_seconds=-1\n"
+                + "ge_main_page=false\nge_offer_screen=false\nge_offer_type=none\nge_slot_open=0\n"
+                + "ge_history_open=false\nbank_open=false\nbank_pin_open=false\n"
+                + "inventory_open=false\nequipment_open=false\nprayer_open=false\n"
+                + "magic_open=false\ncombat_options_open=false\nskills_open=false\n"
+                + "quest_list_open=false\nfriends_open=false\nclan_open=false\n"
+                + "logout_open=false\nsettings_open=false\n"
+                + "inventory_value_gp=0\nbank_value_gp=0\nequipment_value_gp=0\n"
+                + "ge_slots_value_gp=0\ntotal_wealth_gp=0\n";
     }
 
     private void writeIdle()
     {
-        writeRaw("timestamp=" + LocalDateTime.now().format(TS_FORMAT) + "\n"
-                + "account=\n"
-                + "logged_in=false\n"
-                + "world_x=0\n"
-                + "world_y=0\n"
-                + "plane=0\n"
-                + "ge_main_page=false\n"
-                + "ge_offer_screen=false\n"
-                + "ge_offer_type=none\n"
-                + "ge_slot_open=0\n"
-                + "ge_history_open=false\n"
-                + "bank_open=false\n"
-                + "bank_pin_open=false\n"
-                + "inventory_open=false\n"
-                + "equipment_open=false\n"
-                + "prayer_open=false\n"
-                + "magic_open=false\n"
-                + "combat_options_open=false\n"
-                + "skills_open=false\n"
-                + "quest_list_open=false\n"
-                + "friends_open=false\n"
-                + "clan_open=false\n"
-                + "logout_open=false\n"
-                + "settings_open=false\n"
+        writeRaw(baseIdleHeader()
                 + buildSlotState()
+                + buildInventoryState()
                 + idleFields());
+    }
+
+    private void writeLoggedOut()
+    {
+        writeRaw(baseIdleHeader()
+                + buildSlotState()
+                + buildInventoryState()
+                + "action_required=false\naction=logged_out\npending_actions=\n"
+                + "copilot_status=not_found\n"
+                + "item_name=\nitem_id=\noffer_type=\ntarget_price=\ntarget_quantity=\nis_dump_alert=false\n"
+                + "x1=0\ny1=0\nx2=0\ny2=0\n"
+                + "action2=\nx1_2=0\ny1_2=0\nx2_2=0\ny2_2=0\n");
     }
 
     private void writeError(String reason)
     {
-        writeRaw("timestamp=" + LocalDateTime.now().format(TS_FORMAT) + "\n"
-                + "account=\n"
-                + "logged_in=false\n"
-                + "world_x=0\n"
-                + "world_y=0\n"
-                + "plane=0\n"
-                + "ge_main_page=false\n"
-                + "ge_offer_screen=false\n"
-                + "ge_offer_type=none\n"
-                + "ge_slot_open=0\n"
-                + "ge_history_open=false\n"
-                + "bank_open=false\n"
-                + "bank_pin_open=false\n"
-                + "inventory_open=false\n"
-                + "equipment_open=false\n"
-                + "prayer_open=false\n"
-                + "magic_open=false\n"
-                + "combat_options_open=false\n"
-                + "skills_open=false\n"
-                + "quest_list_open=false\n"
-                + "friends_open=false\n"
-                + "clan_open=false\n"
-                + "logout_open=false\n"
-                + "settings_open=false\n"
+        writeRaw(baseIdleHeader()
                 + buildSlotState()
-                + "action_required=false\n"
-                + "action=" + reason + "\n"
+                + buildInventoryState()
+                + "action_required=false\naction=" + reason + "\npending_actions=\n"
                 + "copilot_status=not_found\n"
-                + "x1=0\ny1=0\nx2=0\ny2=0\n");
+                + "x1=0\ny1=0\nx2=0\ny2=0\n"
+                + "action2=\nx1_2=0\ny1_2=0\nx2_2=0\ny2_2=0\n");
     }
 
     private void writeRaw(String content)
@@ -953,7 +1179,7 @@ public class GEVisualAidPlugin extends Plugin
     }
 
     // -----------------------------------------------------------------------
-    // Reflection — Copilot link (optional enhancement)
+    // Reflection — Copilot link (optional)
     // -----------------------------------------------------------------------
     private void linkToCopilot()
     {
@@ -972,7 +1198,7 @@ public class GEVisualAidPlugin extends Plugin
                 log.warn("GEVisualAid: could not read Copilot fields");
             return;
         }
-        log.warn("GEVisualAid: FlippingCopilotPlugin not loaded — running in GE monitor mode only");
+        log.warn("GEVisualAid: FlippingCopilotPlugin not loaded — GE monitor mode only");
     }
 
     private Object getField(Object obj, String name)
