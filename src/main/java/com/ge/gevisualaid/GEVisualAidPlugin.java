@@ -9,11 +9,13 @@ import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
+import net.runelite.api.NPC;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.ItemContainerChanged;
+import java.time.LocalDate;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -65,8 +67,10 @@ public class GEVisualAidPlugin extends Plugin
     @Inject private ClientToolbar      clientToolbar;
     @Inject private ItemManager        itemManager;
 
-    private Object           suggestionManager    = null;
-    private Object           accountStatusManager = null;
+    private Object           suggestionManager            = null;
+    private Object           accountStatusManager         = null;
+    private Object           suggestionPreferencesManager = null;
+    private Plugin           apmPlugin                    = null;
     private NavigationButton navButton;
 
     private final SlotState[]     slots          = new SlotState[8];
@@ -109,6 +113,7 @@ public class GEVisualAidPlugin extends Plugin
         session.load();
         overlayManager.add(overlay);
         linkToCopilot();
+        linkToApm();
 
         BufferedImage icon = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = icon.createGraphics();
@@ -141,8 +146,10 @@ public class GEVisualAidPlugin extends Plugin
         overlay.clearHighlight();
         session.save();
         writeIdle();
-        suggestionManager    = null;
-        accountStatusManager = null;
+        suggestionManager            = null;
+        accountStatusManager         = null;
+        suggestionPreferencesManager = null;
+        apmPlugin                    = null;
     }
 
     // -----------------------------------------------------------------------
@@ -193,7 +200,7 @@ public class GEVisualAidPlugin extends Plugin
             int  id    = item.getId();
             int  qty   = item.getQuantity();
             int  price = itemManager.getItemPrice(id);
-            String name = "";
+            String name;
             try { name = itemManager.getItemComposition(id).getName(); }
             catch (Exception e) { name = "Unknown"; }
             slot.setItemId(id);
@@ -736,10 +743,12 @@ public class GEVisualAidPlugin extends Plugin
         );
 
         java.awt.Canvas            canvas = client.getCanvas();
-        java.awt.Point             loc    = canvas.getLocationOnScreen();
+        java.awt.Point             loc;
+        try { loc = canvas.getLocationOnScreen(); }
+        catch (java.awt.IllegalComponentStateException e) { loc = new java.awt.Point(0, 0); }
         java.awt.GraphicsConfiguration gc = canvas.getGraphicsConfiguration();
-        double sx = gc.getDefaultTransform().getScaleX();
-        double sy = gc.getDefaultTransform().getScaleY();
+        double sx = gc != null ? gc.getDefaultTransform().getScaleX() : 1.0;
+        double sy = gc != null ? gc.getDefaultTransform().getScaleY() : 1.0;
 
         int x1 = (int)((loc.x + b.x + rel.x)             * sx);
         int y1 = (int)((loc.y + b.y + rel.y)             * sy);
@@ -978,7 +987,10 @@ public class GEVisualAidPlugin extends Plugin
                 + "bank_value_gp=" + bankValueGp + "\n"
                 + "equipment_value_gp=" + equipmentValueGp + "\n"
                 + "ge_slots_value_gp=" + geValue + "\n"
-                + "total_wealth_gp=" + totalWealth + "\n";
+                + "total_wealth_gp=" + totalWealth + "\n"
+                + buildClerkState()
+                + buildCopilotPreferencesState()
+                + buildApmAndMembershipState();
     }
 
     private String buildSlotState()
@@ -1049,7 +1061,137 @@ public class GEVisualAidPlugin extends Plugin
                 + "quest_list_open=false\nfriends_open=false\nclan_open=false\n"
                 + "logout_open=false\nsettings_open=false\n"
                 + "inventory_value_gp=0\nbank_value_gp=0\nequipment_value_gp=0\n"
-                + "ge_slots_value_gp=0\ntotal_wealth_gp=0\n";
+                + "ge_slots_value_gp=0\ntotal_wealth_gp=0\n"
+                + buildClerkState()
+                + buildCopilotPreferencesState()
+                + buildApmAndMembershipState();
+    }
+
+    private String buildClerkState()
+    {
+        java.awt.Canvas canvas = client.getCanvas();
+        if (canvas == null)
+            return "clerk_x1=0\nclerk_y1=0\nclerk_x2=0\nclerk_y2=0\n";
+
+        java.awt.Point loc;
+        try { loc = canvas.getLocationOnScreen(); }
+        catch (java.awt.IllegalComponentStateException e)
+        { return "clerk_x1=0\nclerk_y1=0\nclerk_x2=0\nclerk_y2=0\n"; }
+        java.awt.GraphicsConfiguration gc = canvas.getGraphicsConfiguration();
+        double sx = gc != null ? gc.getDefaultTransform().getScaleX() : 1.0;
+        double sy = gc != null ? gc.getDefaultTransform().getScaleY() : 1.0;
+
+        for (NPC npc : client.getTopLevelWorldView().npcs())
+        {
+            if (npc == null || npc.getId() != 2148) continue;
+
+            Shape hull = npc.getConvexHull();
+            if (hull == null) continue;
+
+            Rectangle b = hull.getBounds();
+            int x1 = (int) ((loc.x + b.x)              * sx);
+            int y1 = (int) ((loc.y + b.y)              * sy);
+            int x2 = (int) ((loc.x + b.x + b.width)   * sx);
+            int y2 = (int) ((loc.y + b.y + b.height)  * sy);
+
+            return "clerk_x1=" + x1 + "\n"
+                    + "clerk_y1=" + y1 + "\n"
+                    + "clerk_x2=" + x2 + "\n"
+                    + "clerk_y2=" + y2 + "\n";
+        }
+
+        return "clerk_x1=0\nclerk_y1=0\nclerk_x2=0\nclerk_y2=0\n";
+    }
+
+    private String buildCopilotPreferencesState()
+    {
+        if (suggestionPreferencesManager == null)
+        {
+            return "copilot_sell_only=false\n"
+                    + "copilot_risk_level=\n"
+                    + "copilot_timeframe_minutes=\n"
+                    + "copilot_reserved_slots=\n"
+                    + "copilot_min_predicted_profit=\n"
+                    + "copilot_dump_mode=false\n"
+                    + "copilot_dump_min_profit=\n"
+                    + "copilot_f2p_only=false\n"
+                    + "copilot_blocked_items_count=\n"
+                    + "copilot_profile=\n";
+        }
+        try
+        {
+            // sellOnlyMode is a volatile field — read directly
+            boolean sellOnly      = (boolean) getFieldValue(suggestionPreferencesManager, "sellOnlyMode");
+
+            // all other prefs are via public synchronized methods
+            Object  riskLevel     = invoke(suggestionPreferencesManager, "getRiskLevel");
+            int     timeframe     = (int)     invoke(suggestionPreferencesManager, "getTimeframe");
+            Integer reservedSlots = (Integer) invoke(suggestionPreferencesManager, "getReservedSlots");
+            Integer minProfit     = (Integer) invoke(suggestionPreferencesManager, "getMinPredictedProfit");
+            boolean dumpMode      = (boolean) invoke(suggestionPreferencesManager, "isReceiveDumpSuggestions");
+            Integer dumpMinProfit = (Integer) invoke(suggestionPreferencesManager, "getDumpMinPredictedProfit");
+            boolean f2pOnly       = (boolean) invoke(suggestionPreferencesManager, "isF2pOnlyMode");
+            Object  blockedItems  = invoke(suggestionPreferencesManager, "blockedItems");
+            String  profile       = (String)  invoke(suggestionPreferencesManager, "getCurrentProfile");
+
+            int blockedCount = blockedItems instanceof java.util.List
+                    ? ((java.util.List<?>) blockedItems).size() : 0;
+
+            // RiskLevel enum — use toApiValue() to get "low"/"medium"/"high"
+            // matching what Copilot itself sends to its API
+            String riskStr = "medium";
+            if (riskLevel != null)
+            {
+                try { riskStr = (String) riskLevel.getClass().getMethod("toApiValue").invoke(riskLevel); }
+                catch (Exception ex) { riskStr = riskLevel.getClass().getMethod("name").invoke(riskLevel).toString().toLowerCase(); }
+            }
+
+            return "copilot_sell_only=" + sellOnly + "\n"
+                    + "copilot_risk_level=" + riskStr + "\n"
+                    + "copilot_timeframe_minutes=" + timeframe + "\n"
+                    + "copilot_reserved_slots=" + (reservedSlots != null ? reservedSlots : "auto") + "\n"
+                    + "copilot_min_predicted_profit=" + (minProfit != null ? minProfit : "auto") + "\n"
+                    + "copilot_dump_mode=" + dumpMode + "\n"
+                    + "copilot_dump_min_profit=" + (dumpMinProfit != null ? dumpMinProfit : "auto") + "\n"
+                    + "copilot_f2p_only=" + f2pOnly + "\n"
+                    + "copilot_blocked_items_count=" + blockedCount + "\n"
+                    + "copilot_profile=" + (profile != null ? profile : "") + "\n";
+        }
+        catch (Exception e)
+        {
+            log.warn("GEVisualAid: copilot prefs read error: {}", e.getMessage());
+            return "copilot_sell_only=\n"
+                    + "copilot_risk_level=\n"
+                    + "copilot_timeframe_minutes=\n"
+                    + "copilot_reserved_slots=\n"
+                    + "copilot_min_predicted_profit=\n"
+                    + "copilot_dump_mode=\n"
+                    + "copilot_dump_min_profit=\n"
+                    + "copilot_f2p_only=\n"
+                    + "copilot_blocked_items_count=\n"
+                    + "copilot_profile=\n";
+        }
+    }
+
+    private String buildApmAndMembershipState()
+    {
+        // APM
+        int[] apm        = getApmValues();
+        int   apmLastMin = apm[0];
+        int   apmSession = apm[1];
+
+        // Membership — VarPlayer 1780, whole days only (Jagex server-side granularity)
+        int    membershipDays   = client.getVarpValue(1780);
+        String membershipExpiry;
+        if (membershipDays > 0)
+            membershipExpiry = LocalDate.now().plusDays(membershipDays).toString(); // YYYY-MM-DD
+        else
+            membershipExpiry = "none";
+
+        return "apm_last_minute=" + apmLastMin + "\n"
+                + "apm_session_avg=" + apmSession + "\n"
+                + "membership_days_remaining=" + membershipDays + "\n"
+                + "membership_expiry_date=" + membershipExpiry + "\n";
     }
 
     private void writeIdle()
@@ -1189,8 +1331,11 @@ public class GEVisualAidPlugin extends Plugin
                     "com.flippingcopilot.controller.FlippingCopilotPlugin")) continue;
 
             log.info("GEVisualAid: found FlippingCopilotPlugin, linking...");
-            suggestionManager    = getField(p, "suggestionManager");
-            accountStatusManager = getField(p, "accountStatusManager");
+            suggestionManager            = getField(p, "suggestionManager");
+            accountStatusManager         = getField(p, "accountStatusManager");
+            suggestionPreferencesManager = getField(p, "preferencesManager");
+            if (suggestionPreferencesManager == null)
+                suggestionPreferencesManager = getField(p, "suggestionPreferencesManager");
 
             if (suggestionManager != null)
                 log.info("GEVisualAid: linked to Copilot successfully");
@@ -1201,30 +1346,90 @@ public class GEVisualAidPlugin extends Plugin
         log.warn("GEVisualAid: FlippingCopilotPlugin not loaded — GE monitor mode only");
     }
 
-    private Object getField(Object obj, String name)
+    private void linkToApm()
     {
+        for (Plugin p : pluginManager.getPlugins())
+        {
+            if (!p.getClass().getName().equals("com.apm.ApmPlugin")) continue;
+            apmPlugin = p;
+            log.info("GEVisualAid: linked to ApmPlugin successfully");
+            return;
+        }
+        log.info("GEVisualAid: ApmPlugin not loaded — APM will read as 0");
+    }
+
+    /** Returns int[]{currentApm, sessionAvgApm} from ApmPlugin via reflection, or {0,0}. */
+    private int[] getApmValues()
+    {
+        if (apmPlugin == null) return new int[]{0, 0};
         try
         {
-            Field f = obj.getClass().getDeclaredField(name);
-            f.setAccessible(true);
-            return f.get(obj);
+            int currentApm = (int) getFieldValue(apmPlugin, "currentApm");
+            int total      = (int) getFieldValue(apmPlugin, "totalInputCount");
+            int seconds    = (int) getFieldValue(apmPlugin, "seconds");
+            int sessionAvg = seconds > 0 ? (int)(total / (seconds / 60.0)) : 0;
+            return new int[]{currentApm, sessionAvg};
         }
         catch (Exception e)
         {
-            log.warn("getField({}) failed: {}", name, e.getMessage());
-            return null;
+            log.warn("GEVisualAid: APM read error: {}", e.getMessage());
+            return new int[]{0, 0};
         }
+    }
+
+    private Object getFieldValue(Object obj, String name) throws Exception
+    {
+        Class<?> cls = obj.getClass();
+        while (cls != null)
+        {
+            try
+            {
+                Field f = cls.getDeclaredField(name);
+                f.setAccessible(true);
+                return f.get(obj);
+            }
+            catch (NoSuchFieldException ignored) { cls = cls.getSuperclass(); }
+        }
+        throw new NoSuchFieldException(name + " not found in hierarchy of "
+                + obj.getClass().getSimpleName());
+    }
+
+    private Object getField(Object obj, String name)
+    {
+        Class<?> cls = obj.getClass();
+        while (cls != null)
+        {
+            try
+            {
+                Field f = cls.getDeclaredField(name);
+                f.setAccessible(true);
+                return f.get(obj);
+            }
+            catch (NoSuchFieldException ignored) { cls = cls.getSuperclass(); }
+            catch (Exception e)
+            {
+                log.warn("getField({}) failed: {}", name, e.getMessage());
+                return null;
+            }
+        }
+        log.warn("getField({}) not found in hierarchy", name);
+        return null;
     }
 
     private Object invoke(Object obj, String methodName, Object... args) throws Exception
     {
-        for (Method m : obj.getClass().getDeclaredMethods())
+        Class<?> cls = obj.getClass();
+        while (cls != null)
         {
-            if (m.getName().equals(methodName) && m.getParameterCount() == args.length)
+            for (Method m : cls.getDeclaredMethods())
             {
-                m.setAccessible(true);
-                return m.invoke(obj, args);
+                if (m.getName().equals(methodName) && m.getParameterCount() == args.length)
+                {
+                    m.setAccessible(true);
+                    return m.invoke(obj, args);
+                }
             }
+            cls = cls.getSuperclass();
         }
         throw new NoSuchMethodException(methodName + " not found on "
                 + obj.getClass().getSimpleName());
