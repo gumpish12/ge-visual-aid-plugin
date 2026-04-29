@@ -64,6 +64,7 @@ public class GEVisualAidPlugin extends Plugin
     @Inject private PushoverNotifier   pushover;
     @Inject private SoundAlert         sound;
     @Inject private SessionTracker     session;
+    @Inject private BondTracker        bondTracker;
     @Inject private ClientToolbar      clientToolbar;
     @Inject private ItemManager        itemManager;
 
@@ -111,6 +112,7 @@ public class GEVisualAidPlugin extends Plugin
         for (int i = 0; i < 8; i++)  slots[i]          = new SlotState();
         for (int i = 0; i < 28; i++) inventorySlots[i]  = new InventorySlot();
         session.load();
+        bondTracker.load();
         overlayManager.add(overlay);
         linkToCopilot();
         linkToApm();
@@ -135,6 +137,16 @@ public class GEVisualAidPlugin extends Plugin
 
         clientToolbar.addNavigation(navButton);
         panel.setOnReset(() -> { session.reset(); refreshSessionPanel(); });
+        panel.setOnResetBonds(() ->
+        {
+            bondTracker.reset();
+            panel.updateBonds(0, 0, 0, bondTracker);
+        });
+        // Populate bond panel with persisted values on startup
+        panel.updateBonds(bondTracker.getBondCount(),
+                bondTracker.getBondTotalGp(),
+                bondTracker.getBondLastGp(),
+                bondTracker);
         writeIdle();
     }
 
@@ -145,6 +157,7 @@ public class GEVisualAidPlugin extends Plugin
         clientToolbar.removeNavigation(navButton);
         overlay.clearHighlight();
         session.save();
+        bondTracker.save();
         writeIdle();
         suggestionManager            = null;
         accountStatusManager         = null;
@@ -307,6 +320,16 @@ public class GEVisualAidPlugin extends Plugin
         long profit = 0;
         if (config.profitTrackingEnabled() && "sell".equals(s.getOfferType()))
             profit = session.recordSell(s.getItemId(), s.getPriceEach(), s.getQuantityDone());
+
+        // Track bond purchases (buy offers only; item ID checked inside)
+        if ("buy".equals(s.getOfferType()))
+        {
+            bondTracker.onOfferComplete(s);
+            panel.updateBonds(bondTracker.getBondCount(),
+                    bondTracker.getBondTotalGp(),
+                    bondTracker.getBondLastGp(),
+                    bondTracker);
+        }
 
         refreshSessionPanel();
         sound.playOfferComplete();
@@ -1251,7 +1274,7 @@ public class GEVisualAidPlugin extends Plugin
 
         try (FileWriter fw = new FileWriter(path, false))
         {
-            fw.write(content);
+            fw.write(content + bondTracker.buildFileBlock());
         }
         catch (IOException e)
         {

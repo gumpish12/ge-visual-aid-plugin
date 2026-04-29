@@ -20,11 +20,18 @@ public class GEVisualAidPanel extends PluginPanel
     private final JLabel   bestLabel;
     private final JButton  resetButton;
 
+    // Bond tracking labels
+    private final JLabel   bondCountLabel;
+    private final JLabel   bondTotalLabel;
+    private final JLabel   bondLastLabel;
+    private final JButton  resetBondsButton;
+
     private final JLabel[]       slotStatusLabels = new JLabel[8];
     private final JLabel[]       slotItemLabels   = new JLabel[8];
     private final JProgressBar[] slotBars         = new JProgressBar[8];
 
     private Runnable onReset;
+    private Runnable onResetBonds;
 
     @Inject
     public GEVisualAidPanel()
@@ -82,6 +89,33 @@ public class GEVisualAidPanel extends PluginPanel
         centre.add(resetButton);
         centre.add(Box.createVerticalStrut(6));
 
+        // ---- Bond tracking panel ----------------------------------------
+        JPanel bondPanel = new JPanel(new GridLayout(4, 1, 0, 2));
+        bondPanel.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        bondPanel.setBorder(new EmptyBorder(6, 6, 6, 6));
+
+        JLabel bondHeader = makeLabel("Bonds Purchased", Color.LIGHT_GRAY);
+        bondHeader.setFont(bondHeader.getFont().deriveFont(Font.BOLD));
+        bondCountLabel = makeLabel("Total bought: 0", Color.WHITE);
+        bondTotalLabel = makeLabel("Total spent: —", Color.WHITE);
+        bondLastLabel  = makeLabel("Last bond: —", Color.WHITE);
+
+        bondPanel.add(bondHeader);
+        bondPanel.add(bondCountLabel);
+        bondPanel.add(bondTotalLabel);
+        bondPanel.add(bondLastLabel);
+        centre.add(bondPanel);
+
+        resetBondsButton = new JButton("Reset Bond Stats");
+        resetBondsButton.setFocusPainted(false);
+        resetBondsButton.setBackground(new Color(40, 40, 80));
+        resetBondsButton.setForeground(Color.WHITE);
+        resetBondsButton.setBorder(new EmptyBorder(3, 6, 3, 6));
+        resetBondsButton.addActionListener(e -> { if (onResetBonds != null) onResetBonds.run(); });
+        centre.add(resetBondsButton);
+        centre.add(Box.createVerticalStrut(6));
+        // -----------------------------------------------------------------
+
         JLabel slotsHeader = makeLabel("GE Slots", Color.LIGHT_GRAY);
         slotsHeader.setFont(slotsHeader.getFont().deriveFont(Font.BOLD));
         centre.add(slotsHeader);
@@ -122,7 +156,27 @@ public class GEVisualAidPanel extends PluginPanel
         add(scroll, BorderLayout.CENTER);
     }
 
-    public void setOnReset(Runnable r) { this.onReset = r; }
+    public void setOnReset(Runnable r)      { this.onReset      = r; }
+    public void setOnResetBonds(Runnable r) { this.onResetBonds = r; }
+
+    /**
+     * Updates the bond statistics section in the panel.
+     *
+     * @param count   total number of bonds purchased all-time
+     * @param totalGp total GP spent on bonds all-time
+     * @param lastGp  GP paid per bond on the most recent purchase (0 = never bought)
+     * @param tracker BondTracker used for GP formatting
+     */
+    public void updateBonds(int count, long totalGp, long lastGp, BondTracker tracker)
+    {
+        SwingUtilities.invokeLater(() ->
+        {
+            bondCountLabel.setText("Total bought: " + count);
+            bondTotalLabel.setText("Total spent: "  + tracker.formatGp(totalGp));
+            bondLastLabel.setText("Last bond: "
+                    + (lastGp > 0 ? tracker.formatGp(lastGp) : "—"));
+        });
+    }
 
     public void updateStatus(String action, String itemName,
                              boolean actionRequired, boolean dumpAlert)
