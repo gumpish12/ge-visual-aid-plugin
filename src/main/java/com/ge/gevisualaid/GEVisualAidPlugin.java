@@ -37,7 +37,9 @@ import java.lang.reflect.Method;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @PluginDescriptor(
@@ -72,10 +74,12 @@ public class GEVisualAidPlugin extends Plugin
     private Object           accountStatusManager         = null;
     private Object           suggestionPreferencesManager = null;
     private Plugin           apmPlugin                    = null;
+    private Object           profitCalculator             = null;  // com.flippingcopilot.util.ProfitCalculator
     private NavigationButton navButton;
 
     private final SlotState[]     slots          = new SlotState[8];
     private final InventorySlot[] inventorySlots = new InventorySlot[28];
+
 
     private long inventoryValueGp = 0;
     private long bankValueGp      = 0;
@@ -163,6 +167,7 @@ public class GEVisualAidPlugin extends Plugin
         accountStatusManager         = null;
         suggestionPreferencesManager = null;
         apmPlugin                    = null;
+        profitCalculator             = null;
     }
 
     // -----------------------------------------------------------------------
@@ -287,6 +292,7 @@ public class GEVisualAidPlugin extends Plugin
                 s.setStatus("empty");
                 s.setItemId(-1); s.setItemName("");
                 s.setQuantityDone(0); s.setQuantityTotal(0);
+                s.setCopilotProfitGp(0);
                 break;
             case BUYING:
                 s.setStatus("buying");
@@ -299,6 +305,8 @@ public class GEVisualAidPlugin extends Plugin
                 break;
             case SELLING:
                 s.setStatus("selling");
+                // Re-apply any profit we already saw from the tooltip for this item
+                s.setCopilotProfitGp(getCopilotProfit(s.getItemName()));
                 break;
             case SOLD:
                 s.setStatus("complete");
@@ -306,12 +314,32 @@ public class GEVisualAidPlugin extends Plugin
                 break;
             case CANCELLED_BUY: case CANCELLED_SELL:
             s.setStatus("cancelled");
+            s.setCopilotProfitGp(0);
             break;
         }
 
         panel.updateSlot(slotIndex, s.getStatus(), s.getItemName(),
                 s.getQuantityDone(), s.getQuantityTotal());
         checkGEFull();
+    }
+
+
+    /**
+     * Ask Copilot's ProfitCalculator for the profit-per-item for a given item name.
+     * Returns 0 if Copilot is not loaded or the item is not tracked.
+     */
+    private long getCopilotProfit(String itemName)
+    {
+        if (profitCalculator == null || itemName == null || itemName.isEmpty()) return 0;
+        try
+        {
+            return (long) invoke(profitCalculator, "getProfitByItemName", itemName);
+        }
+        catch (Exception e)
+        {
+            log.debug("GEVisualAid: getProfitByItemName({}) failed: {}", itemName, e.getMessage());
+            return 0;
+        }
     }
 
     private void handleOfferComplete(int slotIndex, SlotState s, String prevStatus)
@@ -1028,6 +1056,11 @@ public class GEVisualAidPlugin extends Plugin
             sb.append("slot_").append(i+1).append("_done=").append(s.getQuantityDone()).append("\n");
             sb.append("slot_").append(i+1).append("_total=").append(s.getQuantityTotal()).append("\n");
             sb.append("slot_").append(i+1).append("_price=").append(s.getPriceEach()).append("\n");
+            // Copilot estimated profit per item (0 = unknown / buying slot)
+            long cp = getCopilotProfit(s.getItemName());
+            sb.append("slot_").append(i+1).append("_copilot_profit=").append(cp).append("\n");
+            sb.append("slot_").append(i+1).append("_copilot_profit_fmt=")
+                    .append(cp != 0 ? session.formatGp(cp) : "").append("\n");
         }
         return sb.toString();
     }
@@ -1360,13 +1393,28 @@ public class GEVisualAidPlugin extends Plugin
             if (suggestionPreferencesManager == null)
                 suggestionPreferencesManager = getField(p, "suggestionPreferencesManager");
 
+            // Grab profitCalculator via tooltipController
+            Object tooltipController = getField(p, "tooltipController");
+            if (tooltipController != null)
+            {
+                profitCalculator = getField(tooltipController, "profitCalculator");
+                if (profitCalculator != null)
+                    log.info("GEVisualAid: linked to Copilot ProfitCalculator successfully");
+                else
+                    log.warn("GEVisualAid: tooltipController found but profitCalculator field missing");
+            }
+            else
+            {
+                log.warn("GEVisualAid: tooltipController field not found on FlippingCopilotPlugin");
+            }
+
             if (suggestionManager != null)
-                log.info("GEVisualAid: linked to Copilot successfully");
+                log.info("GEVisualAid: linked to Copilot suggestionManager successfully");
             else
                 log.warn("GEVisualAid: could not read Copilot fields");
             return;
         }
-        log.warn("GEVisualAid: FlippingCopilotPlugin not loaded — GE monitor mode only");
+        log.warn("GEVisualAid: FlippingCopilotPlugin not loaded \u2014 GE monitor mode only");
     }
 
     private void linkToApm()
