@@ -2,6 +2,7 @@ package com.ge.gevisualaid;
 
 import com.google.inject.Provides;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOffer;
@@ -11,6 +12,7 @@ import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.NPC;
 import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GrandExchangeOfferChanged;
@@ -98,6 +100,46 @@ public class GEVisualAidPlugin extends Plugin
     private boolean lastDumpAlert = false;
     private long    actionSinceMs = 0;
 
+    // -----------------------------------------------------------------------
+    // Login / connection state tracking (added for AHK login navigation)
+    // -----------------------------------------------------------------------
+    // Schema version for the .txt output. Bump when fields are added or
+    // semantics change so consumers can negotiate compatibility.
+    //  2.0 — initial plugin-driven login state (game_state, welcome_screen_visible, etc.)
+    //  2.1 — Welcome screen detection rewritten to use GameState=LOGGING_IN
+    //        as the primary signal (verified empirically), widget 378 scan
+    //        widened, new diagnostic field visible_login_widgets added.
+    //  2.2 — Logout file-path fix. Previously, writeRaw chose the output
+    //        file based on the CURRENT logged-in player ("Gump12_ge_visual_aid.txt"
+    //        when in-game, "ge_visual_aid.txt" when not). After logout the
+    //        named file went stale forever — consumers monitoring it kept
+    //        seeing logged_in=true. Now we track lastKnownPlayerName and
+    //        when no current player is present we write to BOTH the generic
+    //        ge_visual_aid.txt AND the last-known-named file, so any
+    //        consumer watching either path sees the current state.
+    private static final String PLUGIN_OUTPUT_VERSION = "2.2";
+
+    // Refreshed by every GameStateChanged event — lets the .txt report the
+    // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
+    // CONNECTION_LOST, HOPPING, LOGIN_SCREEN_AUTHENTICATOR, STARTING, UNKNOWN)
+    // even when GameTick isn't firing (connection dropped, game world unloaded).
+    private volatile GameState lastGameState = GameState.UNKNOWN;
+
+    // Last system / engine / welcome / broadcast chat message, captured by
+    // onChatMessage. Useful for the AHK side to detect update countdowns,
+    // disconnect notices, welcome banners, etc. without its own scanning.
+    private String lastSystemMessage   = "";
+    private long   lastSystemMessageMs = 0;
+
+    // Plugin v2.2 — Tracks the most recent in-game player name. After
+    // logout, client.getLocalPlayer() returns null and the generic
+    // ge_visual_aid.txt would normally be the only file written. We
+    // keep this so writeRaw can ALSO write to the player-named file
+    // (e.g. Gump12_ge_visual_aid.txt) after logout, preventing the
+    // stale-file scenario where consumers monitoring the named file
+    // see logged_in=true indefinitely after the player has logged out.
+    private String lastKnownPlayerName = "";
+
     private static final DateTimeFormatter TS_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
@@ -151,6 +193,9 @@ public class GEVisualAidPlugin extends Plugin
                 bondTracker.getBondTotalGp(),
                 bondTracker.getBondLastGp(),
                 bondTracker);
+        // Seed lastGameState so the first .txt write reflects the current
+        // client state even before any GameStateChanged event fires.
+        try { lastGameState = client.getGameState(); } catch (Throwable t) { /* keep UNKNOWN */ }
         writeIdle();
     }
 
@@ -176,11 +221,52 @@ public class GEVisualAidPlugin extends Plugin
     @Subscribe
     public void onGameStateChanged(GameStateChanged event)
     {
-        if (event.getGameState() == GameState.LOGIN_SCREEN
-                || event.getGameState() == GameState.HOPPING)
+        GameState gs = event.getGameState();
+        lastGameState = gs;
+
+        // Any non-LOGGED_IN, non-LOADING state means we're not playing.
+        // Write a fresh idle/logged-out file IMMEDIATELY so the AHK side
+        // sees the new game_state without waiting for the next GameTick
+        // (GameTick stops firing when the connection drops, so without
+        // this nudge the .txt would stay stale).
+        // LOADING is excluded — it's a brief mid-login / world-swap state
+        // and treating it as logged-out would cause flicker. lastGameState
+        // is still updated so the next tick reports the LOADING value.
+        if (gs != GameState.LOGGED_IN && gs != GameState.LOADING)
         {
             overlay.clearHighlight();
             writeLoggedOut();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // System chat capture — feeds last_system_message in the .txt output
+    // so the AHK side can detect update countdowns, disconnect notices,
+    // welcome banners, ban/mute warnings, etc. without scanning the chat
+    // box visually. Filter to system-y message types only (no player chat).
+    // -----------------------------------------------------------------------
+    @Subscribe
+    public void onChatMessage(ChatMessage event)
+    {
+        ChatMessageType type = event.getType();
+        if (type == ChatMessageType.GAMEMESSAGE
+                || type == ChatMessageType.ENGINE
+                || type == ChatMessageType.WELCOME
+                || type == ChatMessageType.BROADCAST
+                || type == ChatMessageType.LOGINLOGOUTNOTIFICATION)
+        {
+            String msg = event.getMessage();
+            if (msg != null && !msg.isEmpty())
+            {
+                // Strip newlines so it stays on a single .txt line, and
+                // strip RuneScape <col=...> markup for clean consumption.
+                String clean = msg.replaceAll("<[^>]+>", "")
+                        .replace('\n', ' ')
+                        .replace('\r', ' ');
+                if (clean.length() > 400) clean = clean.substring(0, 400);
+                lastSystemMessage   = clean;
+                lastSystemMessageMs = System.currentTimeMillis();
+            }
         }
     }
 
@@ -884,6 +970,148 @@ public class GEVisualAidPlugin extends Plugin
         return w != null && !w.isHidden();
     }
 
+    // -----------------------------------------------------------------------
+    // Login / connection helpers — feed the new login-state fields in
+    // buildUiState() and baseIdleHeader(). All defensive: any client API
+    // call that could throw during teardown/startup is wrapped.
+    // -----------------------------------------------------------------------
+
+    // Welcome / "Click here to play" overlay — shown after authentication
+    // but before the player dismisses it to enter the world.
+    //
+    // EMPIRICAL FINDING (Gump12 test, 2026-05-27): during the entire
+    // "Click here to play" window, GameState reports LOGGING_IN (NOT
+    // LOGGED_IN as initially assumed). RuneLite holds LOGGING_IN from
+    // successful auth through to the moment the player clicks Play.
+    // This is API-driven and rock solid — no widget ID guessing needed.
+    //
+    // Widget 378 scan kept as a backup for the rare case where Welcome
+    // content lingers into LOGGED_IN state on certain login flows.
+    private boolean isWelcomeScreenVisible()
+    {
+        // Primary signal: API-driven, no widget IDs involved.
+        if (lastGameState == GameState.LOGGING_IN) return true;
+
+        // Backup: widget visibility scan. Only counts when we have a
+        // local player (post-load), to avoid false-positiving on the
+        // credentials screen which also lives in widget group 378.
+        try
+        {
+            if (lastGameState == GameState.LOGGED_IN
+                    && client.getLocalPlayer() != null)
+            {
+                for (int child = 0; child <= 50; child++)
+                {
+                    Widget w = client.getWidget(378, child);
+                    if (w != null && !w.isHidden()) return true;
+                }
+            }
+        }
+        catch (Throwable t) { /* ignore */ }
+        return false;
+    }
+
+    // Diagnostic: list visible widgets in a small set of candidate groups
+    // (the ones that host login / welcome / world-select content). When
+    // we're not LOGGED_IN, the AHK side can read this to learn exactly
+    // which widget IDs fired for a given screen — useful for adding new
+    // specific detectors over time without further empirical rounds.
+    // Returns "" once we have a local player to avoid in-game overhead.
+    private String getVisibleLoginWidgets()
+    {
+        if (lastGameState == GameState.LOGGED_IN
+                && client.getLocalPlayer() != null) return "";
+        StringBuilder sb = new StringBuilder();
+        int[] groups = {378, 24, 25, 69, 162, 164, 165, 549, 596};
+        try
+        {
+            for (int g : groups)
+            {
+                for (int c = 0; c <= 30; c++)
+                {
+                    Widget w = client.getWidget(g, c);
+                    if (w != null && !w.isHidden())
+                    {
+                        if (sb.length() > 0) sb.append(",");
+                        sb.append(g).append(".").append(c);
+                        if (sb.length() > 300) return sb.toString();
+                    }
+                }
+            }
+        }
+        catch (Throwable t) { /* ignore */ }
+        return sb.toString();
+    }
+
+    // World Selector — shown when clicking "World Select" on the login
+    // screen or logout panel. Widget group 69 in modern OSRS.
+    private boolean isWorldSelectVisible()
+    {
+        try { if (isVisible(69, 0)) return true; }
+        catch (Throwable t) { /* ignore */ }
+        return false;
+    }
+
+    // Best-effort scrape of any text shown on the login screen widget
+    // (group 378). Captures things like:
+    //   "Your client needs to be updated. Please reload this page."
+    //   "Connection lost. Please wait — attempting to re-establish."
+    //   "Login server offline."
+    //   "Error connecting to server."
+    // Returns "" when LOGGED_IN so it doesn't leak into in-game writes.
+    private String getLoginScreenMessage()
+    {
+        if (lastGameState == GameState.LOGGED_IN) return "";
+        StringBuilder sb = new StringBuilder();
+        try
+        {
+            // Widget group 378 hosts both the Welcome and Login screens.
+            // Iterate children 0..30 collecting any visible text.
+            for (int child = 0; child <= 30; child++)
+            {
+                Widget w = client.getWidget(378, child);
+                if (w == null || w.isHidden()) continue;
+                String t = w.getText();
+                if (t == null || t.isEmpty()) continue;
+                // Strip <col=...></col> markup and collapse whitespace
+                t = t.replaceAll("<[^>]+>", "").replaceAll("\\s+", " ").trim();
+                if (t.isEmpty()) continue;
+                if (sb.length() > 0) sb.append(" | ");
+                sb.append(t);
+                if (sb.length() > 400) break;
+            }
+        }
+        catch (Throwable t) { /* ignore */ }
+        return sb.toString().replace('\n', ' ').replace('\r', ' ');
+    }
+
+    // Heuristic: did the server kick us back with "client needs update" or
+    // a revision-mismatch message? Driven by login screen text + the last
+    // system chat message (which sometimes contains the update notice
+    // before the connection drops).
+    private boolean isUpdateRequired()
+    {
+        String haystack = (getLoginScreenMessage() + " " + lastSystemMessage).toLowerCase();
+        if (haystack.contains("update") && (haystack.contains("client") || haystack.contains("reload"))) return true;
+        if (haystack.contains("revision") && haystack.contains("change")) return true;
+        if (haystack.contains("game has been updated")) return true;
+        return false;
+    }
+
+    // Safe wrappers — used in baseIdleHeader where the client may be in a
+    // transitional state (CONNECTION_LOST, STARTING) and bare API calls
+    // could in principle return junk or throw. Cheap defensive layer.
+    private int safeLoginIndex() { try { return client.getLoginIndex(); } catch (Throwable t) { return -1; } }
+    private int safeWorld()      { try { return client.getWorld(); }      catch (Throwable t) { return 0; } }
+    private int safeRevision()   { try { return client.getRevision(); }   catch (Throwable t) { return 0; } }
+
+    // Age (seconds) of the last captured system chat message, or -1 if none.
+    private long getLastSystemMessageAgeSeconds()
+    {
+        if (lastSystemMessageMs == 0) return -1;
+        return (System.currentTimeMillis() - lastSystemMessageMs) / 1000L;
+    }
+
     private long getPlayerIdleSeconds()
     {
         long mouseTicks = client.getMouseIdleTicks();
@@ -1003,8 +1231,21 @@ public class GEVisualAidPlugin extends Plugin
         int  restartSecs = getServerRestartSeconds();
 
         return "timestamp=" + LocalDateTime.now().format(TS_FORMAT) + "\n"
+                + "plugin_output_version=" + PLUGIN_OUTPUT_VERSION + "\n"
                 + "account=" + playerName + "\n"
                 + "logged_in=" + loggedIn + "\n"
+                + "game_state=" + lastGameState.name() + "\n"
+                + "login_index=" + safeLoginIndex() + "\n"
+                + "current_world=" + safeWorld() + "\n"
+                + "client_revision=" + safeRevision() + "\n"
+                + "welcome_screen_visible=" + isWelcomeScreenVisible() + "\n"
+                + "world_select_open=" + isWorldSelectVisible() + "\n"
+                + "connection_lost=" + (lastGameState == GameState.CONNECTION_LOST) + "\n"
+                + "update_required=" + isUpdateRequired() + "\n"
+                + "login_screen_message=" + getLoginScreenMessage() + "\n"
+                + "visible_login_widgets=" + getVisibleLoginWidgets() + "\n"
+                + "last_system_message=" + lastSystemMessage + "\n"
+                + "last_system_message_age_seconds=" + getLastSystemMessageAgeSeconds() + "\n"
                 + "world_x=" + worldX + "\n"
                 + "world_y=" + worldY + "\n"
                 + "plane=" + plane + "\n"
@@ -1104,8 +1345,21 @@ public class GEVisualAidPlugin extends Plugin
         long geValue     = getGeSlotsTotalValue();
         long totalWealth = inventoryValueGp + bankValueGp + equipmentValueGp + geValue;
         return "timestamp=" + LocalDateTime.now().format(TS_FORMAT) + "\n"
+                + "plugin_output_version=" + PLUGIN_OUTPUT_VERSION + "\n"
                 + "account=\n"
                 + "logged_in=false\n"
+                + "game_state=" + lastGameState.name() + "\n"
+                + "login_index=" + safeLoginIndex() + "\n"
+                + "current_world=" + safeWorld() + "\n"
+                + "client_revision=" + safeRevision() + "\n"
+                + "welcome_screen_visible=" + isWelcomeScreenVisible() + "\n"
+                + "world_select_open=" + isWorldSelectVisible() + "\n"
+                + "connection_lost=" + (lastGameState == GameState.CONNECTION_LOST) + "\n"
+                + "update_required=" + isUpdateRequired() + "\n"
+                + "login_screen_message=" + getLoginScreenMessage() + "\n"
+                + "visible_login_widgets=" + getVisibleLoginWidgets() + "\n"
+                + "last_system_message=" + lastSystemMessage + "\n"
+                + "last_system_message_age_seconds=" + getLastSystemMessageAgeSeconds() + "\n"
                 + "world_x=0\nworld_y=0\nplane=0\n"
                 + "camera_yaw=0\ncamera_pitch=0\ncamera_zoom=0\ncompass_degrees=0\n"
                 + "player_idle_seconds=0\ncopilot_idle_seconds=0\n"
@@ -1285,15 +1539,19 @@ public class GEVisualAidPlugin extends Plugin
     {
         if (!config.fileOutputEnabled()) return;
 
-        String playerName = "";
+        // Plugin v2.2 — Determine the current logged-in player name (or
+        // empty if not logged in) and remember it for use after logout.
+        String currentName = "";
         if (client.getLocalPlayer() != null
                 && client.getLocalPlayer().getName() != null)
-            playerName = client.getLocalPlayer().getName() + "_";
+        {
+            currentName = client.getLocalPlayer().getName();
+            if (!currentName.isEmpty()) lastKnownPlayerName = currentName;
+        }
 
         String folder = config.outputFolder();
         if (!folder.endsWith("\\") && !folder.endsWith("/"))
             folder += "\\";
-        String path = folder + playerName + "ge_visual_aid.txt";
 
         try
         {
@@ -1305,13 +1563,39 @@ public class GEVisualAidPlugin extends Plugin
             log.warn("GEVisualAid could not create folder: {}", e.getMessage());
         }
 
+        String body = content + bondTracker.buildFileBlock();
+
+        if (!currentName.isEmpty())
+        {
+            // Logged in — write only to the player-named file. This is
+            // the canonical artefact that AHK consumers monitor.
+            writeOne(folder + currentName + "_ge_visual_aid.txt", body);
+        }
+        else
+        {
+            // Logged out (or never logged in this session) — write the
+            // generic file always. ALSO write the player-named file if
+            // we ever observed a logged-in player this session, so the
+            // named file doesn't go stale after logout. Without this
+            // dual-write, AHK consumers monitoring Gump12_ge_visual_aid.txt
+            // would keep seeing the pre-logout snapshot indefinitely.
+            writeOne(folder + "ge_visual_aid.txt", body);
+            if (!lastKnownPlayerName.isEmpty())
+            {
+                writeOne(folder + lastKnownPlayerName + "_ge_visual_aid.txt", body);
+            }
+        }
+    }
+
+    private void writeOne(String path, String body)
+    {
         try (FileWriter fw = new FileWriter(path, false))
         {
-            fw.write(content + bondTracker.buildFileBlock());
+            fw.write(body);
         }
         catch (IOException e)
         {
-            log.warn("GEVisualAid write error: {}", e.getMessage());
+            log.warn("GEVisualAid write error for {}: {}", path, e.getMessage());
         }
     }
 
