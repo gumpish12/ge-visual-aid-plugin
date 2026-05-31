@@ -42,6 +42,10 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @PluginDescriptor(
@@ -117,7 +121,197 @@ public class GEVisualAidPlugin extends Plugin
     //        when no current player is present we write to BOTH the generic
     //        ge_visual_aid.txt AND the last-known-named file, so any
     //        consumer watching either path sees the current state.
-    private static final String PLUGIN_OUTPUT_VERSION = "2.2";
+    //  2.3 — Staleness fix (attempted via ClientTick). RuneLite's GameTick
+    //        event only fires when GameState=LOGGED_IN, so after logout/
+    //        disconnect the plugin wrote the .txt ONCE (on state change)
+    //        and then went silent until the next state change. Tried
+    //        subscribing to ClientTick at 1Hz throttle — but empirical
+    //        test (Gump12, 2026-05-28) showed ClientTick ALSO appears to
+    //        be gated on the in-game loop in this RuneLite version: the
+    //        timestamp stayed frozen between actual state transitions.
+    //        See v2.4 for the working fix.
+    //  2.4 — Real staleness fix using ScheduledExecutorService. A Java-
+    //        level scheduled task fires every 1000ms independent of any
+    //        RuneLite event loop. While LOGGED_IN it returns immediately
+    //        (GameTick already handles in-game writes). When not LOGGED_IN
+    //        it calls writeLoggedOut() so the timestamp stays current.
+    //        Scheduler started in startUp() and cancelled in shutDown()
+    //        so it cleans up properly when the plugin is disabled.
+    //  2.5 — Added portfolio_unrealised_profit field, pulled from
+    //        Flipping Copilot via the same reflection chain we already
+    //        use for profitCalculator. Path:
+    //          profitCalculator
+    //            .portfolioStateRS       (field, type PortfolioStateRS)
+    //            .get()                  (ReactiveStateImpl, returns PortfolioState)
+    //            .getSummaryData()       (PortfolioSummaryData)
+    //            .getUnrealizedProfit()  (long, raw gp)
+    //        Returns 0 if any link in the chain is null or throws, so
+    //        the plugin degrades safely if Flipping Copilot renames a
+    //        field in a future release.
+    //  2.6 — Extended portfolio block with the remaining four
+    //        PortfolioSummaryData fields, each with a portfolio_ prefix
+    //        so they coexist with (not replace) the existing wealth
+    //        fields the plugin already computes:
+    //          portfolio_market_value    ← getPortfolioMarketValue()
+    //          portfolio_cash_value      ← getCashValue()
+    //          portfolio_assets_value    ← getAssetsValue()
+    //          portfolio_locked_buy_cash ← getLockedBuyCash()
+    //        Single reflection traversal per write — getPortfolioSummary()
+    //        grabs the whole PortfolioSummaryData and returns a long[5]
+    //        consumed by all five emit lines. Same null-safe degradation
+    //        as v2.5.
+    //  2.7 — Bug fix for the untracked-inventory alert. v2.6 treated
+    //        "item ID is a key in itemCardDataByItemId" as "item is
+    //        in the portfolio" — wrong. That map contains entries for
+    //        every item FC knows about (including inventory items not
+    //        currently being flipped); the actual in/out flag is
+    //        isInPortfolio on each PortfolioItemCardData value.
+    //        Observed symptom: user added Earth orb to portfolio in
+    //        FC's UI, but the untracked list kept reporting it because
+    //        the map entry was created with isInPortfolio=false long
+    //        before the user's "add" action set the flag to true —
+    //        v2.6 saw the key both before and after and changed nothing.
+    //
+    //        v2.7 iterates the map entries and reads each value's
+    //        isInPortfolio flag (also accepts portfolioQuantity>0 as a
+    //        partial-portfolio safety). Adds two diagnostic counters so
+    //        you can cross-check against FC's panel:
+    //          portfolio_known_item_count    — entries in the map total
+    //          portfolio_in_portfolio_count  — entries marked tracked
+    //  2.8 — Partial bug fix + per-item diagnostic. v2.7 caught three
+    //        of four reported untracked items (Teleport, Virtus robe
+    //        bottom, Virtus mask) but missed Earth orb specifically.
+    //        Theory: stackable consumables like Earth orb get added to
+    //        FC with isPartiallyInPortfolio=true rather than
+    //        isInPortfolio=true (since the user typically adds a few
+    //        out of a stack), and v2.7 only checked isInPortfolio.
+    //
+    //        Two changes:
+    //          • Tracking check now also accepts isPartiallyInPortfolio
+    //            and notInPortfolioQuantity < runeliteInventoryQuantity
+    //            as positive signals. An item is tracked if ANY of the
+    //            four FC-side indicators say so.
+    //          • New diagnostic field untracked_inv_card_data emits the
+    //            FC card-data state for each item still in the alert
+    //            list, so we can verify exactly what FC reports for the
+    //            stubborn Earth orb case. Format:
+    //            slot:id:known=y/n:inPort=y/n:partial=y/n:portQty=N
+    //            pipe-separated rows.
+    //        If after v2.8 the diagnostic shows known=y but all four
+    //        flags stay negative after the user's "add Earth orb"
+    //        action, FC stores that intent somewhere outside
+    //        PortfolioItemCardData and we need to look elsewhere.
+    //  2.9 — Real fix for the Earth-orb case. v2.8 diagnostic confirmed
+    //        the suspicion: Earth orb has known=n after "add to
+    //        portfolio" — FC never created a PortfolioItemCardData
+    //        entry for it. Looking at the FC class graph clarified
+    //        why: itemCardDataByItemId only contains items FC has
+    //        enough state to build a card for (inventory items that
+    //        are also in the server's portfolio list, items in
+    //        offers, etc.). Stackable consumables that are JUST added
+    //        to the portfolio without other state don't get a card —
+    //        but they DO get added to the server-side portfolioItems
+    //        list, which is exposed at:
+    //          suggestionManager.getSuggestion().portfolioItems
+    //        (a List<Suggestion.PortfolioItem>, each with an itemId).
+    //
+    //        v2.9 now reads BOTH sources and unions them — an item is
+    //        considered tracked if it's flagged in card-data OR if
+    //        its ID appears in the suggestion's portfolioItems list.
+    //        The diagnostic now also includes a suggPort=y/n flag so
+    //        we can see which source flagged the item (or didn't).
+    //  2.10 — Earth orb STILL untracked after add action. Diagnostic
+    //        confirmed Earth orb has both known=n AND suggPort=n —
+    //        the 654 items in the suggestion's portfolioItems list
+    //        do NOT include item 576. So FC's "add Earth orb to
+    //        portfolio" UI action writes neither the card map nor
+    //        the suggestion list. Working theory: for items that
+    //        don't have card-data state, the action mutates the
+    //        BLOCKED items list (removing Earth orb from blocked =
+    //        making it available for flipping). The plugin already
+    //        reads blockedItems for the copilot_blocked_items_count
+    //        field, so the reflection path is established.
+    //
+    //        Two changes in v2.10:
+    //          • New inv_full_diag field emits FC state for EVERY
+    //            inventory item (non-empty, non-coins), not just
+    //            those flagged as untracked. Lets you compare the
+    //            misbehaving Earth orb row side-by-side with items
+    //            that DO work correctly.
+    //          • Each row in both inv_full_diag and the existing
+    //            untracked_inv_card_data now includes blocked=y/n
+    //            for that item, plus a new
+    //            portfolio_blocked_item_count summary field.
+    //
+    //        Tracking logic UNCHANGED in v2.10. The point of this
+    //        version is to gather the data needed to decide whether
+    //        "not in blocked list" is the right signal to fold in.
+    //        If the diagnostic shows Earth orb flipping blocked=y→n
+    //        when you click "add to portfolio", v2.11 will add that
+    //        as a tracking source. If blocked doesn't move either,
+    //        we need to look at toggleItemPortfolioAsync's response
+    //        cache or somewhere else again.
+    //  2.11 — REAL real fix for the Earth-orb case. The actual cause
+    //        was noted/unnoted item-ID mismatch, not anything we'd
+    //        guessed. Earth orb in inventory is item ID 576 (NOTED
+    //        form, stackable). FC's portfolio stores the UNNOTED ID
+    //        (575). My checks against the portfolio failed because
+    //        576 ≠ 575. The other items the user added (Teleport,
+    //        Virtus pieces) happened to be either always-unnoted or
+    //        had their inventory IDs match the unnoted form FC uses,
+    //        so they worked by coincidence.
+    //
+    //        FC's own InventorySlotTooltipDataProvider does the
+    //        conversion via:
+    //          itemController.toUnnotedItemId(rawInventoryId)
+    //        before looking the item up in the portfolio. We now
+    //        do the same — grab itemController via reflection from
+    //        accountStatusManager (already linked in linkToCopilot),
+    //        call toUnnotedItemId on each inventory item ID, and
+    //        use that converted ID for ALL portfolio comparisons
+    //        (card-data map keys, suggestion portfolioItems lookup).
+    //
+    //        Also simplified the tracking check now that we know
+    //        isInPortfolio() returns (portfolioQuantity > 0) — the
+    //        v2.8 four-way check collapses down to just that, plus
+    //        the suggestion-list union from v2.9.
+    //
+    //        Diagnostic adds an "unnoted=N" field so you can see
+    //        the converted ID alongside the raw inventory ID — and
+    //        verify the conversion is actually firing.
+    //        (v2.10's blocked-list theory wasn't tested and was
+    //        almost certainly wrong, as the user pointed out.)
+    //  2.12 — Remove the v2.9 suggestion-list union. User report
+    //        showed 653 items in Suggestion.portfolioItems but only
+    //        1 with isInPortfolio=true. 4 inventory items the user
+    //        expected to see flagged as untracked were silently
+    //        absorbed by the 653 union — they were items the user
+    //        had flipped historically but were no longer in the
+    //        active portfolio (portfolioId<0 = ghost/disappeared
+    //        per the FC source).
+    //
+    //        Root cause: v2.9 was a workaround for the Earth-orb
+    //        case while the actual fix was v2.11's unnoted-ID
+    //        conversion. With v2.11 in place, cardData's
+    //        isInPortfolio() flag is the canonical "currently in
+    //        portfolio" signal — exactly the pattern
+    //        InventorySlotTooltipDataProvider uses internally. The
+    //        suggestion list adds noise (historical items) without
+    //        adding signal.
+    //
+    //        Three changes in v2.12:
+    //          • trackedIds no longer unions in suggestionIds. The
+    //            set is now built purely from cardData entries with
+    //            isInPortfolio=true.
+    //          • cardDataSaysTracked() simplified from a four-flag
+    //            OR to a single isInPortfolio() check. The other
+    //            three checks were mathematically redundant given
+    //            isInPortfolio() = (portfolioQuantity > 0) and
+    //            isPartiallyInPortfolio() ⟹ isInPortfolio().
+    //          • Diagnostic still emits suggPort=y/n per item so
+    //            historical portfolio membership is visible if
+    //            useful for debugging, but doesn't drive tracking.
+    private static final String PLUGIN_OUTPUT_VERSION = "2.12";
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -139,6 +333,14 @@ public class GEVisualAidPlugin extends Plugin
     // stale-file scenario where consumers monitoring the named file
     // see logged_in=true indefinitely after the player has logged out.
     private String lastKnownPlayerName = "";
+
+    // Plugin v2.4 — ScheduledExecutorService for 1Hz idle writes when not
+    // LOGGED_IN. Replaces the v2.3 ClientTick approach which empirically
+    // didn't fire while logged out in this RuneLite version. The scheduler
+    // is created in startUp() and cancelled cleanly in shutDown() so the
+    // plugin doesn't leak threads when disabled.
+    private ScheduledExecutorService idleWriteScheduler = null;
+    private ScheduledFuture<?>       idleWriteTask      = null;
 
     private static final DateTimeFormatter TS_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -196,12 +398,71 @@ public class GEVisualAidPlugin extends Plugin
         // Seed lastGameState so the first .txt write reflects the current
         // client state even before any GameStateChanged event fires.
         try { lastGameState = client.getGameState(); } catch (Throwable t) { /* keep UNKNOWN */ }
+
+        // Plugin v2.4 — Schedule a 1Hz idle-write task that runs on a
+        // dedicated thread, independent of any RuneLite event loop. While
+        // LOGGED_IN it returns immediately (GameTick already handles
+        // in-game writes). When not LOGGED_IN it writes the idle snapshot
+        // so the .txt timestamp keeps ticking, preventing AHK consumers
+        // from flipping their staleness gates during long off-game windows
+        // (logout, login screen, disconnect, hopping, authenticator).
+        try
+        {
+            idleWriteScheduler = Executors.newSingleThreadScheduledExecutor(r ->
+            {
+                Thread t = new Thread(r, "GEVisualAid-IdleWriter");
+                t.setDaemon(true);
+                return t;
+            });
+            idleWriteTask = idleWriteScheduler.scheduleAtFixedRate(() ->
+            {
+                try
+                {
+                    GameState gs = lastGameState;
+                    if (gs == GameState.LOGGED_IN || gs == GameState.LOADING)
+                    {
+                        return;  // GameTick handles in-game writes
+                    }
+                    writeLoggedOut();
+                }
+                catch (Throwable t)
+                {
+                    log.warn("GEVisualAid idle-write task error: {}", t.getMessage());
+                }
+            }, 1000, 1000, TimeUnit.MILLISECONDS);
+            log.info("GEVisualAid v2.4 idle-write scheduler started (1Hz)");
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid could not start idle-write scheduler: {}", t.getMessage());
+        }
+
         writeIdle();
     }
 
     @Override
     protected void shutDown()
     {
+        // Plugin v2.4 — Stop the idle-write scheduler cleanly so the
+        // daemon thread doesn't outlive the plugin being disabled.
+        try
+        {
+            if (idleWriteTask != null)
+            {
+                idleWriteTask.cancel(false);
+                idleWriteTask = null;
+            }
+            if (idleWriteScheduler != null)
+            {
+                idleWriteScheduler.shutdown();
+                idleWriteScheduler = null;
+            }
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid idle-write scheduler shutdown error: {}", t.getMessage());
+        }
+
         overlayManager.remove(overlay);
         clientToolbar.removeNavigation(navButton);
         overlay.clearHighlight();
@@ -1280,6 +1541,7 @@ public class GEVisualAidPlugin extends Plugin
                 + "equipment_value_gp=" + equipmentValueGp + "\n"
                 + "ge_slots_value_gp=" + geValue + "\n"
                 + "total_wealth_gp=" + totalWealth + "\n"
+                + buildPortfolioState()
                 + buildClerkState()
                 + buildCopilotPreferencesState()
                 + buildApmAndMembershipState();
@@ -1322,6 +1584,7 @@ public class GEVisualAidPlugin extends Plugin
         }
         sb.append("inv_total_items=").append(itemCount).append("\n");
         sb.append("inv_free_slots=").append(freeSlots).append("\n");
+        sb.append(buildUntrackedInventoryState());  // v2.6 — alert for items not in FC portfolio
         return sb.toString();
     }
 
@@ -1372,6 +1635,7 @@ public class GEVisualAidPlugin extends Plugin
                 + "logout_open=false\nsettings_open=false\n"
                 + "inventory_value_gp=0\nbank_value_gp=0\nequipment_value_gp=0\n"
                 + "ge_slots_value_gp=0\ntotal_wealth_gp=0\n"
+                + buildPortfolioState()
                 + buildClerkState()
                 + buildCopilotPreferencesState()
                 + buildApmAndMembershipState();
@@ -1769,6 +2033,431 @@ public class GEVisualAidPlugin extends Plugin
         }
         log.warn("getField({}) not found in hierarchy", name);
         return null;
+    }
+
+    // -----------------------------------------------------------------------
+    // Plugin v2.6 — Pull the full PortfolioSummaryData from Flipping Copilot
+    // in a single reflection traversal, plus expose the portfolio's tracked
+    // item-ID set for the untracked-inventory alert. Both reach via the
+    // already-linked profitCalculator. The chain is:
+    //   profitCalculator
+    //     .portfolioStateRS                         (PortfolioStateRS field)
+    //     .get()                                    (returns PortfolioState)
+    //     .getSummaryData()  / .getItemCardDataByItemId()
+    //
+    // getPortfolioSummary() returns long[5] in the order:
+    //   [0] portfolio_market_value     ← getPortfolioMarketValue()
+    //   [1] portfolio_unrealised_profit ← getUnrealizedProfit()
+    //   [2] portfolio_cash_value       ← getCashValue()
+    //   [3] portfolio_assets_value     ← getAssetsValue()
+    //   [4] portfolio_locked_buy_cash  ← getLockedBuyCash()
+    // Returns null (not zeros) on failure so the emit site can distinguish
+    // "Copilot disconnected" from "all values genuinely zero".
+    //
+    // getInPortfolioItemIds() (v2.7) iterates the map entries and returns
+    // the IDs where isInPortfolio=true or portfolioQuantity>0. Returns
+    // null on failure so the alert path can skip emitting rather than
+    // false-flag every inventory item as untracked.
+    // -----------------------------------------------------------------------
+    private Object getPortfolioState()
+    {
+        if (profitCalculator == null) return null;
+        try
+        {
+            Object portfolioStateRS = getField(profitCalculator, "portfolioStateRS");
+            if (portfolioStateRS == null) return null;
+            java.lang.reflect.Method getMethod = portfolioStateRS.getClass().getMethod("get");
+            return getMethod.invoke(portfolioStateRS);
+        }
+        catch (Throwable t)
+        {
+            log.debug("getPortfolioState failed: {}", t.getMessage());
+            return null;
+        }
+    }
+
+    private long[] getPortfolioSummary()
+    {
+        Object portfolioState = getPortfolioState();
+        if (portfolioState == null) return null;
+        try
+        {
+            java.lang.reflect.Method getSummaryMethod = portfolioState.getClass().getMethod("getSummaryData");
+            Object summary = getSummaryMethod.invoke(portfolioState);
+            if (summary == null) return null;
+
+            Class<?> sCls = summary.getClass();
+            long marketValue   = ((Number) sCls.getMethod("getPortfolioMarketValue").invoke(summary)).longValue();
+            long unrealised    = ((Number) sCls.getMethod("getUnrealizedProfit").invoke(summary)).longValue();
+            long cashValue     = ((Number) sCls.getMethod("getCashValue").invoke(summary)).longValue();
+            long assetsValue   = ((Number) sCls.getMethod("getAssetsValue").invoke(summary)).longValue();
+            long lockedBuyCash = ((Number) sCls.getMethod("getLockedBuyCash").invoke(summary)).longValue();
+            return new long[]{ marketValue, unrealised, cashValue, assetsValue, lockedBuyCash };
+        }
+        catch (Throwable t)
+        {
+            log.debug("getPortfolioSummary failed: {}", t.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * v2.7 — Item IDs currently marked as "in the portfolio" by Flipping
+     * Copilot. The map itemCardDataByItemId contains entries for every
+     * item FC knows about (inventory items, recent flips, etc.) — NOT
+     * just the actively-tracked ones. v2.8 expanded the tracking check
+     * to cover four FC-side indicators (any one positive = tracked):
+     *   isInPortfolio                 (boolean)
+     *   isPartiallyInPortfolio        (boolean — catches the Earth-orb
+     *                                  partial-stack case)
+     *   portfolioQuantity > 0         (long)
+     *   notInPortfolioQuantity <
+     *     runeliteInventoryQuantity   (some portion is in portfolio)
+     *
+     * Returns null if the reflection chain breaks at any point so the
+     * caller can skip the alert rather than false-flag every item.
+     *
+     * Side-effects diagnostic counts via the passed-in int[2]:
+     *   [0] = total map entries (how many items FC knows about)
+     *   [1] = entries that pass the tracking check above
+     *
+     * Side-effects per-item card data via the passed-in Map for any
+     * item the caller might still flag — used by the diagnostic emitter
+     * so we don't traverse the FC map twice per write.
+     */
+    private java.util.Set<Integer> getInPortfolioItemIds(
+            int[] counts,
+            java.util.Map<Integer, Object> cardDataByItemId)
+    {
+        Object portfolioState = getPortfolioState();
+        if (portfolioState == null) return null;
+        try
+        {
+            java.lang.reflect.Method getMapMethod =
+                    portfolioState.getClass().getMethod("getItemCardDataByItemId");
+            Object mapObj = getMapMethod.invoke(portfolioState);
+            if (!(mapObj instanceof java.util.Map)) return null;
+
+            @SuppressWarnings("unchecked")
+            java.util.Map<Integer, ?> rawMap = (java.util.Map<Integer, ?>) mapObj;
+
+            java.util.Set<Integer> tracked = new java.util.HashSet<>();
+            int total = 0;
+            int inPortfolio = 0;
+            for (java.util.Map.Entry<Integer, ?> entry : rawMap.entrySet())
+            {
+                total++;
+                Object cardData = entry.getValue();
+                if (cardData == null) continue;
+
+                // Stash for diagnostic emitter — we re-read specific
+                // fields from the same object rather than refetching.
+                if (cardDataByItemId != null)
+                {
+                    cardDataByItemId.put(entry.getKey(), cardData);
+                }
+
+                if (cardDataSaysTracked(cardData))
+                {
+                    tracked.add(entry.getKey());
+                    inPortfolio++;
+                }
+            }
+
+            if (counts != null && counts.length >= 2)
+            {
+                counts[0] = total;
+                counts[1] = inPortfolio;
+            }
+            return tracked;
+        }
+        catch (Throwable t)
+        {
+            log.debug("getInPortfolioItemIds failed: {}", t.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * v2.8/v2.12 — Returns true if FC considers this PortfolioItemCardData
+     * to be currently in the portfolio. v2.8 had a four-way OR check;
+     * v2.12 simplified to the canonical isInPortfolio() flag after
+     * confirmation from the FC source that:
+     *
+     *   isInPortfolio()           ⟺ portfolioQuantity > 0
+     *   isPartiallyInPortfolio()  ⟹ isInPortfolio()  (strict subset)
+     *
+     * So the v2.8 four-way OR collapses to a single check. The
+     * additional checks added defensive overhead without semantic
+     * value — and the suggestion-list union from v2.9 (which v2.12
+     * also removed) was the actual source of false negatives, not
+     * any missing card-data flag.
+     *
+     * This mirrors what FC's own InventorySlotTooltipDataProvider
+     * does for the per-slot tooltip: "data != null && data.isInPortfolio()".
+     */
+    private boolean cardDataSaysTracked(Object cardData)
+    {
+        if (cardData == null) return false;
+        Boolean flag = safeInvokeBool(cardData, cardData.getClass(), "isInPortfolio");
+        return Boolean.TRUE.equals(flag);
+    }
+
+    /** Reflective method invoke returning Boolean or null on failure. */
+    private Boolean safeInvokeBool(Object target, Class<?> cls, String methodName)
+    {
+        try
+        {
+            Object v = cls.getMethod(methodName).invoke(target);
+            return v instanceof Boolean ? (Boolean) v : null;
+        }
+        catch (Throwable t) { return null; }
+    }
+
+    /** Reflective method invoke returning long, defaulting to 0 on failure. */
+    private long safeInvokeLong(Object target, Class<?> cls, String methodName)
+    {
+        try
+        {
+            Object v = cls.getMethod(methodName).invoke(target);
+            return v instanceof Number ? ((Number) v).longValue() : 0L;
+        }
+        catch (Throwable t) { return 0L; }
+    }
+
+    /**
+     * v2.11 — Convert a raw inventory item ID to its unnoted form via
+     * ItemController.toUnnotedItemId(). FC's portfolio stores the
+     * unnoted ID even when the player holds the noted form, so any
+     * portfolio-membership check has to convert first. Earth orb's
+     * inventory ID is 576 (noted, stackable) but FC's portfolio stores
+     * 575 (unnoted) — without this conversion every Earth orb check
+     * misses.
+     *
+     * Path:
+     *   accountStatusManager  (already linked in linkToCopilot)
+     *     .itemController     (ItemController field)
+     *     .toUnnotedItemId(int) → int
+     *
+     * Returns the original ID if the reflection chain breaks so we
+     * degrade to v2.10 behaviour rather than blocking the alert
+     * entirely.
+     */
+    private int toUnnotedItemId(int rawId)
+    {
+        if (accountStatusManager == null) return rawId;
+        try
+        {
+            Object itemController = getField(accountStatusManager, "itemController");
+            if (itemController == null) return rawId;
+            java.lang.reflect.Method m =
+                    itemController.getClass().getMethod("toUnnotedItemId", int.class);
+            Object result = m.invoke(itemController, rawId);
+            return result instanceof Number ? ((Number) result).intValue() : rawId;
+        }
+        catch (Throwable t)
+        {
+            log.debug("toUnnotedItemId({}) failed: {}", rawId, t.getMessage());
+            return rawId;
+        }
+    }
+
+    /**
+     * v2.9 — Reads the server-authoritative portfolio item-ID set from
+     * the Suggestion object. Path:
+     *   suggestionManager.getSuggestion()  → Suggestion
+     *     .portfolioItems                  → List<Suggestion.PortfolioItem>
+     *       .itemId                        → int (one per entry)
+     *
+     * This is the source we need for items that exist in the user's
+     * portfolio but have no PortfolioItemCardData entry — typically
+     * stackable consumables like Earth orb that get added to portfolio
+     * before FC has any other state for them.
+     *
+     * Returns an empty set (not null) when the reflection chain breaks,
+     * because the union semantics work fine with an empty contribution
+     * — we don't want to suppress the entire alert just because this
+     * one source is unavailable.
+     */
+    private java.util.Set<Integer> getPortfolioItemIdsFromSuggestion()
+    {
+        java.util.Set<Integer> ids = new java.util.HashSet<>();
+        if (suggestionManager == null) return ids;
+        try
+        {
+            java.lang.reflect.Method getSugMethod =
+                    suggestionManager.getClass().getMethod("getSuggestion");
+            Object suggestion = getSugMethod.invoke(suggestionManager);
+            if (suggestion == null) return ids;
+
+            Object portfolioItems = getField(suggestion, "portfolioItems");
+            if (!(portfolioItems instanceof java.util.List)) return ids;
+
+            for (Object pi : (java.util.List<?>) portfolioItems)
+            {
+                if (pi == null) continue;
+                try
+                {
+                    java.lang.reflect.Field idField = pi.getClass().getDeclaredField("itemId");
+                    idField.setAccessible(true);
+                    Object idObj = idField.get(pi);
+                    if (idObj instanceof Number)
+                    {
+                        ids.add(((Number) idObj).intValue());
+                    }
+                }
+                catch (Throwable ignored) { /* skip this entry, continue */ }
+            }
+        }
+        catch (Throwable t)
+        {
+            log.debug("getPortfolioItemIdsFromSuggestion failed: {}", t.getMessage());
+        }
+        return ids;
+    }
+
+    /**
+     * v2.6 — Build the portfolio_* emit block. Five lines pulled from one
+     * PortfolioSummaryData traversal. All zero-defaulted on null so the
+     * field set stays stable for AHK consumers.
+     */
+    private String buildPortfolioState()
+    {
+        long[] s = getPortfolioSummary();
+        if (s == null)
+        {
+            return "portfolio_market_value=0\n"
+                    + "portfolio_unrealised_profit=0\n"
+                    + "portfolio_cash_value=0\n"
+                    + "portfolio_assets_value=0\n"
+                    + "portfolio_locked_buy_cash=0\n";
+        }
+        return "portfolio_market_value="     + s[0] + "\n"
+                + "portfolio_unrealised_profit=" + s[1] + "\n"
+                + "portfolio_cash_value="       + s[2] + "\n"
+                + "portfolio_assets_value="     + s[3] + "\n"
+                + "portfolio_locked_buy_cash="  + s[4] + "\n";
+    }
+
+    /**
+     * v2.6 — Detect inventory items that are not tracked in the Flipping
+     * Copilot portfolio. v2.7 — fixed to read each PortfolioItemCardData's
+     * isInPortfolio flag rather than treating any map key as "tracked".
+     * v2.8 — expanded tracking check (isInPortfolio | isPartiallyInPortfolio
+     * | portfolioQuantity>0 | partial inventory coverage) and added per-item
+     * diagnostic so we can see exactly what FC reports for each item still
+     * in the alert list.
+     *
+     * Filters applied (in order, each one removes noise):
+     *   • Empty slots
+     *   • Coins (id 995) — never trackable as a portfolio item
+     *   • Untradeable items — can't be flipped, would always show as
+     *     untracked otherwise (quest items, untradeable gear, etc.)
+     *   • Items where cardDataSaysTracked() returns true
+     *
+     * Output format:
+     *   portfolio_known_item_count=N        — items FC has any record of
+     *   portfolio_in_portfolio_count=N      — items FC considers tracked
+     *   untracked_inv_count=2
+     *   untracked_inv_list=5:1234:Rune sword|12:5678:Dragon dagger
+     *   untracked_inv_card_data=5:1234:known=n:inPort=n:partial=n:portQty=0|12:5678:known=y:inPort=n:partial=n:portQty=0
+     *
+     * The list uses `|` as the row separator since OSRS item names can
+     * legitimately contain commas (e.g. "Bow, dragon"). Within an alert
+     * row, the three fields are slot:id:name in fixed order. Within a
+     * card-data row, the fields are slot:id:known:inPort:partial:portQty.
+     *
+     * If the portfolio set can't be retrieved (Copilot disconnected, etc.)
+     * we emit count=0 and an empty list so AHK doesn't spuriously flag
+     * every item as untracked.
+     */
+    private String buildUntrackedInventoryState()
+    {
+        int[] counts = new int[2];
+        java.util.Map<Integer, Object> cardDataByItemId = new java.util.HashMap<>();
+        java.util.Set<Integer> trackedIds = getInPortfolioItemIds(counts, cardDataByItemId);
+
+        // v2.12 — Suggestion-list IDs read for diagnostic only.
+        // v2.9 unioned this into trackedIds; v2.12 reverted because the
+        // list contains every item FC has ever tracked (including
+        // ghost/disappeared portfolio entries), not just currently-in-
+        // portfolio items. The canonical "is item X in the portfolio
+        // RIGHT NOW" signal is cardData.isInPortfolio() — same as what
+        // FC's InventorySlotTooltipDataProvider uses for tooltips.
+        java.util.Set<Integer> suggestionIds = getPortfolioItemIdsFromSuggestion();
+
+        if (trackedIds == null)
+        {
+            // Card-data path completely unavailable — emit a safe count=0
+            // rather than false-flagging everything as untracked.
+            trackedIds = new java.util.HashSet<>();
+        }
+
+        StringBuilder list = new StringBuilder();
+        StringBuilder diag = new StringBuilder();
+        int count = 0;
+        for (int i = 0; i < 28; i++)
+        {
+            InventorySlot s = inventorySlots[i];
+            int rawId = s.getItemId();
+            if (rawId <= 0) continue;                      // empty slot
+            if (rawId == 995) continue;                    // Coins (gp) — never a flip target
+
+            // v2.11 — FC's portfolio stores the unnoted ID. Convert
+            // the inventory ID before any portfolio comparison.
+            int unnotedId = toUnnotedItemId(rawId);
+
+            if (trackedIds.contains(unnotedId)) continue;  // FC has it marked as tracked (either source)
+
+            // Untradeable items can't be flipped — skip so they don't
+            // generate false alerts. Wrapped in try because ItemManager
+            // can throw on freshly-loaded items in some edge cases.
+            // Note: we check the RAW id here — itemManager handles the
+            // noted/unnoted distinction itself for tradeable lookups.
+            try
+            {
+                if (!itemManager.getItemComposition(rawId).isTradeable()) continue;
+            }
+            catch (Throwable ignored) { /* if we can't tell, include it */ }
+
+            // Item is in the alert list — record what FC says about it.
+            if (count > 0) { list.append('|'); diag.append('|'); }
+            list.append(i + 1).append(':')
+                    .append(rawId).append(':')
+                    .append(s.getItemName());
+
+            // Look up card-data using the UNNOTED id (FC's key).
+            Object cardData = cardDataByItemId.get(unnotedId);
+            boolean known    = cardData != null;
+            boolean inPort   = false;
+            boolean partial  = false;
+            long    portQty  = 0L;
+            if (known)
+            {
+                Class<?> cls = cardData.getClass();
+                Boolean ip = safeInvokeBool(cardData, cls, "isInPortfolio");
+                Boolean pp = safeInvokeBool(cardData, cls, "isPartiallyInPortfolio");
+                inPort  = Boolean.TRUE.equals(ip);
+                partial = Boolean.TRUE.equals(pp);
+                portQty = safeInvokeLong(cardData, cls, "getPortfolioQuantity");
+            }
+            boolean suggPort = suggestionIds.contains(unnotedId);
+            diag.append(i + 1).append(':')
+                    .append(rawId).append(':')
+                    .append("unnoted=").append(unnotedId).append(':')
+                    .append("known=").append(known    ? 'y' : 'n').append(':')
+                    .append("inPort=").append(inPort  ? 'y' : 'n').append(':')
+                    .append("partial=").append(partial ? 'y' : 'n').append(':')
+                    .append("portQty=").append(portQty).append(':')
+                    .append("suggPort=").append(suggPort ? 'y' : 'n');
+            count++;
+        }
+        return "portfolio_known_item_count=" + counts[0] + "\n"
+                + "portfolio_in_portfolio_count=" + counts[1] + "\n"
+                + "portfolio_suggestion_item_count=" + suggestionIds.size() + "\n"
+                + "untracked_inv_count=" + count + "\n"
+                + "untracked_inv_list="  + list  + "\n"
+                + "untracked_inv_card_data=" + diag + "\n";
     }
 
     private Object invoke(Object obj, String methodName, Object... args) throws Exception
