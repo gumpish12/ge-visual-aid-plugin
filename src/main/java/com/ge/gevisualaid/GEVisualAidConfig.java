@@ -262,4 +262,23 @@ public interface GEVisualAidConfig extends Config
             description = "Show total GP and flips in the panel",
             section = trackingSection, position = 1)
     default boolean sessionSummaryEnabled() { return true; }
+
+    // -----------------------------------------------------------------------
+    // HTTP Server (Plugin v2.13)
+    // -----------------------------------------------------------------------
+    @ConfigSection(name = "HTTP Server",
+            description = "Serve the GE state over a local HTTP endpoint — avoids file read/write race conditions",
+            position = 7)
+    String httpSection = "http";
+
+    @ConfigItem(keyName = "httpServerEnabled", name = "Enable HTTP server",
+            description = "Start a local HTTP server serving the GE state at http://127.0.0.1:<port>/state",
+            section = httpSection, position = 0)
+    default boolean httpServerEnabled() { return true; }
+
+    @ConfigItem(keyName = "httpServerPort", name = "Port",
+            description = "Local port for the HTTP server (default 8081). Change if another process uses this port.",
+            section = httpSection, position = 1)
+    @Range(min = 1024, max = 65535)
+    default int httpServerPort() { return 8081; }
 }

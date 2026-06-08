@@ -1,6 +1,8 @@
 package com.ge.gevisualaid;
 
 import com.google.inject.Provides;
+import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpExchange;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
@@ -34,8 +36,11 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -311,7 +316,18 @@ public class GEVisualAidPlugin extends Plugin
     //          • Diagnostic still emits suggPort=y/n per item so
     //            historical portfolio membership is visible if
     //            useful for debugging, but doesn't drive tracking.
-    private static final String PLUGIN_OUTPUT_VERSION = "2.12";
+    //  2.13 — Added a local HTTP server (com.sun.net.httpserver, no extra
+    //         dependencies) serving the exact same state string at
+    //         http://127.0.0.1:<port>/state. writeRaw now publishes the
+    //         body to a volatile in-memory string FIRST (before the file
+    //         output gate), so the endpoint never serves a partially
+    //         written or stale buffer and stays current even when file
+    //         output is disabled. The .txt file behaviour (including the
+    //         v2.2 player-named dual-write) is unchanged. Port and an
+    //         enable toggle live in the new HTTP Server config section
+    //         (default 8081). The served payload is byte-identical to the
+    //         .txt, so plugin_output_version semantics are unchanged.
+    private static final String PLUGIN_OUTPUT_VERSION = "2.13";
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -342,6 +358,13 @@ public class GEVisualAidPlugin extends Plugin
     private ScheduledExecutorService idleWriteScheduler = null;
     private ScheduledFuture<?>       idleWriteTask      = null;
 
+    // Plugin v2.13 — Local HTTP server serving the latest state string at
+    // http://127.0.0.1:<port>/state. latestState is written by writeRaw on
+    // the game/scheduler thread and read by the HTTP thread; volatile gives
+    // safe publication so the endpoint never serves a half-written buffer.
+    private HttpServer      httpServer  = null;
+    private volatile String latestState = "status=starting\n";
+
     private static final DateTimeFormatter TS_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
@@ -364,6 +387,7 @@ public class GEVisualAidPlugin extends Plugin
         overlayManager.add(overlay);
         linkToCopilot();
         linkToApm();
+        startHttpServer();
 
         BufferedImage icon = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = icon.createGraphics();
@@ -462,6 +486,9 @@ public class GEVisualAidPlugin extends Plugin
         {
             log.warn("GEVisualAid idle-write scheduler shutdown error: {}", t.getMessage());
         }
+
+        // Plugin v2.13 — Stop the HTTP server cleanly.
+        stopHttpServer();
 
         overlayManager.remove(overlay);
         clientToolbar.removeNavigation(navButton);
@@ -1272,6 +1299,19 @@ public class GEVisualAidPlugin extends Plugin
         return false;
     }
 
+    // Plugin v2.13 — Reported game_state. When the welcome ("Click here to
+    // play") screen is up, isWelcomeScreenVisible() returns true even though
+    // RuneLite still reports LOGGED_IN. In that case we override the emitted
+    // game_state to WELCOME_SCREEN so a single field tells the AHK side it is
+    // NOT yet in-world. welcome_screen_visible is still emitted separately and
+    // unchanged. Once clicked through, this falls back to the real state name
+    // (LOGGED_IN, etc.).
+    private String gameStateString()
+    {
+        if (isWelcomeScreenVisible()) return "WELCOME_SCREEN";
+        return lastGameState.name();
+    }
+
     // Diagnostic: list visible widgets in a small set of candidate groups
     // (the ones that host login / welcome / world-select content). When
     // we're not LOGGED_IN, the AHK side can read this to learn exactly
@@ -1495,7 +1535,7 @@ public class GEVisualAidPlugin extends Plugin
                 + "plugin_output_version=" + PLUGIN_OUTPUT_VERSION + "\n"
                 + "account=" + playerName + "\n"
                 + "logged_in=" + loggedIn + "\n"
-                + "game_state=" + lastGameState.name() + "\n"
+                + "game_state=" + gameStateString() + "\n"
                 + "login_index=" + safeLoginIndex() + "\n"
                 + "current_world=" + safeWorld() + "\n"
                 + "client_revision=" + safeRevision() + "\n"
@@ -1611,7 +1651,7 @@ public class GEVisualAidPlugin extends Plugin
                 + "plugin_output_version=" + PLUGIN_OUTPUT_VERSION + "\n"
                 + "account=\n"
                 + "logged_in=false\n"
-                + "game_state=" + lastGameState.name() + "\n"
+                + "game_state=" + gameStateString() + "\n"
                 + "login_index=" + safeLoginIndex() + "\n"
                 + "current_world=" + safeWorld() + "\n"
                 + "client_revision=" + safeRevision() + "\n"
@@ -1801,6 +1841,14 @@ public class GEVisualAidPlugin extends Plugin
 
     private void writeRaw(String content)
     {
+        // Plugin v2.13 — Build the body once and publish it to the HTTP
+        // server's in-memory string FIRST. This happens before the file
+        // output gate so the /state endpoint stays current even when file
+        // output is disabled, and the volatile write means the HTTP thread
+        // always sees a complete buffer.
+        String body = content + bondTracker.buildFileBlock();
+        latestState = body;
+
         if (!config.fileOutputEnabled()) return;
 
         // Plugin v2.2 — Determine the current logged-in player name (or
@@ -1826,8 +1874,6 @@ public class GEVisualAidPlugin extends Plugin
         {
             log.warn("GEVisualAid could not create folder: {}", e.getMessage());
         }
-
-        String body = content + bondTracker.buildFileBlock();
 
         if (!currentName.isEmpty())
         {
@@ -1860,6 +1906,82 @@ public class GEVisualAidPlugin extends Plugin
         catch (IOException e)
         {
             log.warn("GEVisualAid write error for {}: {}", path, e.getMessage());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // HTTP server (Plugin v2.13)
+    // Serves GET http://127.0.0.1:<port>/state as plain text — the exact
+    // same payload written to the .txt. The response is built from the
+    // volatile latestState string published by writeRaw, so the HTTP thread
+    // never reads a partially written buffer and there is no file-read race.
+    // -----------------------------------------------------------------------
+    private void startHttpServer()
+    {
+        if (!config.httpServerEnabled())
+        {
+            log.info("GEVisualAid HTTP server disabled in config");
+            return;
+        }
+        try
+        {
+            int port = config.httpServerPort();
+            httpServer = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
+            httpServer.createContext("/state", this::handleStateRequest);
+            httpServer.setExecutor(Executors.newSingleThreadExecutor(r ->
+            {
+                Thread t = new Thread(r, "GEVisualAid-HTTP");
+                t.setDaemon(true);
+                return t;
+            }));
+            httpServer.start();
+            log.info("GEVisualAid v2.13 HTTP server started on http://127.0.0.1:{}/state", port);
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid could not start HTTP server: {}", t.getMessage());
+            httpServer = null;
+        }
+    }
+
+    private void stopHttpServer()
+    {
+        try
+        {
+            if (httpServer != null)
+            {
+                httpServer.stop(0);
+                httpServer = null;
+                log.info("GEVisualAid HTTP server stopped");
+            }
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid HTTP server stop error: {}", t.getMessage());
+        }
+    }
+
+    private void handleStateRequest(HttpExchange ex)
+    {
+        try
+        {
+            byte[] out = latestState.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+            ex.getResponseHeaders().set("Cache-Control", "no-cache, no-store, must-revalidate");
+            ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+            ex.sendResponseHeaders(200, out.length);
+            try (OutputStream os = ex.getResponseBody())
+            {
+                os.write(out);
+            }
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid HTTP request error: {}", t.getMessage());
+        }
+        finally
+        {
+            ex.close();
         }
     }
 
