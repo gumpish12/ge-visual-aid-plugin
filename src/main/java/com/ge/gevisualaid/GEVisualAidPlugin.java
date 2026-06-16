@@ -327,7 +327,41 @@ public class GEVisualAidPlugin extends Plugin
     //         enable toggle live in the new HTTP Server config section
     //         (default 8081). The served payload is byte-identical to the
     //         .txt, so plugin_output_version semantics are unchanged.
-    private static final String PLUGIN_OUTPUT_VERSION = "2.13";
+    //  2.14 — Login notice detection. The OSRS login screen draws its
+    //         server-update / client-out-of-date message boxes directly on
+    //         the login canvas (not via widgets), so getLoginScreenMessage()
+    //         and the widget scan can never see them and login_screen_message
+    //         stays blank on those screens. Added two fields derived from
+    //         getLoginIndex() so consumers can tell a notice page apart from
+    //         a plain credentials screen:
+    //           login_state_label   — CREDENTIALS / AUTHENTICATOR /
+    //                                 SERVER_MESSAGE / INDEX_<n> / IN_GAME
+    //           login_notice_visible — true when a notice/message box is up
+    //         Confirmed indices: 2=credentials, 4=authenticator,
+    //         24=server message box. Other screens emit INDEX_<n> so a new
+    //         one can be mapped the first time it is seen. The box TEXT is
+    //         still unreadable plugin-side, so distinguishing a recoverable
+    //         "servers updating" notice from a "must restart" notice that
+    //         shares an index still relies on the AHK pixel checks.
+    //  2.15 — Two changes. (1) Single-file output: writeRaw now always
+    //         writes one ge_visual_aid.txt regardless of login state. The
+    //         v2.2 account-prefixed file and logged-out dual-write are gone,
+    //         so consumers watch exactly one always-current path (removes the
+    //         stale-named-file bug class). HTTP /state is unaffected.
+    //         (2) login_index 10 mapped to CREDENTIALS — this client
+    //         (revision 238) reports 10 for the standard username/password
+    //         screen, not the 2 listed in the RuneLite API docs (confirmed
+    //         from a clean-login dump). Index 2 remains mapped too.
+    //  2.16 — Login label correction. v2.15 wrongly labelled login_index
+    //         2/10 as CREDENTIALS. This client logs in via the Jagex
+    //         launcher (a "Play Now / <account>" button, no username/
+    //         password form), and index 10 is reported on BOTH that login
+    //         screen and the welcome screen — so it is a screen-agnostic
+    //         "ordinary logged-out" state, not a credentials form. Relabelled
+    //         2/10 to NORMAL. Use game_state / welcome_screen_visible to
+    //         distinguish the login screen from the welcome screen; use
+    //         login_notice_visible / SERVER_MESSAGE for the notice boxes.
+    private static final String PLUGIN_OUTPUT_VERSION = "2.16";
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -348,7 +382,7 @@ public class GEVisualAidPlugin extends Plugin
     // (e.g. Gump12_ge_visual_aid.txt) after logout, preventing the
     // stale-file scenario where consumers monitoring the named file
     // see logged_in=true indefinitely after the player has logged out.
-    private String lastKnownPlayerName = "";
+    // v2.15 — No longer used: output collapsed to a single generic file.
 
     // Plugin v2.4 — ScheduledExecutorService for 1Hz idle writes when not
     // LOGGED_IN. Replaces the v2.3 ClientTick approach which empirically
@@ -1406,6 +1440,60 @@ public class GEVisualAidPlugin extends Plugin
     private int safeWorld()      { try { return client.getWorld(); }      catch (Throwable t) { return 0; } }
     private int safeRevision()   { try { return client.getRevision(); }   catch (Throwable t) { return 0; } }
 
+    // Plugin v2.14 — Human-readable interpretation of getLoginIndex().
+    // The OSRS login screen reuses a small set of state indices. The
+    // notice/message pages (server-update notice, "client out of date",
+    // etc.) are painted directly on the login canvas and are NOT widgets,
+    // so their text cannot be read via the widget tree — getLoginIndex()
+    // is the only reliable plugin-side discriminator. Confirmed mappings:
+    //   2  = NORMAL        ordinary logged-out login state (RuneLite API
+    //                       doc calls 2 the username/password form; this
+    //                       Jagex-launcher client never shows that form)
+    //   10 = NORMAL        ordinary logged-out state on this client
+    //                       (revision 238) — covers BOTH the "Play Now /
+    //                       <account>" login screen AND the welcome screen,
+    //                       so it is screen-agnostic; use game_state /
+    //                       welcome_screen_visible to tell those two apart.
+    //                       Confirmed from Gump dumps 2026-06-16.
+    //   4  = AUTHENTICATOR  6-digit authenticator form (RuneLite API doc;
+    //                       not seen on this launcher setup)
+    //   24 = SERVER_MESSAGE centre-screen notice box + OK
+    //                       (e.g. "the game servers are currently being
+    //                       updated") — confirmed from Gump12 dump 2026-06-16
+    // Any other value is emitted as INDEX_<n> so a newly-encountered
+    // screen can be identified the first time it appears, without another
+    // code change. When you next hit the "RuneScape has been updated /
+    // restart RuneLite" screen, read login_index off the .txt and tell me
+    // the number so I can give it a named label here.
+    private String loginStateLabel()
+    {
+        if (lastGameState == GameState.LOGGED_IN) return "IN_GAME";
+        int idx = safeLoginIndex();
+        switch (idx)
+        {
+            case -1: return "UNKNOWN";
+            case 2:  return "NORMAL";
+            case 10: return "NORMAL";
+            case 4:  return "AUTHENTICATOR";
+            case 24: return "SERVER_MESSAGE";
+            default: return "INDEX_" + idx;
+        }
+    }
+
+    // True when the login screen is showing a notice/message box (a popup
+    // that is NOT the normal credentials / authenticator / world-select
+    // flow). This is the "it is not just a plain login screen" flag the
+    // AHK side can gate on. Extend the index set here as more notice
+    // screens are confirmed. NOTE: the plugin cannot read the box TEXT, so
+    // it cannot by itself tell a recoverable "servers updating" notice
+    // apart from a "client must restart" notice if they share an index —
+    // the AHK pixel checks remain the authoritative discriminator for that.
+    private boolean isLoginNoticeVisible()
+    {
+        if (lastGameState == GameState.LOGGED_IN) return false;
+        return safeLoginIndex() == 24;
+    }
+
     // Age (seconds) of the last captured system chat message, or -1 if none.
     private long getLastSystemMessageAgeSeconds()
     {
@@ -1537,6 +1625,8 @@ public class GEVisualAidPlugin extends Plugin
                 + "logged_in=" + loggedIn + "\n"
                 + "game_state=" + gameStateString() + "\n"
                 + "login_index=" + safeLoginIndex() + "\n"
+                + "login_state_label=" + loginStateLabel() + "\n"
+                + "login_notice_visible=" + isLoginNoticeVisible() + "\n"
                 + "current_world=" + safeWorld() + "\n"
                 + "client_revision=" + safeRevision() + "\n"
                 + "welcome_screen_visible=" + isWelcomeScreenVisible() + "\n"
@@ -1653,6 +1743,8 @@ public class GEVisualAidPlugin extends Plugin
                 + "logged_in=false\n"
                 + "game_state=" + gameStateString() + "\n"
                 + "login_index=" + safeLoginIndex() + "\n"
+                + "login_state_label=" + loginStateLabel() + "\n"
+                + "login_notice_visible=" + isLoginNoticeVisible() + "\n"
                 + "current_world=" + safeWorld() + "\n"
                 + "client_revision=" + safeRevision() + "\n"
                 + "welcome_screen_visible=" + isWelcomeScreenVisible() + "\n"
@@ -1851,16 +1943,6 @@ public class GEVisualAidPlugin extends Plugin
 
         if (!config.fileOutputEnabled()) return;
 
-        // Plugin v2.2 — Determine the current logged-in player name (or
-        // empty if not logged in) and remember it for use after logout.
-        String currentName = "";
-        if (client.getLocalPlayer() != null
-                && client.getLocalPlayer().getName() != null)
-        {
-            currentName = client.getLocalPlayer().getName();
-            if (!currentName.isEmpty()) lastKnownPlayerName = currentName;
-        }
-
         String folder = config.outputFolder();
         if (!folder.endsWith("\\") && !folder.endsWith("/"))
             folder += "\\";
@@ -1875,26 +1957,14 @@ public class GEVisualAidPlugin extends Plugin
             log.warn("GEVisualAid could not create folder: {}", e.getMessage());
         }
 
-        if (!currentName.isEmpty())
-        {
-            // Logged in — write only to the player-named file. This is
-            // the canonical artefact that AHK consumers monitor.
-            writeOne(folder + currentName + "_ge_visual_aid.txt", body);
-        }
-        else
-        {
-            // Logged out (or never logged in this session) — write the
-            // generic file always. ALSO write the player-named file if
-            // we ever observed a logged-in player this session, so the
-            // named file doesn't go stale after logout. Without this
-            // dual-write, AHK consumers monitoring Gump12_ge_visual_aid.txt
-            // would keep seeing the pre-logout snapshot indefinitely.
-            writeOne(folder + "ge_visual_aid.txt", body);
-            if (!lastKnownPlayerName.isEmpty())
-            {
-                writeOne(folder + lastKnownPlayerName + "_ge_visual_aid.txt", body);
-            }
-        }
+        // Plugin v2.15 — Single-file output. Always write the one generic
+        // ge_visual_aid.txt regardless of login state. The v2.2 account-
+        // prefixed file (e.g. Gump12_ge_visual_aid.txt) and the logged-out
+        // dual-write are removed: consumers now monitor exactly one path
+        // that is always current, eliminating the stale-named-file class of
+        // bugs (named file frozen at the pre-logout snapshot). The HTTP
+        // endpoint already serves this same body from latestState above.
+        writeOne(folder + "ge_visual_aid.txt", body);
     }
 
     private void writeOne(String path, String body)
