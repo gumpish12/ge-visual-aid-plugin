@@ -361,7 +361,16 @@ public class GEVisualAidPlugin extends Plugin
     //         2/10 to NORMAL. Use game_state / welcome_screen_visible to
     //         distinguish the login screen from the welcome screen; use
     //         login_notice_visible / SERVER_MESSAGE for the notice boxes.
-    private static final String PLUGIN_OUTPUT_VERSION = "2.16";
+    //  2.17 — Mapped login_index 9 to CLIENT_UPDATE: the "RuneScape has
+    //         been updated / please restart RuneLite" notice box, which
+    //         appears after clicking OK on a 24 server-update box once the
+    //         client is out of date. It needs a RuneLite restart, not a
+    //         retry. Confirmed from a live dump. 9 and 24 use different
+    //         indices, so login_state_label now distinguishes the
+    //         recoverable (SERVER_MESSAGE) from the restart-required
+    //         (CLIENT_UPDATE) case with no pixel check. login_notice_visible
+    //         is now true for both 9 and 24.
+    private static final String PLUGIN_OUTPUT_VERSION = "2.17";
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -1457,6 +1466,11 @@ public class GEVisualAidPlugin extends Plugin
     //                       Confirmed from Gump dumps 2026-06-16.
     //   4  = AUTHENTICATOR  6-digit authenticator form (RuneLite API doc;
     //                       not seen on this launcher setup)
+    //   9  = CLIENT_UPDATE  "RuneScape has been updated / please restart
+    //                       RuneLite" notice box — appears AFTER clicking OK
+    //                       on a 24 server-update box when the client is now
+    //                       out of date. Requires a RuneLite restart, NOT a
+    //                       retry. Confirmed from Gump12 dump 2026-06-17.
     //   24 = SERVER_MESSAGE centre-screen notice box + OK
     //                       (e.g. "the game servers are currently being
     //                       updated") — confirmed from Gump12 dump 2026-06-16
@@ -1475,23 +1489,26 @@ public class GEVisualAidPlugin extends Plugin
             case 2:  return "NORMAL";
             case 10: return "NORMAL";
             case 4:  return "AUTHENTICATOR";
+            case 9:  return "CLIENT_UPDATE";
             case 24: return "SERVER_MESSAGE";
             default: return "INDEX_" + idx;
         }
     }
 
     // True when the login screen is showing a notice/message box (a popup
-    // that is NOT the normal credentials / authenticator / world-select
+    // that is NOT the normal logged-out / authenticator / world-select
     // flow). This is the "it is not just a plain login screen" flag the
-    // AHK side can gate on. Extend the index set here as more notice
-    // screens are confirmed. NOTE: the plugin cannot read the box TEXT, so
-    // it cannot by itself tell a recoverable "servers updating" notice
-    // apart from a "client must restart" notice if they share an index —
-    // the AHK pixel checks remain the authoritative discriminator for that.
+    // AHK side can gate on. Confirmed notice indices: 24 = server-update
+    // box (recoverable: click OK + retry), 9 = client-out-of-date box
+    // (needs a RuneLite restart). They use DIFFERENT indices, so
+    // login_state_label (SERVER_MESSAGE vs CLIENT_UPDATE) distinguishes the
+    // recoverable case from the restart case on its own — no pixel check
+    // needed for that distinction anymore.
     private boolean isLoginNoticeVisible()
     {
         if (lastGameState == GameState.LOGGED_IN) return false;
-        return safeLoginIndex() == 24;
+        int idx = safeLoginIndex();
+        return idx == 9 || idx == 24;
     }
 
     // Age (seconds) of the last captured system chat message, or -1 if none.
