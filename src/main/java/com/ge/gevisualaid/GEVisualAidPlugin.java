@@ -361,6 +361,96 @@ public class GEVisualAidPlugin extends Plugin
     //         2/10 to NORMAL. Use game_state / welcome_screen_visible to
     //         distinguish the login screen from the welcome screen; use
     //         login_notice_visible / SERVER_MESSAGE for the notice boxes.
+    //  2.20 — target_price always -1 / offer never confirms. With 2.19 the
+    //         state file kept updating through the offer screen, but the flip
+    //         still could not complete: every capture showed target_price=-1
+    //         and pending_actions stuck on set_price, never reaching confirm.
+    //
+    //         CAUSE: not a renamed getter — a WIDENED TYPE. Copilot changed
+    //         the suggestion price to 64-bit (its own wire format writes
+    //         int64 for price while itemId/quantity stay int32, and the JSON
+    //         field it replaced was literally named "price64"). getIntSafe()
+    //         did a hard `(int) invoke(...)` cast, and casting a boxed Long
+    //         to Integer throws ClassCastException — swallowed by the catch,
+    //         returning -1. Every other suggestion getter still returns int,
+    //         which is why only the price failed.
+    //
+    //         KNOCK-ON: sugPrice was permanently -1, so
+    //         `offerPrice != sugPrice` was always true, set_price stayed
+    //         pending forever and the `pending.isEmpty() -> confirm` branch
+    //         was unreachable. Hence "never presses enter".
+    //
+    //         FIX: getIntSafe() now unboxes via Number.intValue() instead of
+    //         a hard (int) cast, so it accepts int, long, short or any other
+    //         numeric return type. One helper, both call sites (the
+    //         target_price field in resolveAndWrite and sugPrice in
+    //         resolveOfferScreen). Non-numeric or missing still returns -1 as
+    //         before, so no behaviour changes anywhere it already worked.
+    //
+    //  2.19 — THE ACTUAL 2026-07-24 HANG FIX (2.18 diagnosed it wrongly).
+    //         Symptom: while the GE offer screen was open the plugin wrote NO
+    //         .txt at all — the file froze on the last home-screen write and
+    //         only resumed once the offer screen was closed. The AHK script
+    //         treats the state file as authoritative, so it kept being told to
+    //         repeat the click that opened the offer screen, saw "stale", and
+    //         went inert until the account disconnected.
+    //
+    //         MECHANISM: getOpenSlot() (varbit 4439) correctly routes to
+    //         resolveOfferScreen() when a slot is open. That method read the
+    //         Copilot suggestion with RAW invoke():
+    //             invoke(sug,"offerType"/"getItemId"/"getPrice"/"getQuantity")
+    //         invoke() throws if a method is missing. resolveAndWrite() then
+    //         propagated the throw to onGameTick(), whose catch block only
+    //         logged and returned — and every write in resolveAndWrite happens
+    //         AFTER this point, so nothing was ever written. Note that
+    //         resolveAndWrite() reads the SAME getters via the safe wrappers
+    //         (getStringSafe/getIntSafe), which swallow the failure and return
+    //         -1 — which is exactly why every capture shows target_price=-1.
+    //
+    //         FIXES:
+    //         (a) resolveOfferScreen() now uses getStringSafe/getIntSafe for
+    //             the four suggestion getters, matching resolveAndWrite().
+    //         (b) A thrown resolve can no longer freeze the state file:
+    //             onGameTick() now falls back to writeResolveFailureState(),
+    //             which rebuilds ui/slot/inventory sections independently
+    //             (each individually guarded) and writes an idle payload plus
+    //             a resolve_error= field. The file therefore keeps ticking
+    //             even while something upstream is broken, so the script sees
+    //             live state instead of a frozen one.
+    //         (c) onGameTick() logs the FULL stack trace instead of just
+    //             e.getMessage(), so the offending method/class is visible in
+    //             client.log.
+    //
+    //  2.18 — TWO FIXES for the 2026-07-24 all-VM hang (script clicked the
+    //         suggested inventory/buy slot, the offer screen opened, and the
+    //         plugin then reported the SAME action forever, so the AHK script
+    //         saw "stale" and went inert until the account disconnected):
+    //
+    //         (a) OFFER SCREEN NOT DETECTED. geOfferScreen was
+    //             isVisible(465, 26) — a hardcoded widget child index. That
+    //             index moved, so with the offer screen plainly open the
+    //             plugin emitted ge_offer_screen=false / ge_offer_type=none /
+    //             ge_slot_open=0, and never advanced past the click that
+    //             opened it. Now primarily driven by varbit 4439 (the GE slot
+    //             currently being configured, 0 = none) — the exact signal
+    //             getOpenSlot() already used, and stable across widget
+    //             reshuffles. The widget check is retained as a secondary.
+    //
+    //         (b) COPILOT PREFERENCES ALL BLANK. linkToCopilot() looked up
+    //             only the field names "preferencesManager" and
+    //             "suggestionPreferencesManager" on FlippingCopilotPlugin;
+    //             both returned null after a Copilot refactor, so
+    //             suggestionPreferencesManager stayed null and every
+    //             copilot_* preference emitted blank (risk level, timeframe,
+    //             reserved slots, min profit, blocked count, profile).
+    //             Confirmed from field output: sell_only/dump_mode/f2p_only
+    //             read "false" while the rest were empty — the exact
+    //             signature of the null branch, not the exception branch.
+    //             Now falls back to scanning the plugin's fields by TYPE for
+    //             one whose class name contains "Preferences", so a future
+    //             rename cannot silently blank these again. Logs which field
+    //             matched.
+    //
     //  2.17 — Mapped login_index 9 to CLIENT_UPDATE: the "RuneScape has
     //         been updated / please restart RuneLite" notice box, which
     //         appears after clicking OK on a 24 server-update box once the
@@ -370,7 +460,7 @@ public class GEVisualAidPlugin extends Plugin
     //         recoverable (SERVER_MESSAGE) from the restart-required
     //         (CLIENT_UPDATE) case with no pixel check. login_notice_visible
     //         is now true for both 9 and 24.
-    private static final String PLUGIN_OUTPUT_VERSION = "2.17";
+    private static final String PLUGIN_OUTPUT_VERSION = "2.20";
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -835,8 +925,40 @@ public class GEVisualAidPlugin extends Plugin
         try { resolveAndWrite(); }
         catch (Exception e)
         {
-            log.warn("GEVisualAid resolve error: {}", e.getMessage());
+            // V2.19: full stack trace (was e.getMessage() only), and ALWAYS
+            // still write — a throw here used to leave the .txt frozen, which
+            // the AHK script reads as authoritative and hangs on.
+            log.warn("GEVisualAid resolve error", e);
+            writeResolveFailureState(e);
         }
+    }
+
+    // V2.19: Last-resort state write. Called when resolveAndWrite() throws, so
+    // the state file NEVER freezes — a frozen file is indistinguishable from a
+    // hung plugin to the AHK script, which then sits inert until the account
+    // disconnects. Each section is rebuilt independently and guarded, so one
+    // broken section cannot suppress the rest.
+    private void writeResolveFailureState(Exception cause)
+    {
+        String ui = "", slotStr = "", invStr = "";
+        try { ui      = buildUiState();        } catch (Exception ignored) { }
+        try { slotStr = buildSlotState();      } catch (Exception ignored) { }
+        try { invStr  = buildInventoryState(); } catch (Exception ignored) { }
+
+        try
+        {
+            overlay.clearHighlight();
+            panel.updateStatus("idle", "", false, false);
+        }
+        catch (Exception ignored) { }
+
+        String msg = (cause == null)
+                ? "unknown"
+                : cause.getClass().getSimpleName() + ": " + String.valueOf(cause.getMessage());
+        msg = msg.replace('\n', ' ').replace('\r', ' ');
+
+        try { writeRaw(ui + slotStr + invStr + idleFields() + "resolve_error=" + msg + "\n"); }
+        catch (Exception ignored) { }
     }
 
     private void checkStuckOffers()
@@ -1034,10 +1156,13 @@ public class GEVisualAidPlugin extends Plugin
         boolean searchOpen    = client.getWidget(10616884) != null
                 && !client.getWidget(10616884).isHidden();
 
-        String  sugType   = (String) invoke(sug, "offerType");
-        int     sugItemId = (int)    invoke(sug, "getItemId");
-        int     sugPrice  = (int)    invoke(sug, "getPrice");
-        int     sugQty    = (int)    invoke(sug, "getQuantity");
+        // V2.19: were raw invoke() — a single renamed getter threw, killed
+        // resolveAndWrite(), and froze the state file entirely. These are the
+        // same getters resolveAndWrite() already reads via the safe wrappers.
+        String  sugType   = getStringSafe(sug, "offerType");
+        int     sugItemId = getIntSafe(sug, "getItemId");
+        int     sugPrice  = getIntSafe(sug, "getPrice");
+        int     sugQty    = getIntSafe(sug, "getQuantity");
 
         boolean typeMatches = offerType.equals(sugType);
         boolean itemMatches = currentItemId == sugItemId;
@@ -1580,7 +1705,14 @@ public class GEVisualAidPlugin extends Plugin
     {
         boolean loggedIn      = client.getGameState() == GameState.LOGGED_IN;
         boolean geMainPage    = isVisible(465, 7);
-        boolean geOfferScreen = isVisible(465, 26);
+        // V2.18: was isVisible(465, 26) only. That widget child index moved and
+        // the check silently went false while the offer screen was open, which
+        // froze action= on the last suggestion and hung the AHK script. Varbit
+        // 4439 = the GE slot currently being configured (0 = none) — the same
+        // signal getOpenSlot() already uses, and stable across widget changes.
+        // Widget check kept as a secondary so nothing regresses if it returns.
+        int     geOpenSlotVb  = client.getVarbitValue(4439);
+        boolean geOfferScreen = geOpenSlotVb > 0 || isVisible(465, 26);
         boolean geHistoryOpen = isVisible(383, 0);
         boolean bankOpen      = isVisible(12, 0);
         boolean bankPinOpen   = isVisible(213, 0);
@@ -1605,7 +1737,9 @@ public class GEVisualAidPlugin extends Plugin
         if (geOfferScreen)
         {
             geOfferType = client.getVarbitValue(4397) == 1 ? "sell" : "buy";
-            geSlotOpen  = getOpenSlot() + 1;
+            // V2.18: varbit 4439 is already 1-8 (0 = none). Identical value to
+            // the old getOpenSlot()+1, without the second varbit read.
+            geSlotOpen  = geOpenSlotVb;
             if (geSlotOpen < 0) geSlotOpen = 0;
         }
 
@@ -2125,7 +2259,17 @@ public class GEVisualAidPlugin extends Plugin
 
     private int getIntSafe(Object o, String m)
     {
-        try { return (int) invoke(o, m); } catch (Exception e) { return -1; }
+        // V2.20: was `(int) invoke(o, m)`. A hard cast on a boxed Long throws
+        // ClassCastException, which the catch swallowed as -1 — that is why
+        // target_price read -1 after Copilot widened price to 64-bit while
+        // itemId/quantity stayed 32-bit. Unbox via Number instead so any
+        // numeric width works.
+        try
+        {
+            Object v = invoke(o, m);
+            return (v instanceof Number) ? ((Number) v).intValue() : -1;
+        }
+        catch (Exception e) { return -1; }
     }
 
     private boolean getBoolSafe(Object o, String m)
@@ -2146,9 +2290,9 @@ public class GEVisualAidPlugin extends Plugin
             log.info("GEVisualAid: found FlippingCopilotPlugin, linking...");
             suggestionManager            = getField(p, "suggestionManager");
             accountStatusManager         = getField(p, "accountStatusManager");
-            suggestionPreferencesManager = getField(p, "preferencesManager");
-            if (suggestionPreferencesManager == null)
-                suggestionPreferencesManager = getField(p, "suggestionPreferencesManager");
+            // V2.18: was two hardcoded field-name lookups; both returned null
+            // after a Copilot refactor, silently blanking every copilot_* pref.
+            suggestionPreferencesManager = findPreferencesManager(p);
 
             // Grab profitCalculator via tooltipController
             Object tooltipController = getField(p, "tooltipController");
@@ -2220,6 +2364,63 @@ public class GEVisualAidPlugin extends Plugin
         }
         throw new NoSuchFieldException(name + " not found in hierarchy of "
                 + obj.getClass().getSimpleName());
+    }
+
+    // V2.18: Locate Copilot's preferences manager without depending on a single
+    // hardcoded field name. Pass 1 tries the known names (quietly — a miss here
+    // is expected after a rename and should not log a warning). Pass 2 scans
+    // every field in the class hierarchy for one whose TYPE name contains
+    // "Preferences". Logs whichever route succeeded so a future rename is
+    // visible in client.log rather than silently blanking the copilot_* fields.
+    private Object findPreferencesManager(Object plugin)
+    {
+        Class<?> cls = plugin.getClass();
+        while (cls != null)
+        {
+            for (String name : new String[]{ "preferencesManager", "suggestionPreferencesManager" })
+            {
+                try
+                {
+                    Field f = cls.getDeclaredField(name);
+                    f.setAccessible(true);
+                    Object v = f.get(plugin);
+                    if (v != null)
+                    {
+                        log.info("GEVisualAid: preferences manager linked via field '{}' (type {})",
+                                name, v.getClass().getSimpleName());
+                        return v;
+                    }
+                }
+                catch (Exception ignored) { }
+            }
+            cls = cls.getSuperclass();
+        }
+
+        cls = plugin.getClass();
+        while (cls != null)
+        {
+            for (Field f : cls.getDeclaredFields())
+            {
+                if (!f.getType().getSimpleName().toLowerCase().contains("preferences")) continue;
+                try
+                {
+                    f.setAccessible(true);
+                    Object v = f.get(plugin);
+                    if (v != null)
+                    {
+                        log.info("GEVisualAid: preferences manager found by TYPE scan: field='{}' type='{}'",
+                                f.getName(), f.getType().getSimpleName());
+                        return v;
+                    }
+                }
+                catch (Exception ignored) { }
+            }
+            cls = cls.getSuperclass();
+        }
+
+        log.warn("GEVisualAid: NO preferences manager field found on FlippingCopilotPlugin "
+                + "\u2014 all copilot_* preference fields will be blank");
+        return null;
     }
 
     private Object getField(Object obj, String name)
