@@ -16,6 +16,7 @@ import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.NPC;
 import net.runelite.api.Perspective;
+import net.runelite.api.Player;
 import net.runelite.api.Prayer;
 import net.runelite.api.Projectile;
 import net.runelite.api.events.ProjectileMoved;
@@ -1389,7 +1390,24 @@ public class GEVisualAidPlugin extends Plugin
     //         Adds sail_link_error, because sail_plugin_found=false on its
     //         own is a dead end — the reason existed only in the client log,
     //         so diagnosing this at all meant going and finding that log.
-    private static final String PLUGIN_OUTPUT_VERSION = "2.52";
+    //  2.53 — SCENE SCANS USED THE WRONG WORLD VIEW ABOARD A BOAT.
+    //         Sailing puts the boat in its own WorldView. Everything here
+    //         went through client.getTopLevelWorldView(), which aboard a
+    //         boat still describes the MAINLAND: base 2416,2120 reported
+    //         while the player stood at 15555,4423. Every scene scan -
+    //         scenery, npcs, ground items - swept the wrong arrays, so a
+    //         correctly written filter matched nothing and go_count was 0.
+    //
+    //         The sailing hooks appeared anyway, which is what made this
+    //         confusing: those come from the Sailing plugin's own boat
+    //         model rather than from a scene scan, so they were right
+    //         while everything scanned was empty.
+    //
+    //         Now takes the LOCAL PLAYER's world view, falling back to the
+    //         top level one. scene_wv_source says which was used, because
+    //         "base nowhere near the player" is the symptom and there was
+    //         nothing naming the cause.
+    private static final String PLUGIN_OUTPUT_VERSION = "2.53";
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -3451,11 +3469,39 @@ public class GEVisualAidPlugin extends Plugin
         WorldView wv = null;
         int  baseX = -1, baseY = -1, scenePlane = -1;
         boolean instanced = false;
+        String wvSource = "none";
         if (online && (wantHover || wantWaypoints || wantCanvas))
         {
+            // V2.53: THE PLAYER'S world view, not the top level one. Sailing
+            // puts the boat in its own WorldView, so aboard a boat the top
+            // level view still described the mainland: base 2416,2120 while
+            // the player stood at 15555,4423. Every scene scan - scenery,
+            // npcs, ground items - swept the wrong arrays and reported zero
+            // matches with a filter that was set correctly. The sailing
+            // hooks appeared anyway only because those come from the Sailing
+            // plugin's own boat model rather than from a scene scan, which
+            // is what made the two disagree so visibly.
             try
             {
-                wv = client.getTopLevelWorldView();
+                Player lp = client.getLocalPlayer();
+                if (lp != null)
+                {
+                    wv = lp.getWorldView();
+                    if (wv != null) wvSource = "player";
+                }
+            }
+            catch (Throwable ignored) { wv = null; }
+            if (wv == null)
+            {
+                try
+                {
+                    wv = client.getTopLevelWorldView();
+                    if (wv != null) wvSource = "toplevel";
+                }
+                catch (Throwable ignored) { wv = null; }
+            }
+            try
+            {
                 if (wv != null)
                 {
                     baseX      = wv.getBaseX();
@@ -3464,12 +3510,15 @@ public class GEVisualAidPlugin extends Plugin
                     instanced  = wv.isInstance();
                 }
             }
-            catch (Throwable ignored) { wv = null; }
+            catch (Throwable ignored) { }
         }
         sb.append("scene_base_x=").append(baseX).append("\n");
         sb.append("scene_base_y=").append(baseY).append("\n");
         sb.append("scene_plane=").append(scenePlane).append("\n");
         sb.append("scene_instanced=").append(instanced).append("\n");
+        // Which view the scans are actually using. A base nowhere near the
+        // player is the symptom; this names the cause without guesswork.
+        sb.append("scene_wv_source=").append(wvSource).append("\n");
 
         // ---- Hovered tile (feature B) ---------------------------------------
         // The heaviest item in this block by a wide margin — it sweeps the
