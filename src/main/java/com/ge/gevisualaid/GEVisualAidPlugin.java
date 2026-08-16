@@ -1366,7 +1366,30 @@ public class GEVisualAidPlugin extends Plugin
     //         annotations. The V2.48 patch inserted the new subscriber above
     //         onGameTick without accounting for the @Subscribe already
     //         sitting there, leaving both stacked on the inserted method.
-    private static final String PLUGIN_OUTPUT_VERSION = "2.51";
+    //  2.52 — SAILING LINK NEVER ESTABLISHED. sail_plugin_found was false
+    //         even sat on a boat with the Sailing plugin running. Not a
+    //         moved package, as the message first suggested — an ACCESS
+    //         problem:
+    //           "cannot access a member of class
+    //            com.google.inject.internal.InjectorImpl with modifiers
+    //            public"
+    //
+    //         getInstance was being looked up on injector.getClass(), which
+    //         is Guice's internal InjectorImpl. That class is not accessible
+    //         from this package, so although the method itself is public,
+    //         invoking it threw. The fix is to take the method from the
+    //         field's DECLARED type — the public com.google.inject.Injector
+    //         interface — which is both accessible and immune to Guice
+    //         swapping its implementation class.
+    //
+    //         Worth remembering generally: a public method on a
+    //         package-private implementation class is not callable by
+    //         reflection. Always reflect against the interface.
+    //
+    //         Adds sail_link_error, because sail_plugin_found=false on its
+    //         own is a dead end — the reason existed only in the client log,
+    //         so diagnosing this at all meant going and finding that log.
+    private static final String PLUGIN_OUTPUT_VERSION = "2.52";
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -1496,6 +1519,10 @@ public class GEVisualAidPlugin extends Plugin
     // V2.49 — Sailing plugin reflection handles.
     private Object  slTracker     = null;
     private boolean slLinkTried   = false;
+    // V2.51 — WHY the link failed. sail_plugin_found=false on its own is a
+    // dead end: the reason existed only in the client log, so diagnosing it
+    // meant going and finding that log. Reported in the state instead.
+    private String  slLinkError   = "";
     private java.lang.reflect.Method slGetBoat  = null;
     private java.lang.reflect.Method slHull     = null;
     private java.lang.reflect.Method slHelm     = null;
@@ -4333,6 +4360,7 @@ public class GEVisualAidPlugin extends Plugin
             }
             if (plugin == null)
             {
+                slLinkError = "no SailingPlugin class among the loaded plugins";
                 log.info("GEVisualAid: Sailing plugin not installed");
                 return false;
             }
@@ -4347,7 +4375,18 @@ public class GEVisualAidPlugin extends Plugin
             Object injector = inj.get(plugin);
             if (injector == null) { slLinkTried = false; return false; }
 
-            java.lang.reflect.Method getInst = injector.getClass()
+            // V2.51: look getInstance up on the Injector INTERFACE, not on
+            // the runtime class. injector.getClass() is Guice's internal
+            // com.google.inject.internal.InjectorImpl, which is not
+            // accessible from this package - so although getInstance is
+            // public, invoking it threw:
+            //   "cannot access a member of class InjectorImpl with
+            //    modifiers public"
+            // and the whole sailing link failed with a message that read
+            // like a missing class rather than an access problem.
+            // The field's declared type IS the public interface, so taking
+            // the method from there is both correct and version-proof.
+            java.lang.reflect.Method getInst = inj.getType()
                     .getMethod("getInstance", Class.class);
             slTracker = getInst.invoke(injector, btc);
             if (slTracker == null) { slLinkTried = false; return false; }
@@ -4386,11 +4425,13 @@ public class GEVisualAidPlugin extends Plugin
                 slCargoTracker = null;
             }
 
+            slLinkError = "";
             log.info("GEVisualAid: linked to Sailing plugin");
             return true;
         }
         catch (Throwable t)
         {
+            slLinkError = t.getClass().getSimpleName() + ": " + t.getMessage();
             log.warn("GEVisualAid Sailing link failed: {}", t.getMessage());
             slTracker = null;
             return false;
@@ -4406,6 +4447,10 @@ public class GEVisualAidPlugin extends Plugin
         catch (Throwable ignored) { }
 
         sb.append("sail_plugin_found=").append(linked).append("\n");
+        // Newlines would break the key=value format the consumers parse.
+        sb.append("sail_link_error=")
+          .append(linked ? "" : slLinkError.replace('\n', ' ').replace('\r', ' '))
+          .append("\n");
         if (!linked) { sb.append("sail_aboard=false\nsail_hook_count=0\n"); return; }
 
         Object boat = null;
