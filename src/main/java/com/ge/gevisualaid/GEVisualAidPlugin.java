@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpExchange;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Actor;
+import net.runelite.api.Animation;
 import net.runelite.api.Client;
 import net.runelite.api.CollisionData;
 import net.runelite.api.GameState;
@@ -23,8 +24,10 @@ import net.runelite.api.events.ProjectileMoved;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.Skill;
 import net.runelite.api.DecorativeObject;
+import net.runelite.api.DynamicObject;
 import net.runelite.api.EnumComposition;
 import net.runelite.api.GameObject;
+import net.runelite.api.Renderable;
 import net.runelite.api.GroundObject;
 import net.runelite.api.ObjectComposition;
 import net.runelite.api.Tile;
@@ -1407,7 +1410,7 @@ public class GEVisualAidPlugin extends Plugin
     //         top level one. scene_wv_source says which was used, because
     //         "base nowhere near the player" is the symptom and there was
     //         nothing naming the cause.
-    private static final String PLUGIN_OUTPUT_VERSION = "2.53";
+    private static final String PLUGIN_OUTPUT_VERSION = "2.54";
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -7799,9 +7802,35 @@ public class GEVisualAidPlugin extends Plugin
             sb.append(k).append("state=").append(state).append("\n");
             sb.append(k).append("visible=").append(box != null).append("\n");
             appendBox(sb, k, box);
+            sb.append(k).append("animation=").append(objectAnimation(to)).append("\n");
             sb.append(k).append("rel_bearing_deg=").append(bear[2]).append("\n");
             sb.append(k).append("direction=").append(bear[3]).append("\n");
         }
+    }
+
+    // V2.54: animation id of an animated scenery object, or -1.
+    //
+    // A static GameObject has a Model renderable and never animates. One that
+    // does animate carries a DynamicObject instead, and that is the only place
+    // the current animation id lives -- ObjectComposition has no such field.
+    // Needed to tell apart states of one object id, e.g. a crystal extractor
+    // mid-charge from one that is charged and ready to click.
+    private int objectAnimation(TileObject to)
+    {
+        try
+        {
+            if (to instanceof GameObject)
+            {
+                Renderable r = ((GameObject) to).getRenderable();
+                if (r instanceof DynamicObject)
+                {
+                    Animation a = ((DynamicObject) r).getAnimation();
+                    if (a != null) return a.getId();
+                }
+            }
+        }
+        catch (Throwable ignored) { }
+        return -1;
     }
 
     // Test one scenery object against the filter and add it if it matches and
