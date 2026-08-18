@@ -290,10 +290,51 @@ public interface GEVisualAidConfig extends Config
     // not use — the block collapses to a single scene_enabled=false line.
     // -----------------------------------------------------------------------
     @ConfigSection(name = "Scene & Tiles",
-            description = "Camera, hovered tile, waypoint screen coordinates and NPC "
-                    + "aggression timer. All off by default — enable only what you need.",
+            description = "MASTER SWITCH for everything below, plus camera, canvas and "
+                    + "hovered tile geometry. Turn this off and none of the sections from "
+                    + "here down are computed at all. All off by default.",
             position = 8, closedByDefault = true)
     String sceneSection = "scene";
+
+    // Everything below was one 24-item "Scene & Tiles" list, which meant
+    // finding a setting required reading all of it. Same keyNames, so no
+    // saved setting is lost - only where it appears in the panel changes.
+    @ConfigSection(name = "Movement & Pathing",
+            description = "Where the player is heading: movement flags, the Shortest Path "
+                    + "route, and named waypoints resolved to screen coordinates. "
+                    + "Requires Scene & Tiles enabled.",
+            position = 9, closedByDefault = true)
+    String moveSection = "movement";
+
+    @ConfigSection(name = "Skilling",
+            description = "Per-skill trackers: agility courses, Blast Furnace, runite rocks "
+                    + "and sailing. Requires Scene & Tiles enabled.",
+            position = 10, closedByDefault = true)
+    String skillSection = "skilling";
+
+    @ConfigSection(name = "Magic & Runes",
+            description = "Rune counts and how many casts of a chosen spell remain. "
+                    + "Requires Scene & Tiles enabled.",
+            position = 11, closedByDefault = true)
+    String magicSection = "magic";
+
+    @ConfigSection(name = "Player & Combat",
+            description = "Vitals, active prayers, incoming attack style, what the player is "
+                    + "currently doing, and NPC aggression. Requires Scene & Tiles enabled.",
+            position = 12, closedByDefault = true)
+    String combatSection = "playercombat";
+
+    @ConfigSection(name = "Bank",
+            description = "Quantities of watched items, read while the bank is open and "
+                    + "reported as last-known once it closes. Requires Scene & Tiles enabled.",
+            position = 13, closedByDefault = true)
+    String bankSection = "bank";
+
+    @ConfigSection(name = "Interface & Widgets",
+            description = "Screen coordinates of named interface widgets. "
+                    + "Requires Scene & Tiles enabled.",
+            position = 14, closedByDefault = true)
+    String widgetSection = "widgets";
 
     @ConfigItem(keyName = "sceneTrackingEnabled", name = "Enable scene tracking",
             description = "Master switch. When off, none of the options below are computed "
@@ -318,7 +359,7 @@ public interface GEVisualAidConfig extends Config
     @ConfigItem(keyName = "waypointsEnabled", name = "Waypoint screen coordinates",
             description = "Resolve the named world tiles below to live screen pixels every "
                     + "tick. Cost is one projection per tile, so a handful is negligible.",
-            section = sceneSection, position = 3)
+            section = moveSection, position = 2)
     default boolean waypointsEnabled() { return false; }
 
     @ConfigItem(keyName = "waypointList", name = "Waypoints (always on)",
@@ -327,14 +368,14 @@ public interface GEVisualAidConfig extends Config
                     + "name:x1:y1-x2:y2 or name:x1:y1-x2:y2:plane. Separate entries with "
                     + "commas or new lines. Example: combat:2882:3542, "
                     + "pen:2437:9161-2440:9164",
-            section = sceneSection, position = 4)
+            section = moveSection, position = 3)
     default String waypointList() { return ""; }
 
     @ConfigItem(keyName = "hoverTileEnabled", name = "Hovered tile",
             description = "Emit the world coordinates of the tile under the mouse cursor. "
                     + "This is the most expensive option here — it sweeps the scene every "
                     + "tick — so leave it off unless something is actually reading it.",
-            section = sceneSection, position = 5)
+            section = sceneSection, position = 3)
     default boolean hoverTileEnabled() { return false; }
 
     @ConfigItem(keyName = "loadingLinesEnabled", name = "Loading lines",
@@ -342,7 +383,7 @@ public interface GEVisualAidConfig extends Config
                     + "distance to each, and a click box on the nearest. A reload shifts the "
                     + "scene base and invalidates cached screen coordinates, so it helps to "
                     + "see one coming. Cheap.",
-            section = sceneSection, position = 8)
+            section = sceneSection, position = 4)
     default boolean loadingLinesEnabled() { return false; }
 
     @ConfigItem(keyName = "movementFlagsEnabled", name = "Movement flags",
@@ -350,7 +391,7 @@ public interface GEVisualAidConfig extends Config
                     + "walkable, world coordinate and click box each - plus the raw flag "
                     + "values for the player's tile and the hovered tile. Cheap, but adds "
                     + "around 70 lines to the output.",
-            section = sceneSection, position = 9)
+            section = moveSection, position = 0)
     default boolean movementFlagsEnabled() { return false; }
 
     @ConfigItem(keyName = "pathTrackingEnabled", name = "Shortest Path route",
@@ -359,31 +400,32 @@ public interface GEVisualAidConfig extends Config
                     + "GET /path?x=..&y=..&plane=.. on this plugin's HTTP port, or clear it "
                     + "with /path?clear=1. Requires the Shortest Path plugin installed; "
                     + "path_plugin_found reports whether it was found.",
-            section = sceneSection, position = 10)
+            section = moveSection, position = 1)
     default boolean pathTrackingEnabled() { return false; }
 
-    @ConfigItem(keyName = "agilityTrackingEnabled", name = "Agility course",
+    @ConfigItem(keyName = "agilityTrackingEnabled", name = "Agility obstacles & marks",
             description = "Mirror RuneLite's Agility plugin - the course obstacles it is "
                     + "highlighting, marks of grace, traps and the Werewolf stick, each as "
-                    + "a click box. Obstacles are sorted nearest first; the Agility plugin "
-                    + "does not expose course order, so on a rooftop course the nearest is "
-                    + "the next. Requires the Agility plugin enabled; "
-                    + "agility_plugin_found reports whether it was found.",
-            section = sceneSection, position = 15)
+                    + "a click box, plus which obstacle each mark sits beside. Obstacles "
+                    + "are sorted nearest first. Requires the Agility plugin enabled; "
+                    + "agility_plugin_found reports whether it was found. "
+                    + "NOTE: the course ORDER comes from Rooftop Agility Improved and is "
+                    + "published separately as rooftop_next_*, which needs no setting here.",
+            section = skillSection, position = 0)
     default boolean agilityTrackingEnabled() { return false; }
 
-    @ConfigItem(keyName = "agilityCourseOrder", name = "Agility course order",
-            description = "The course's obstacle start tiles IN ORDER, x:y or x:y:plane, "
-                    + "comma or newline separated. RuneLite's Agility plugin does not "
-                    + "expose course sequence, so this is what lets the output say which "
-                    + "obstacle is NEXT rather than which is nearest. Only needed as a "
-                    + "fallback: if the Rooftop Agility Improved plugin is installed, "
-                    + "rooftop_next_* is authoritative and this can stay empty. Without "
-                    + "either, the "
-                    + "obstacle you just completed gets picked while it is still in view. "
-                    + "Each entry becomes agility_step_N_*, and agility_next_* follows the "
-                    + "tracked progress. Example: 2484:3437, 2477:3420, 2474:3401",
-            section = sceneSection, position = 16)
+    @ConfigItem(keyName = "agilityCourseOrder", name = "Agility course order (fallback only)",
+            description = "LEAVE THIS EMPTY if Rooftop Agility Improved is installed - it "
+                    + "knows every implemented course and rooftop_next_* is authoritative. "
+                    + "This is the manual fallback for when it is not: the course's "
+                    + "obstacle start tiles IN ORDER, x:y or x:y:plane, comma or newline "
+                    + "separated. RuneLite's own Agility plugin does not expose course "
+                    + "sequence, so without one of the two the output can only say which "
+                    + "obstacle is NEAREST - and the one just completed is still in view, "
+                    + "so it gets picked again. Each entry becomes agility_step_N_*, and "
+                    + "agility_next_* follows the tracked progress. "
+                    + "Example: 2484:3437, 2477:3420, 2474:3401",
+            section = skillSection, position = 1)
     default String agilityCourseOrder() { return ""; }
 
     @ConfigItem(keyName = "blastFurnaceEnabled", name = "Blast Furnace steps",
@@ -394,14 +436,14 @@ public interface GEVisualAidConfig extends Config
                     + "from varbits so they work without any Blast Furnace plugin. The step "
                     + "mirror needs Easy Blast Furnace installed; bf_plugin_found reports "
                     + "whether it was found.",
-            section = sceneSection, position = 20)
+            section = skillSection, position = 2)
     default boolean blastFurnaceEnabled() { return false; }
 
     @ConfigItem(keyName = "runeTrackingEnabled", name = "Runes / remaining casts",
             description = "Count runes across inventory, rune pouch and an equipped staff, "
                     + "and work out how many casts are left for the spell configured below. "
                     + "Needs no other plugin. Cheap.",
-            section = sceneSection, position = 21)
+            section = magicSection, position = 0)
     default boolean runeTrackingEnabled() { return false; }
 
     @ConfigItem(keyName = "castSpell", name = "Spell rune cost",
@@ -410,7 +452,7 @@ public interface GEVisualAidConfig extends Config
                     + "number of casts available and rune_cast_limiter names the rune that "
                     + "runs out first. Spell tables are not shipped because they would rot; "
                     + "put in the spell you are actually casting.",
-            section = sceneSection, position = 22)
+            section = magicSection, position = 1)
     default String castSpell() { return ""; }
 
     @ConfigItem(keyName = "sailingEnabled", name = "Sailing",
@@ -420,20 +462,20 @@ public interface GEVisualAidConfig extends Config
                     + "whether it was found. For the crystal extractor and salvage state, "
                     + "use an anchored wildcard in the scenery filter instead - those swap "
                     + "object ID when they change state.",
-            section = sceneSection, position = 27)
+            section = skillSection, position = 4)
     default boolean sailingEnabled() { return false; }
 
     @ConfigItem(keyName = "bankTrackingEnabled", name = "Bank quantities",
             description = "Report bank quantities for a watch list of items. The whole bank "
                     + "is far too large to export, so only the items below are reported.",
-            section = sceneSection, position = 23)
+            section = bankSection, position = 0)
     default boolean bankTrackingEnabled() { return false; }
 
     @ConfigItem(keyName = "bankWatchList", name = "Bank items",
             description = "label=Item name or label=itemId, comma or newline separated. The "
                     + "label alone also works. Names must match EXACTLY, so Logs does not "
                     + "also collect Oak logs. Example: logs=Logs, air=Air rune, coins=995",
-            section = sceneSection, position = 24)
+            section = bankSection, position = 1)
     default String bankWatchList() { return ""; }
 
     @ConfigItem(keyName = "attackStyleEnabled", name = "Incoming attack style",
@@ -441,26 +483,26 @@ public interface GEVisualAidConfig extends Config
                     + "from projectiles aimed at you and attacker distance. The client does "
                     + "not label attack styles, so att_style is a best guess and att_basis "
                     + "says what it was based on.",
-            section = sceneSection, position = 25)
+            section = combatSection, position = 2)
     default boolean attackStyleEnabled() { return false; }
 
     @ConfigItem(keyName = "prayerTrackingEnabled", name = "Active prayers",
             description = "List which prayers are currently switched on, with the overhead "
                     + "called out separately. Cheap.",
-            section = sceneSection, position = 26)
+            section = combatSection, position = 1)
     default boolean prayerTrackingEnabled() { return false; }
 
     @ConfigItem(keyName = "vitalsEnabled", name = "Vitals",
             description = "Emit hitpoints, prayer, run energy and special attack. Special "
                     + "attack is stored by the game as percent x10 and is divided here, so "
                     + "vit_spec_percent reads 0-100. Cheap.",
-            section = sceneSection, position = 17)
+            section = combatSection, position = 0)
     default boolean vitalsEnabled() { return false; }
 
     @ConfigItem(keyName = "widgetsEnabled", name = "Widget coordinates",
             description = "Resolve named interface widgets to desktop pixels - special "
                     + "attack orb, quick prayer orb, combat style buttons, anything. Cheap.",
-            section = sceneSection, position = 18)
+            section = widgetSection, position = 0)
     default boolean widgetsEnabled() { return false; }
 
     @ConfigItem(keyName = "widgetList", name = "Widgets",
@@ -469,7 +511,7 @@ public interface GEVisualAidConfig extends Config
                     + "Developer Tools - they are NOT hardcoded here because widget ids "
                     + "move between client versions. "
                     + "Example: spec=160:35, prayer=160:31, style2=593:5",
-            section = sceneSection, position = 19)
+            section = widgetSection, position = 1)
     default String widgetList() { return ""; }
 
     @ConfigItem(keyName = "playerActivityEnabled", name = "Player activity",
@@ -479,7 +521,7 @@ public interface GEVisualAidConfig extends Config
                     + "in the client, only animation ids that differ per tool, so read "
                     + "player_act_animation while performing the action and match on that "
                     + "id. Cheap.",
-            section = sceneSection, position = 14)
+            section = combatSection, position = 3)
     default boolean playerActivityEnabled() { return false; }
 
     @ConfigItem(keyName = "runiteTrackingEnabled", name = "Runite rock tracker",
@@ -488,12 +530,12 @@ public interface GEVisualAidConfig extends Config
                     + "respawn countdown, most actionable first. Hop with "
                     + "GET /hop?world=100, which works whether or not that plugin is "
                     + "installed. runite_plugin_found reports whether it was found.",
-            section = sceneSection, position = 13)
+            section = skillSection, position = 3)
     default boolean runiteTrackingEnabled() { return false; }
 
     @ConfigItem(keyName = "aggroTimerEnabled", name = "NPC aggression timer",
             description = "Emit the time until NPCs become unaggressive. Cheap.",
-            section = sceneSection, position = 11)
+            section = combatSection, position = 4)
     default boolean aggroTimerEnabled() { return false; }
 
     @ConfigItem(keyName = "aggroUseRuneLitePlugin", name = "Use RuneLite's aggression timer",
@@ -501,7 +543,7 @@ public interface GEVisualAidConfig extends Config
                     + "Timer plugin, which must be enabled with 'Show timer' on. Turn this "
                     + "off to use this plugin's own estimate instead, which needs no other "
                     + "plugin but only becomes accurate after a teleport.",
-            section = sceneSection, position = 12)
+            section = combatSection, position = 5)
     default boolean aggroUseRuneLitePlugin() { return true; }
 
     // -----------------------------------------------------------------------
@@ -514,8 +556,8 @@ public interface GEVisualAidConfig extends Config
     // -----------------------------------------------------------------------
     @ConfigSection(name = "Waypoint Bundles",
             description = "Named sets of waypoints that can be switched on and off "
-                    + "independently. Requires waypoints to be enabled in Scene & Tiles.",
-            position = 9, closedByDefault = true)
+                    + "independently. Requires waypoints to be enabled in Movement & Pathing.",
+            position = 15, closedByDefault = true)
     String bundleSection = "bundles";
 
     @ConfigItem(keyName = "bundle1Enabled", name = "1. Enabled",
@@ -684,7 +726,7 @@ public interface GEVisualAidConfig extends Config
     @ConfigSection(name = "Ground Items & NPCs",
             description = "Find ground items and NPCs by name or ID and emit click boxes "
                     + "for them. Off by default. Requires scene tracking enabled.",
-            position = 10, closedByDefault = true)
+            position = 16, closedByDefault = true)
     String objectSection = "objects";
 
     @ConfigItem(keyName = "groundItemsEnabled", name = "Track ground items",

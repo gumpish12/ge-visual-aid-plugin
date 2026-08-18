@@ -1453,7 +1453,110 @@ public class GEVisualAidPlugin extends Plugin
     //         startUp() also logs it, which is the fastest check when
     //         running from IntelliJ or gradlew where the console is
     //         already in front of you.
-    static final String PLUGIN_OUTPUT_VERSION = "2.57";   // package-visible: the panel shows it
+    //  2.58 — AGILITY OBSTACLE LIST WAS CAPPED AT 8, NEAREST FIRST.
+    //         A rooftop course has nine obstacles or more. The list is
+    //         sorted nearest first and then truncated, so the entry
+    //         dropped was always the one furthest away - which is the
+    //         one being walked towards. Pollnivneach (nine obstacles,
+    //         14935..14945) could therefore never publish the whole
+    //         course, and the caller stalled for twelve minutes on a
+    //         roof reporting "step 8 not in view" with the obstacle in
+    //         plain sight in front of it.
+    //
+    //         Raised to 24. This list comes from the Agility plugin's
+    //         own scene map rather than a radius search, so it is
+    //         bounded by the course itself and cannot run away.
+    //
+    //         The general trap, already recorded for entity filters:
+    //         one distance-sorted pool plus a cap means near things
+    //         crowd out far ones, and "far" is usually "next".
+    //  2.59 — MULTI-TILE ROOFTOP OBSTACLES RESOLVE ON ANY OF THEIR TILES.
+    //         Verified against the Rooftop Agility Improved source
+    //         (v0.6.2) rather than inferred: an Obstacle carries a LIST
+    //         of world points and several are multi-tile - Pollnivneach
+    //         14944 is {3359,2996},{3360,2996},{3361,2996}. We resolved
+    //         locations.get(0) and nothing else, so one corner off
+    //         screen or behind scenery reported the whole obstacle
+    //         offscreen while two good tiles sat in plain view.
+    //
+    //         Now: distance and bearing come from the NEAREST location,
+    //         and the box search walks every location nearest-first and
+    //         takes the first that resolves.
+    //
+    //         Also confirmed correct against that source, so nobody
+    //         re-derives it: getNextObstacles (plural), getCurrentObstacle,
+    //         isDoingObstacle, id, obstacles on Course; id, locations,
+    //         minLevel, maxLevel, getTileObject on Obstacle; getCourse,
+    //         getMarksOfGraces, isStoppingObstacle(int) on CoursesManager,
+    //         reached through the private `coursesManager` field. Every
+    //         name this plugin reflects exists and matches.
+    //
+    //         Two behaviours of theirs that look like faults and are not:
+    //         getNextObstacles returns EMPTY at the last obstacle of a
+    //         lap, which is why rooftop_next_count goes to 0 at the end
+    //         of every lap; and with no current obstacle it returns
+    //         obstacles[0], so a fresh course correctly reports step 1.
+    //         isStoppingObstacle is additionally gated on their own
+    //         "mark_of_grace_stop" config option, which defaults on.
+    //  2.60 — CONFIG PANEL SPLIT INTO SECTIONS THAT MEAN SOMETHING.
+    //         "Scene & Tiles" had become a 24-item dumping ground -
+    //         camera geometry, agility, Blast Furnace, runes, bank,
+    //         prayers, widgets and NPC aggression in one flat list -
+    //         so finding a setting meant reading all of it. Split into
+    //         Scene & Tiles (master switch plus geometry), Movement &
+    //         Pathing, Skilling, Magic & Runes, Player & Combat, Bank,
+    //         and Interface & Widgets.
+    //
+    //         Every keyName is unchanged, so no saved setting is lost -
+    //         only where it appears in the panel moves.
+    //
+    //         The two agility entries are renamed and rewritten, because
+    //         "Agility course order" read as the place to set the course
+    //         order when Rooftop Agility Improved makes it unnecessary.
+    //         It is now "Agility course order (fallback only)" and says
+    //         to leave it empty when that plugin is installed.
+    //  2.61 — THE CLICK BOX CAME FROM THE TILE THE PLAYER STOOD ON.
+    //         Field report: with the Rooftop feed finally driving, the
+    //         script reached step 3 and then clicked the player's own
+    //         coordinates over and over.
+    //
+    //         Cause, read from the Rooftop source: an Obstacle's
+    //         `locations` are the tiles the PLAYER STANDS ON to use it,
+    //         not the obstacle object's tile - their isNearNextObstacle()
+    //         checks player.distanceTo(location) <= 1 to decide the
+    //         obstacle has been started. V2.55 started resolving those
+    //         into a click box when getTileObject() was empty, and V2.59
+    //         made it reliably wrong by choosing the NEAREST of them:
+    //         standing on the start tile, the nearest is the ground under
+    //         your own feet. Clicking there does nothing, forever.
+    //
+    //         Box sources are now, in order: the Rooftop plugin's own
+    //         TileObject; then the same obstacle ID taken from RuneLite's
+    //         Agility plugin list, which is a real scene object with a
+    //         real clickbox and is what V2.55 should have reached for.
+    //         If neither has it there is NO box and the caller turns or
+    //         walks. `locations` is used for distance and bearing only.
+    //
+    //         New field rooftop_*_box_source: rooftop_object,
+    //         agility_plugin or none. A wrong click is now traceable to
+    //         which feed produced the target.
+    //  2.62 — LAST-RESORT BOX FROM THE OBSTACLE'S OWN TILE.
+    //         Field report: standing ONE tile from the Pollnivneach
+    //         basket, the caller reported it could not find the obstacle
+    //         and span the camera looking for it. Neither clickbox
+    //         resolved, and V2.61 had deliberately removed every tile
+    //         fallback.
+    //
+    //         V2.61 was right that `locations` must never produce a
+    //         click box - those are the tiles the PLAYER stands on - but
+    //         wrong to take this one with it. The Agility plugin entry
+    //         carries the OBSTACLE's own WorldPoint, read off a real
+    //         scene object. Aiming at the tile an obstacle occupies is
+    //         sound; aiming at the tile you are standing on never was.
+    //
+    //         Box source order is now: rooftop_object, agility_plugin
+    //         (clickbox), agility_tile (the object's own tile), none.
+    static final String PLUGIN_OUTPUT_VERSION = "2.62";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -5715,7 +5818,8 @@ public class GEVisualAidPlugin extends Plugin
     @SuppressWarnings("unchecked")
     private void appendRooftops(StringBuilder sb, WorldView wv, WorldPoint playerLoc,
                                 int playerYaw, boolean canvasOk,
-                                int ox, int oy, double dsx, double dsy, Rectangle clip)
+                                int ox, int oy, double dsx, double dsy, Rectangle clip,
+                                List<Object[]> agObs)
     {
         boolean linked = false;
         try { linked = (rtManager != null && rtGetCourse != null) || linkRooftops(); }
@@ -5756,7 +5860,7 @@ public class GEVisualAidPlugin extends Plugin
             sb.append("rooftop_next_count=").append(next.size()).append("\n");
             for (int i = 0; i < next.size() && i < 4; i++)
                 emitRooftopObstacle(sb, "rooftop_next_" + i + "_", next.get(i), true,
-                        wv, playerLoc, playerYaw, canvasOk, ox, oy, dsx, dsy, clip, level);
+                        wv, playerLoc, playerYaw, canvasOk, ox, oy, dsx, dsy, clip, level, agObs);
 
             // Every obstacle on the course, in course order.
             Object arr = rtCourseObs.get(course);
@@ -5769,7 +5873,7 @@ public class GEVisualAidPlugin extends Plugin
                 for (int j = 0; j < next.size(); j++)
                     if (rtObsId.getInt(next.get(j)) == rtObsId.getInt(o)) { isNext = true; break; }
                 emitRooftopObstacle(sb, "rooftop_obstacle_" + i + "_", o, isNext,
-                        wv, playerLoc, playerYaw, canvasOk, ox, oy, dsx, dsy, clip, level);
+                        wv, playerLoc, playerYaw, canvasOk, ox, oy, dsx, dsy, clip, level, agObs);
             }
 
             // Marks of grace the plugin is tracking.
@@ -5825,7 +5929,8 @@ public class GEVisualAidPlugin extends Plugin
     private void emitRooftopObstacle(StringBuilder sb, String k, Object obs, boolean isNext,
                                      WorldView wv, WorldPoint playerLoc, int playerYaw,
                                      boolean canvasOk, int ox, int oy,
-                                     double dsx, double dsy, Rectangle clip, int level)
+                                     double dsx, double dsy, Rectangle clip, int level,
+                                     List<Object[]> agObs)
     {
         try
         {
@@ -5847,21 +5952,58 @@ public class GEVisualAidPlugin extends Plugin
                 if (mx instanceof Integer && level >= 0 && level > (Integer) mx) gated = true;
             }
             catch (Throwable ignored) { }
-
+            // V2.59 — keep ALL the obstacle's locations, not just the
+            // first. Read from the Rooftop source: an Obstacle carries a
+            // list of world points, and several are multi-tile - the
+            // Pollnivneach gap 14944 is {3359,2996},{3360,2996},
+            // {3361,2996}. Resolving only locations.get(0) meant that if
+            // that one corner happened to be off screen or behind
+            // scenery the whole obstacle reported offscreen while two
+            // perfectly good tiles of it sat in plain view.
             WorldPoint w = null;
+            List<WorldPoint> wAll = new ArrayList<>();
             try
             {
                 Object locs = rtObsLocs.get(obs);
-                if (locs instanceof List && !((List<?>) locs).isEmpty())
+                if (locs instanceof List)
                 {
-                    Object p = ((List<?>) locs).get(0);
-                    if (p instanceof WorldPoint) w = (WorldPoint) p;
+                    for (Object p : (List<?>) locs)
+                        if (p instanceof WorldPoint) wAll.add((WorldPoint) p);
                 }
             }
             catch (Throwable ignored) { }
+            // Nearest location is the one to report distance and bearing
+            // against - it is the part of the obstacle being walked to.
+            if (!wAll.isEmpty())
+            {
+                w = wAll.get(0);
+                if (playerLoc != null)
+                    for (WorldPoint c : wAll)
+                        if (chebyshev(playerLoc, c) < chebyshev(playerLoc, w)) w = c;
+            }
 
-            String state = "not_loaded";
-            int[]  box   = null;
+            // V2.61 — WHERE THE CLICK BOX COMES FROM. This is the fix for
+            // "it kept clicking the tile I was standing on".
+            //
+            // Read from the Rooftop source: an Obstacle's `locations` are
+            // the tiles the PLAYER STANDS ON to use it, not the obstacle
+            // object's own tile - their isNearNextObstacle() checks
+            // player.distanceTo(location) <= 1 to decide the obstacle has
+            // been started. So resolving `locations` into a click box,
+            // which V2.55 introduced and V2.59 made worse by choosing the
+            // NEAREST of them, aimed at the ground under the player's
+            // feet the moment they were standing on the start tile.
+            // Clicking there does nothing at all, forever.
+            //
+            // Order now: the Rooftop plugin's own TileObject, then the
+            // same obstacle ID from RuneLite's Agility plugin list, which
+            // is a real scene object with a real clickbox and is what
+            // V2.55 should have fallen back to. If neither has it, we
+            // report no box and let the caller turn or walk - `locations`
+            // is used for distance and bearing ONLY, never to click.
+            String state  = "not_loaded";
+            String boxSrc = "none";
+            int[]  box    = null;
             try
             {
                 Object to = optValue(rtObsTile.invoke(obs));
@@ -5873,24 +6015,61 @@ public class GEVisualAidPlugin extends Plugin
                     if (shape == null && t instanceof GameObject)
                         try { shape = ((GameObject) t).getConvexHull(); } catch (Throwable ignored) { }
                     box = shapeBox(shape, canvasOk, ox, oy, dsx, dsy, clip);
-                    if (box != null) state = "ok";
+                    if (box != null) { state = "ok"; boxSrc = "rooftop_object"; }
+                    else state = "offscreen";
                 }
 
-                // V2.55: the tile fallback used to live INSIDE the branch
-                // above, so an obstacle whose getTileObject() came back
-                // empty reported "not_loaded" and no box - even though its
-                // world location was known all along and sits right there
-                // in `locations`. That is the state the whole rooftop
-                // course start was failing in: the obstacle five tiles
-                // away, plainly visible, and unusable to a caller that
-                // trusts this field. The location is what we always had;
-                // use it whenever the clickbox route produced nothing.
-                if (box == null && w != null)
+                if (box == null && agObs != null)
                 {
-                    Object[] rt = resolveTile(wv, w.getX(), w.getY(), w.getPlane(),
-                            canvasOk, ox, oy, dsx, dsy, clip);
-                    box   = (int[]) rt[1];
-                    state = box != null ? "ok_tile" : (String) rt[0];
+                    for (Object[] r : agObs)
+                    {
+                        if (!(r[1] instanceof TileObject)) continue;
+                        TileObject t = (TileObject) r[1];
+                        if (t.getId() != id) continue;
+                        Shape shape = null;
+                        try { shape = t.getClickbox(); } catch (Throwable ignored) { }
+                        if (shape == null && t instanceof GameObject)
+                            try { shape = ((GameObject) t).getConvexHull(); } catch (Throwable ignored) { }
+                        int[] b2 = shapeBox(shape, canvasOk, ox, oy, dsx, dsy, clip);
+                        if (b2 != null)
+                        {
+                            box    = b2;
+                            state  = "ok_agility";
+                            boxSrc = "agility_plugin";
+                            break;
+                        }
+                    }
+                }
+                // V2.62 — last resort: the AGILITY PLUGIN object's own
+                // world tile. Standing one tile from the Pollnivneach
+                // basket the caller reported "cannot find it" and span
+                // the camera, because neither clickbox resolved and
+                // V2.61 had removed every tile fallback on purpose. That
+                // purge was right about `locations` - those are the
+                // tiles the PLAYER stands on - but wrong to take this
+                // one with it: r[2] is the OBSTACLE's own position, read
+                // off a real scene object. Aiming at the tile an
+                // obstacle occupies is sound; aiming at the tile you are
+                // standing on never was.
+                if (box == null && agObs != null)
+                {
+                    for (Object[] r : agObs)
+                    {
+                        if (!(r[1] instanceof TileObject)) continue;
+                        if (((TileObject) r[1]).getId() != id) continue;
+                        if (!(r[2] instanceof WorldPoint)) continue;
+                        WorldPoint ow = (WorldPoint) r[2];
+                        Object[] rt = resolveTile(wv, ow.getX(), ow.getY(), ow.getPlane(),
+                                canvasOk, ox, oy, dsx, dsy, clip);
+                        if (rt[1] != null)
+                        {
+                            box    = (int[]) rt[1];
+                            state  = "ok_agility_tile";
+                            boxSrc = "agility_tile";
+                            break;
+                        }
+                        if ("not_loaded".equals(state)) state = (String) rt[0];
+                    }
                 }
             }
             catch (Throwable ignored) { state = "error"; }
@@ -5908,6 +6087,7 @@ public class GEVisualAidPlugin extends Plugin
             sb.append(k).append("plane=").append(w == null ? -1 : w.getPlane()).append("\n");
             sb.append(k).append("dist_tiles=").append(bear[0]).append("\n");
             sb.append(k).append("state=").append(state).append("\n");
+            sb.append(k).append("box_source=").append(boxSrc).append("\n");
             sb.append(k).append("visible=").append(box != null).append("\n");
             appendBox(sb, k, box);
             sb.append(k).append("rel_bearing_deg=").append(bear[2]).append("\n");
@@ -6201,7 +6381,13 @@ public class GEVisualAidPlugin extends Plugin
         }
 
         obs.sort((a, b) -> Integer.compare((Integer) a[0], (Integer) b[0]));
-        while (obs.size() > 8) obs.remove(obs.size() - 1);
+        // V2.58 — was 8. A rooftop course has nine obstacles or more, and
+        // this list is sorted NEAREST FIRST, so the cap dropped precisely the
+        // one being walked towards. The caller then reported the next step as
+        // "not in view" and stalled with the obstacle in plain sight. The
+        // source is the Agility plugin's own scene map, so this is bounded by
+        // the course, not by a search radius.
+        while (obs.size() > 24) obs.remove(obs.size() - 1);
 
         sb.append("agility_obstacle_count=").append(obs.size()).append("\n");
         for (int i = 0; i < obs.size(); i++)
@@ -6254,7 +6440,7 @@ public class GEVisualAidPlugin extends Plugin
         }
 
         // ---- Rooftop Agility Improved (V2.43) ----
-        appendRooftops(sb, wv, playerLoc, playerYaw, canvasOk, ox, oy, dsx, dsy, clip);
+        appendRooftops(sb, wv, playerLoc, playerYaw, canvasOk, ox, oy, dsx, dsy, clip, obs);
 
         // ---- ordered course (V2.41) ----
         appendAgilityCourse(sb, wv, playerLoc, playerYaw, scenePlane,
