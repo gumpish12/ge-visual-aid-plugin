@@ -40,7 +40,7 @@ public class GEVisualAidPanel extends PluginPanel
         setBackground(ColorScheme.DARK_GRAY_COLOR);
         setBorder(new EmptyBorder(8, 8, 8, 8));
 
-        JLabel header = new JLabel("GE Visual Aid");
+        JLabel header = new JLabel("GE Visual Aid v" + GEVisualAidPlugin.PLUGIN_OUTPUT_VERSION);
         header.setForeground(Color.WHITE);
         header.setFont(header.getFont().deriveFont(Font.BOLD, 14f));
         header.setBorder(new EmptyBorder(0, 0, 4, 0));

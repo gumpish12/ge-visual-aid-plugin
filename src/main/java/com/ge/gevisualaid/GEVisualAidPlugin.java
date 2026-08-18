@@ -1410,7 +1410,50 @@ public class GEVisualAidPlugin extends Plugin
     //         top level one. scene_wv_source says which was used, because
     //         "base nowhere near the player" is the symptom and there was
     //         nothing naming the cause.
-    private static final String PLUGIN_OUTPUT_VERSION = "2.54";
+    //  2.55 — ROOFTOP OBSTACLE REPORTED not_loaded WHILE IN PLAIN SIGHT.
+    //         emitRooftopObstacle only ever resolved a box when the
+    //         Rooftop plugin's getTileObject() returned a TileObject. The
+    //         world-point fallback existed but sat INSIDE that branch, so
+    //         an obstacle whose tile object was empty reported
+    //         "not_loaded" with no box, even though its location was
+    //         known all along in the obstacle's own `locations` field.
+    //
+    //         Observed at the Pollnivneach course start: rooftop_next_0
+    //         not_loaded, count 1, plugin found, while this plugin's own
+    //         agility_obstacle_0 (the same Basket, id 14935) reported
+    //         state=ok at 5 tiles with a click point. One feed usable,
+    //         the other not, for the same object on the same tick.
+    //
+    //         The fallback now runs whenever the clickbox route produced
+    //         no box, not only when a TileObject happened to exist.
+    //  2.56 — MARKS OF GRACE NOW NAME THE OBSTACLE THEY SIT BESIDE.
+    //         agility_mark_N_near_obstacle_id / _slot / _dist. Answers
+    //         "is this mark on my roof or the next one" without the
+    //         caller cross-referencing two tables by eye.
+    //
+    //         Matched against agility_obstacle_* rather than the Rooftop
+    //         feed, because those entries carry a real WorldPoint.
+    //         The match includes PLANE: chebyshev is 2D, so without it a
+    //         mark on a roof binds to whatever is directly below it.
+    //
+    //         The ID is the durable half. The slot is a distance rank
+    //         that reshuffles as the player moves, so it is for reading,
+    //         not for identity - a caller wanting a course position maps
+    //         the id through its own configured order.
+    //  2.57 — THE RUNNING VERSION IS NOW VISIBLE IN THE CLIENT.
+    //         plugin_output_version has only ever been readable by
+    //         fetching :8081/state, which is no help at all when the
+    //         question is "did my rebuild actually pick up the change".
+    //         Rebuilding and having no way to tell is how an already
+    //         fixed bug gets hunted twice.
+    //
+    //         The side panel header now reads "GE Visual Aid v2.57" and
+    //         the sidebar icon tooltip matches, both from the same
+    //         constant, so they cannot drift from what is running.
+    //         startUp() also logs it, which is the fastest check when
+    //         running from IntelliJ or gradlew where the console is
+    //         already in front of you.
+    static final String PLUGIN_OUTPUT_VERSION = "2.57";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -1721,6 +1764,7 @@ public class GEVisualAidPlugin extends Plugin
     @Override
     protected void startUp()
     {
+        log.info("GEVisualAid v{} starting up", PLUGIN_OUTPUT_VERSION);
         for (int i = 0; i < 8; i++)  slots[i]          = new SlotState();
         for (int i = 0; i < 28; i++) inventorySlots[i]  = new InventorySlot();
         session.load();
@@ -1742,7 +1786,7 @@ public class GEVisualAidPlugin extends Plugin
         g.dispose();
 
         navButton = NavigationButton.builder()
-                .tooltip("GE Visual Aid")
+                .tooltip("GE Visual Aid v" + PLUGIN_OUTPUT_VERSION)
                 .icon(icon)
                 .priority(10)
                 .panel(panel)
@@ -5830,13 +5874,23 @@ public class GEVisualAidPlugin extends Plugin
                         try { shape = ((GameObject) t).getConvexHull(); } catch (Throwable ignored) { }
                     box = shapeBox(shape, canvasOk, ox, oy, dsx, dsy, clip);
                     if (box != null) state = "ok";
-                    else if (w != null)
-                    {
-                        Object[] rt = resolveTile(wv, w.getX(), w.getY(), w.getPlane(),
-                                canvasOk, ox, oy, dsx, dsy, clip);
-                        box   = (int[]) rt[1];
-                        state = box != null ? "ok_tile" : (String) rt[0];
-                    }
+                }
+
+                // V2.55: the tile fallback used to live INSIDE the branch
+                // above, so an obstacle whose getTileObject() came back
+                // empty reported "not_loaded" and no box - even though its
+                // world location was known all along and sits right there
+                // in `locations`. That is the state the whole rooftop
+                // course start was failing in: the obstacle five tiles
+                // away, plainly visible, and unusable to a caller that
+                // trusts this field. The location is what we always had;
+                // use it whenever the clickbox route produced nothing.
+                if (box == null && w != null)
+                {
+                    Object[] rt = resolveTile(wv, w.getX(), w.getY(), w.getPlane(),
+                            canvasOk, ox, oy, dsx, dsy, clip);
+                    box   = (int[]) rt[1];
+                    state = box != null ? "ok_tile" : (String) rt[0];
                 }
             }
             catch (Throwable ignored) { state = "error"; }
@@ -6207,12 +6261,14 @@ public class GEVisualAidPlugin extends Plugin
                 canvasOk, ox, oy, dsx, dsy, clip, obs);
 
         // ---- marks of grace ----
+        // V2.56: obs is handed over so each mark can name the obstacle it
+        // sits beside. The stick gets null - there is nothing to say.
         appendAgilityTiles(sb, "agility_mark", agMarks, wv, playerLoc, playerYaw,
-                canvasOk, ox, oy, dsx, dsy, clip, true);
+                canvasOk, ox, oy, dsx, dsy, clip, true, obs);
 
         // ---- werewolf stick ----
         appendAgilityTiles(sb, "agility_stick", agStick, wv, playerLoc, playerYaw,
-                canvasOk, ox, oy, dsx, dsy, clip, false);
+                canvasOk, ox, oy, dsx, dsy, clip, false, null);
     }
 
     // Shared emitter for the plugin's Tile lists — marks of grace (a List)
@@ -6223,7 +6279,7 @@ public class GEVisualAidPlugin extends Plugin
                                     WorldView wv, WorldPoint playerLoc, int playerYaw,
                                     boolean canvasOk, int ox, int oy,
                                     double dsx, double dsy, Rectangle clip,
-                                    boolean isList)
+                                    boolean isList, List<Object[]> obs)
     {
         List<WorldPoint> pts = new ArrayList<>();
         try
@@ -6286,6 +6342,50 @@ public class GEVisualAidPlugin extends Plugin
             appendBox(sb, k, box);
             sb.append(k).append("rel_bearing_deg=").append(bear[2]).append("\n");
             sb.append(k).append("direction=").append(bear[3]).append("\n");
+
+            // V2.56: which obstacle is this mark beside? Answers "is this
+            // one on my roof or the next roof" without the caller having
+            // to cross-reference two tables by hand.
+            //
+            // Matched against agility_obstacle_*, NOT the Rooftop feed:
+            // these entries carry a real WorldPoint, while the Rooftop
+            // ones derive theirs from locations.get(0) and are the feed
+            // that reports not_loaded in the field.
+            //
+            // PLANE IS PART OF THE MATCH. chebyshev is 2D, so without it
+            // a mark on a roof binds to whatever sits directly below it -
+            // which is exactly the "two roofs away" case this is for.
+            //
+            // The id is the durable half of the answer. The slot number
+            // is a DISTANCE RANK that reshuffles as you move, so it is
+            // emitted for reading, not for identity; callers wanting a
+            // course position should map the id through their own order.
+            if (obs != null)
+            {
+                int nearSlot = -1;
+                int nearDist = Integer.MAX_VALUE;
+                int nearId   = -1;
+                for (int j = 0; j < obs.size(); j++)
+                {
+                    try
+                    {
+                        WorldPoint ow = (WorldPoint) obs.get(j)[2];
+                        if (ow == null || ow.getPlane() != w.getPlane()) continue;
+                        int od = chebyshev(w, ow);
+                        if (od < nearDist)
+                        {
+                            nearDist = od;
+                            nearSlot = j;
+                            nearId   = ((TileObject) obs.get(j)[1]).getId();
+                        }
+                    }
+                    catch (Throwable ignored) { }
+                }
+                sb.append(k).append("near_obstacle_slot=").append(nearSlot).append("\n");
+                sb.append(k).append("near_obstacle_id=").append(nearId).append("\n");
+                sb.append(k).append("near_obstacle_dist=")
+                  .append(nearSlot < 0 ? -1 : nearDist).append("\n");
+            }
         }
     }
 
