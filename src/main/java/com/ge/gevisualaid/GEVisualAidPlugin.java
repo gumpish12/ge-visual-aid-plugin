@@ -1540,6 +1540,40 @@ public class GEVisualAidPlugin extends Plugin
     //         New field rooftop_*_box_source: rooftop_object,
     //         agility_plugin or none. A wrong click is now traceable to
     //         which feed produced the target.
+    //  2.64 - A PLACEHOLDER IS EVIDENCE, NOT JUST NOISE.
+    //         2.63 stopped counting placeholders, which made every
+    //         bank_<name> honest. It also threw the placeholder away
+    //         entirely, and that discarded the one thing that can tell
+    //         two identical-looking readings apart.
+    //
+    //         bank_<name>=0 means either "the bank is empty" or "this
+    //         watch entry matches nothing" - a typo like Gold_ore
+    //         instead of gold ore reports 0 forever. Those are the same
+    //         number, and a consumer cannot act on the first without
+    //         risking the second. The Skilling Copilot's out-of-ore stop
+    //         had to spend a real withdraw click to break the tie: only
+    //         an empty bank can produce "count says 0" AND "the withdraw
+    //         landed nothing".
+    //
+    //         But a placeholder CARRIES THE REAL ITEM'S NAME - that is
+    //         exactly why it inflated the counts in the first place. So
+    //         its presence proves the watch entry names a real item that
+    //         the bank has a slot reserved for. New field per entry:
+    //
+    //             bank_<name>_placeholder=true|false
+    //
+    //         0 with placeholder=true is an EMPTY BANK, provably.
+    //         0 with placeholder=false is a bank that never held it, or
+    //         a mistyped entry - still ambiguous, still worth a second
+    //         witness.
+    //
+    //         Id-based watch entries resolve to their item NAME once per
+    //         entry, because a placeholder has a DIFFERENT id from the
+    //         real item and could never be recognised by id.
+    //
+    //         Every bank_<name> consumer gains this, not just the Blast
+    //         Furnace - the mining and gather bank targets read the same
+    //         family of fields.
     //  2.63 - BANK PLACEHOLDERS NO LONGER COUNT AS ONE ITEM.
     //         Field report, and the experiment that settled it: 10 gold
     //         ore read 10, 5 read 5, an EMPTY slot left as a placeholder
@@ -1580,7 +1614,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.63";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.64";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -4977,7 +5011,22 @@ public class GEVisualAidPlugin extends Plugin
         sb.append("bank_watch_count=").append(bankNames.size()).append("\n");
         if (bank == null || bankNames.isEmpty()) return;
 
-        int[] qty = new int[bankNames.size()];
+        int[]     qty = new int[bankNames.size()];
+        boolean[] ph  = new boolean[bankNames.size()];   // 2.64
+
+        // 2.64 - resolve each id-based entry to its NAME once. A placeholder
+        // has a DIFFERENT id from the real item, so an id-matched entry can
+        // never recognise its own placeholder by id - only by the name the
+        // placeholder carries. Done here rather than in the item loop so it
+        // is one lookup per watch entry, not one per bank slot.
+        String[] want = new String[bankNames.size()];
+        for (int i = 0; i < bankNames.size(); i++)
+        {
+            want[i] = bankIds.get(i) >= 0
+                    ? safeItemName(bankIds.get(i)).toLowerCase()
+                    : bankMatch.get(i);
+        }
+
         try
         {
             for (Item it : bank.getItems())
@@ -4987,11 +5036,15 @@ public class GEVisualAidPlugin extends Plugin
                 // distinct item id carrying the real item name, which the
                 // exact-name match below happily counted as 1. That made
                 // an empty bank indistinguishable from one item left.
-                if (isBankPlaceholder(it.getId())) continue;
+                // 2.64 - they are still not counted, but they are no longer
+                // thrown away: a placeholder is POSITIVE EVIDENCE that this
+                // watch entry names a real item, because the placeholder
+                // carries that item's own name. See bank_<name>_placeholder.
+                boolean placeholder = isBankPlaceholder(it.getId());
                 String nm = null;
                 for (int i = 0; i < bankNames.size(); i++)
                 {
-                    if (bankIds.get(i) >= 0)
+                    if (!placeholder && bankIds.get(i) >= 0)
                     {
                         if (bankIds.get(i) == it.getId()) qty[i] += it.getQuantity();
                         continue;
@@ -4999,7 +5052,9 @@ public class GEVisualAidPlugin extends Plugin
                     if (nm == null) nm = safeItemName(it.getId()).toLowerCase();
                     // Exact name match, so "Logs" does not also collect
                     // "Oak logs" and "Yew logs".
-                    if (nm.equals(bankMatch.get(i))) qty[i] += it.getQuantity();
+                    if (!nm.equals(want[i])) continue;
+                    if (placeholder) ph[i] = true;
+                    else             qty[i] += it.getQuantity();
                 }
             }
         }
@@ -5011,6 +5066,12 @@ public class GEVisualAidPlugin extends Plugin
             if (names.length() > 0) names.append(",");
             names.append(bankNames.get(i));
             sb.append("bank_").append(bankNames.get(i)).append("=").append(qty[i]).append("\n");
+            // 2.64 - "this name matches a real item, and the bank has a slot
+            // reserved for it". A consumer seeing 0 alongside placeholder=true
+            // knows the count is an EMPTY BANK and not a mistyped watch entry.
+            // Those two are otherwise identical readings, and telling them
+            // apart previously cost a wasted withdraw click.
+            sb.append("bank_").append(bankNames.get(i)).append("_placeholder=").append(ph[i]).append("\n");
         }
         sb.append("bank_watch_names=").append(names).append("\n");
     }
