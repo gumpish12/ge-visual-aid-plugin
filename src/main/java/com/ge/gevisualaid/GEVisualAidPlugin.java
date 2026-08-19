@@ -1540,6 +1540,30 @@ public class GEVisualAidPlugin extends Plugin
     //         New field rooftop_*_box_source: rooftop_object,
     //         agility_plugin or none. A wrong click is now traceable to
     //         which feed produced the target.
+    //  2.63 - BANK PLACEHOLDERS NO LONGER COUNT AS ONE ITEM.
+    //         Field report, and the experiment that settled it: 10 gold
+    //         ore read 10, 5 read 5, an EMPTY slot left as a placeholder
+    //         read 1, and releasing the placeholder read 0.
+    //
+    //         A placeholder is a distinct item id carrying the real
+    //         item NAME, so the exact-name match counted it, and it
+    //         contributed 1. That made "the bank is empty" and "one
+    //         left" the same number, which is unusable for any consumer
+    //         that wants to act on exhaustion - the Skilling Copilot
+    //         out-of-ore stop had to treat 1 as 0 to work at all, and
+    //         then could not be used on an item genuinely down to its
+    //         last one.
+    //
+    //         ItemComposition.getPlaceholderTemplateId() is -1 on a real
+    //         item and the template id on a placeholder. Verified
+    //         present in runelite-api 1.12.35 with javap rather than
+    //         taken from the wiki. Placeholders are now skipped, so an
+    //         emptied slot reads 0 whether or not the placeholder was
+    //         released.
+    //
+    //         This makes every bank_<name> count honest, not just the
+    //         Blast Furnace one - the mining and gather bank targets
+    //         read the same field and had the same off-by-one.
     //  2.62 — LAST-RESORT BOX FROM THE OBSTACLE'S OWN TILE.
     //         Field report: standing ONE tile from the Pollnivneach
     //         basket, the caller reported it could not find the obstacle
@@ -1556,7 +1580,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.62";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.63";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -4959,6 +4983,11 @@ public class GEVisualAidPlugin extends Plugin
             for (Item it : bank.getItems())
             {
                 if (it == null || it.getId() <= 0 || it.getQuantity() <= 0) continue;
+                // 2.63 - an emptied bank slot keeps a PLACEHOLDER: a
+                // distinct item id carrying the real item name, which the
+                // exact-name match below happily counted as 1. That made
+                // an empty bank indistinguishable from one item left.
+                if (isBankPlaceholder(it.getId())) continue;
                 String nm = null;
                 for (int i = 0; i < bankNames.size(); i++)
                 {
@@ -8621,6 +8650,22 @@ public class GEVisualAidPlugin extends Plugin
     {
         try { return clampInt(config.objectAnchorTolerance(), 0, 10); }
         catch (Throwable t) { return 2; }
+    }
+
+    // 2.63 - is this id a bank placeholder rather than a real item?
+    // getPlaceholderTemplateId() is -1 on a real item and the template id
+    // on a placeholder. Verified present in runelite-api 1.12.35 with
+    // javap; an absent method would compile away to nothing useful.
+    // Fails CLOSED - an unreadable composition is treated as a real item,
+    // so a lookup failure can never silently zero a genuine count.
+    private boolean isBankPlaceholder(int id)
+    {
+        try
+        {
+            if (itemManager == null) return false;
+            return itemManager.getItemComposition(id).getPlaceholderTemplateId() > -1;
+        }
+        catch (Throwable t) { return false; }
     }
 
     private String safeItemName(int id)

@@ -50,6 +50,18 @@ non-trivial change.
 - **An isometric tile is a diamond filling half its bounding box.** Uniform
   sampling of the bounds puts ~50% of clicks on a neighbouring tile.
 - **Multi-tile GameObjects are returned by every tile they cover.**
+- **Bank placeholders are real entries in the bank container.** An emptied slot
+  keeps a placeholder: a DISTINCT item id carrying the real item's name, so an
+  exact-name match counts it and it contributes a quantity of 1. 2.63 skips
+  them via `ItemComposition.getPlaceholderTemplateId()` (-1 on a real item).
+  Before that, every `bank_<name>` was off by one for any emptied slot.
+- **A bank filter entry with no `=` is used as BOTH the output key and the name
+  to match.** `Gold_ore` matches nothing forever while still publishing
+  `bank_Gold_ore=0`. Write the ITEM name — `sanitiseKey` turns spaces into
+  underscores, so the key is unchanged.
+- **Confirm an API method exists with `javap` against the resolved jar** in the
+  Gradle cache before using it. `build.gradle` pins `latest.release`, so the
+  cached `runelite-api-*.jar` is the authority, not the wiki.
 - **A frozen state file is indistinguishable from a dead plugin** to the AHK
   script. If an exception fires before the `.txt` write in `onGameTick`, the file
   silently holds its last value forever.
