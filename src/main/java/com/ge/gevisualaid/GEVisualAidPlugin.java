@@ -1540,6 +1540,19 @@ public class GEVisualAidPlugin extends Plugin
     //         New field rooftop_*_box_source: rooftop_object,
     //         agility_plugin or none. A wrong click is now traceable to
     //         which feed produced the target.
+    //  2.67 - A CONFIGURED FILTER WITH ITS FAMILY SWITCHED OFF SAYS SO.
+    //         Josh had a correct carried-item filter in an active entity
+    //         set and got nothing, because the master "Track carried items"
+    //         box was unticked. Every reading was individually honest -
+    //         ib_enabled=false, ib_count=0 - and the combination still
+    //         looked exactly like "the filter matches nothing", which is
+    //         the failure this codebase exists to avoid.
+    //
+    //         New filters_configured_but_off, listing any family that has
+    //         filter text but is switched off. Empty is the good case. It
+    //         covers all four families, because scenery, npcs and items
+    //         have had the same trap since 2.27 and nobody had been bitten
+    //         by it yet only because those boxes were ticked years ago.
     //  2.66 - CARRIED ITEMS: CLICK BOXES FOR INVENTORY AND BANK ITEMS.
     //         Josh: "can we add like item ids (for example ice gloves) and it
     //         give screen coordinates for those in my inventory and in the
@@ -1681,7 +1694,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.66";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.67";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -3852,6 +3865,20 @@ public class GEVisualAidPlugin extends Plugin
         sb.append("entity_sets_active=").append(esActive).append("\n");
         sb.append("entity_set_conflicts=").append(esConflicts).append("\n");
 
+        // v2.67: filter text present, family switched off. Each half reads
+        // honestly on its own and the pair still looks like "matched
+        // nothing", so the combination is called out explicitly.
+        StringBuilder offCfg = new StringBuilder();
+        try { if (!config.gameObjectsEnabled()   && !esScenery.trim().isEmpty())
+                  esOff(offCfg, "scenery"); }  catch (Throwable ignored) { }
+        try { if (!config.npcTrackingEnabled()   && !esNpcs.trim().isEmpty())
+                  esOff(offCfg, "npcs"); }     catch (Throwable ignored) { }
+        try { if (!config.groundItemsEnabled()   && !esItems.trim().isEmpty())
+                  esOff(offCfg, "items"); }    catch (Throwable ignored) { }
+        try { if (!config.itemBoxesEnabled()     && !esBoxes.trim().isEmpty())
+                  esOff(offCfg, "carried"); }  catch (Throwable ignored) { }
+        sb.append("filters_configured_but_off=").append(offCfg).append("\n");
+
         // ---- Named waypoints, world tile -> absolute desktop pixels (C) -----
         if (wantWaypoints)
         {
@@ -4357,6 +4384,12 @@ public class GEVisualAidPlugin extends Plugin
         log.info("GEVisualAid v{} entity sets active [{}]", PLUGIN_OUTPUT_VERSION, esActive);
         if (!esConflicts.isEmpty())
             log.warn("GEVisualAid entity set problems: {}", esConflicts);
+    }
+
+    private void esOff(StringBuilder sb, String family)
+    {
+        if (sb.length() > 0) sb.append(",");
+        sb.append(family);
     }
 
     private void esAppend(StringBuilder sb, String chunk)
