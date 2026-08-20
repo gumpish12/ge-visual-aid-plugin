@@ -1540,6 +1540,41 @@ public class GEVisualAidPlugin extends Plugin
     //         New field rooftop_*_box_source: rooftop_object,
     //         agility_plugin or none. A wrong click is now traceable to
     //         which feed produced the target.
+    //  2.65 - ENTITY SETS: THE FILTERS STOP OVERWRITING EACH OTHER.
+    //         Josh: "this blast furnace scenery names etc, overwrites over
+    //         scenery names ive got. for sailing, and coal rocks etc. can we
+    //         have a scenery names, item names, npc names etc, global and
+    //         maybe a separate tickable box for each plugin".
+    //
+    //         Scenery / NPC / ground item were ONE GLOBAL STRING EACH, so
+    //         configuring one activity destroyed another's setup. Worse, the
+    //         /filter endpoint persists to the RuneLite profile, so the loss
+    //         survived a restart and looked like the plugin forgetting.
+    //
+    //         Ten named ENTITY SETS, deliberately on the SAME model as the
+    //         waypoint bundles of 2.25 rather than a second, different idea:
+    //         each slot has Enabled / Name / Scenery / NPCs / Items, and an
+    //         enabled set is MERGED WITH the always-on boxes, never replaces
+    //         them. So the always-on boxes keep whatever is genuinely common
+    //         and each activity owns its own slot.
+    //
+    //         Labels are NOT prefixed with the set name, matching 2.25's
+    //         reasoning: a consumer's key must not change because a set was
+    //         reorganised. Duplicate labels are a real hazard here, because
+    //         selectResults() skips a label it has already emitted -- the
+    //         second entry is silently DROPPED, matching nothing forever
+    //         while looking configured. They are now reported in
+    //         entity_set_conflicts. The 24-entry cap in parseEntityFilter is
+    //         reported the same way rather than quietly truncating.
+    //
+    //         GET /filter?entityset=<name> switches one set on and every
+    //         other set off, which is what a script wants at startup. An
+    //         unknown name CHANGES NOTHING and says so: turning everything
+    //         off on a typo would leave the script running blind.
+    //         /filter?entityset=none is the explicit way to clear.
+    //
+    //         New output: entity_sets_available, entity_sets_active,
+    //         entity_set_conflicts.
     //  2.64 - A PLACEHOLDER IS EVIDENCE, NOT JUST NOISE.
     //         2.63 stopped counting placeholders, which made every
     //         bank_<name> honest. It also threw the placeholder away
@@ -1614,7 +1649,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.64";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.65";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -1670,6 +1705,19 @@ public class GEVisualAidPlugin extends Plugin
     private final List<String> wpConflicts = new ArrayList<>();
     private String             wpActiveBundles = "";
     private static final int   WP_BUNDLE_SLOTS = 10;
+
+    // Plugin v2.65 — Entity sets. The always-on filter box for each family
+    // merged with every ENABLED set, rebuilt only when the configuration
+    // actually changes rather than on every tick.
+    private static final int   ES_SLOTS      = 10;
+    private static final int   ES_FILTER_CAP = 24;   // parseEntityFilter's own limit
+    private String             esSpecRaw     = null;
+    private String             esScenery     = "";
+    private String             esNpcs        = "";
+    private String             esItems       = "";
+    private String             esActive      = "";
+    private String             esAvailable   = "";
+    private String             esConflicts   = "";
     // V2.28: id -> scenery name. Only non-morphing objects are cached; an
     // impostor's name depends on game state and must be resolved each time.
     private final Map<Integer, String> objNameCache = new HashMap<>();
@@ -3761,6 +3809,14 @@ public class GEVisualAidPlugin extends Plugin
         sb.append("hover_screen_x=").append(canvasOk && hover != null ? toScreenX(hover[3], ox, dsx) : -1).append("\n");
         sb.append("hover_screen_y=").append(canvasOk && hover != null ? toScreenY(hover[4], oy, dsy) : -1).append("\n");
 
+        // ---- Entity sets (v2.65) -------------------------------------------
+        // Before the three entity appenders below, which read the merged
+        // strings this produces.
+        try { rebuildEntitySets(); } catch (Throwable ignored) { }
+        sb.append("entity_sets_available=").append(esAvailable).append("\n");
+        sb.append("entity_sets_active=").append(esActive).append("\n");
+        sb.append("entity_set_conflicts=").append(esConflicts).append("\n");
+
         // ---- Named waypoints, world tile -> absolute desktop pixels (C) -----
         if (wantWaypoints)
         {
@@ -4180,6 +4236,248 @@ public class GEVisualAidPlugin extends Plugin
     // combined spec is compared as a whole, so nothing re-parses until the
     // configuration actually changes.
     // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Plugin v2.65 — Entity sets.
+    //
+    // Merges the always-on filter box for each family with every enabled
+    // set. Guarded on the combined spec exactly as rebuildWaypoints is, so
+    // nothing re-parses until the configuration really changes.
+    //
+    // MERGED, NOT REPLACED. The always-on boxes are the first chunk, so an
+    // entry that is genuinely common stays in one place and a duplicate
+    // label in a set loses to it rather than shadowing it.
+    // -----------------------------------------------------------------------
+    private void rebuildEntitySets()
+    {
+        StringBuilder spec  = new StringBuilder();
+        StringBuilder scen  = new StringBuilder();
+        StringBuilder npcs  = new StringBuilder();
+        StringBuilder itms  = new StringBuilder();
+        StringBuilder act   = new StringBuilder();
+        StringBuilder avail = new StringBuilder();
+
+        try { esAppend(scen, config.gameObjectFilter()); } catch (Throwable ignored) { }
+        try { esAppend(npcs, config.npcFilter());        } catch (Throwable ignored) { }
+        try { esAppend(itms, config.groundItemFilter()); } catch (Throwable ignored) { }
+        spec.append(scen).append("|").append(npcs).append("|").append(itms);
+
+        for (int i = 1; i <= ES_SLOTS; i++)
+        {
+            try
+            {
+                String nm = sanitiseKey(setName(i));
+                if (nm.isEmpty()) nm = "set" + i;
+
+                boolean on = setEnabled(i);
+                if (avail.length() > 0) avail.append(",");
+                avail.append(nm).append(on ? ":on" : ":off");
+                if (!on) continue;
+
+                esAppend(scen, setScenery(i));
+                esAppend(npcs, setNpcs(i));
+                esAppend(itms, setItems(i));
+
+                if (act.length() > 0) act.append(",");
+                act.append(nm);
+                spec.append("|").append(nm);
+            }
+            catch (Throwable ignored) { }
+        }
+
+        String raw = spec.toString();
+        if (raw.equals(esSpecRaw)) return;
+        esSpecRaw = raw;
+
+        esScenery   = scen.toString();
+        esNpcs      = npcs.toString();
+        esItems     = itms.toString();
+        esActive    = act.toString();
+        esAvailable = avail.toString();
+
+        // A duplicate label matches nothing forever while looking configured,
+        // because selectResults() skips a label it has already emitted. Same
+        // for anything past parseEntityFilter's 24-entry cap. Both are
+        // reported rather than left to look like an empty area.
+        StringBuilder bad = new StringBuilder();
+        esCheck(bad, "scenery", esScenery);
+        esCheck(bad, "npc",     esNpcs);
+        esCheck(bad, "item",    esItems);
+        esConflicts = bad.toString();
+
+        log.info("GEVisualAid v{} entity sets active [{}]", PLUGIN_OUTPUT_VERSION, esActive);
+        if (!esConflicts.isEmpty())
+            log.warn("GEVisualAid entity set problems: {}", esConflicts);
+    }
+
+    private void esAppend(StringBuilder sb, String chunk)
+    {
+        if (chunk == null || chunk.trim().isEmpty()) return;
+        if (sb.length() > 0) sb.append(",");
+        sb.append(chunk.trim());
+    }
+
+    // Labels are read the same way parseEntityFilter reads them, so what is
+    // reported here is what that method will actually do.
+    private void esCheck(StringBuilder bad, String family, String merged)
+    {
+        List<String> seen = new ArrayList<>();
+        int n = 0;
+        for (String tok : merged.split("[,;\r\n]+"))
+        {
+            tok = tok.trim();
+            if (tok.isEmpty()) continue;
+            n++;
+            int eq = tok.indexOf('=');
+            if (eq <= 0) continue;
+            String lab = tok.substring(0, eq).trim();
+            int colon = lab.lastIndexOf(':');
+            if (colon > 0 && colon < lab.length() - 1
+                    && lab.substring(colon + 1).trim().matches("\\d+"))
+                lab = lab.substring(0, colon).trim();
+            lab = sanitiseKey(lab);
+            if (lab.isEmpty()) continue;
+            if (seen.contains(lab))
+            {
+                if (bad.length() > 0) bad.append(",");
+                bad.append(family).append("_duplicate_label:").append(lab);
+            }
+            else seen.add(lab);
+        }
+        if (n > ES_FILTER_CAP)
+        {
+            if (bad.length() > 0) bad.append(",");
+            bad.append(family).append("_overflow:").append(n).append("/").append(ES_FILTER_CAP);
+        }
+    }
+
+    // Config accessors for the ten entity set slots. Static declarations mean
+    // a switch rather than a loop, exactly as with the waypoint bundles.
+    private boolean setEnabled(int i)
+    {
+        switch (i)
+        {
+            case 1:  return config.set1Enabled();
+            case 2:  return config.set2Enabled();
+            case 3:  return config.set3Enabled();
+            case 4:  return config.set4Enabled();
+            case 5:  return config.set5Enabled();
+            case 6:  return config.set6Enabled();
+            case 7:  return config.set7Enabled();
+            case 8:  return config.set8Enabled();
+            case 9:  return config.set9Enabled();
+            case 10: return config.set10Enabled();
+        }
+        return false;
+    }
+
+    private String setName(int i)
+    {
+        switch (i)
+        {
+            case 1:  return config.set1Name();
+            case 2:  return config.set2Name();
+            case 3:  return config.set3Name();
+            case 4:  return config.set4Name();
+            case 5:  return config.set5Name();
+            case 6:  return config.set6Name();
+            case 7:  return config.set7Name();
+            case 8:  return config.set8Name();
+            case 9:  return config.set9Name();
+            case 10: return config.set10Name();
+        }
+        return "";
+    }
+
+    private String setScenery(int i)
+    {
+        switch (i)
+        {
+            case 1:  return config.set1Scenery();
+            case 2:  return config.set2Scenery();
+            case 3:  return config.set3Scenery();
+            case 4:  return config.set4Scenery();
+            case 5:  return config.set5Scenery();
+            case 6:  return config.set6Scenery();
+            case 7:  return config.set7Scenery();
+            case 8:  return config.set8Scenery();
+            case 9:  return config.set9Scenery();
+            case 10: return config.set10Scenery();
+        }
+        return "";
+    }
+
+    private String setNpcs(int i)
+    {
+        switch (i)
+        {
+            case 1:  return config.set1Npcs();
+            case 2:  return config.set2Npcs();
+            case 3:  return config.set3Npcs();
+            case 4:  return config.set4Npcs();
+            case 5:  return config.set5Npcs();
+            case 6:  return config.set6Npcs();
+            case 7:  return config.set7Npcs();
+            case 8:  return config.set8Npcs();
+            case 9:  return config.set9Npcs();
+            case 10: return config.set10Npcs();
+        }
+        return "";
+    }
+
+    private String setItems(int i)
+    {
+        switch (i)
+        {
+            case 1:  return config.set1Items();
+            case 2:  return config.set2Items();
+            case 3:  return config.set3Items();
+            case 4:  return config.set4Items();
+            case 5:  return config.set5Items();
+            case 6:  return config.set6Items();
+            case 7:  return config.set7Items();
+            case 8:  return config.set8Items();
+            case 9:  return config.set9Items();
+            case 10: return config.set10Items();
+        }
+        return "";
+    }
+
+    // Plugin v2.65 — exclusive activation by name, for a script's startup.
+    //
+    // An unknown name changes NOTHING. Turning every set off because of a
+    // typo would leave the caller scanning for nothing at all, which is the
+    // failure this whole feature exists to prevent.
+    private String activateEntitySet(String want)
+    {
+        String w = sanitiseKey(want == null ? "" : want.trim()).toLowerCase();
+
+        List<String> names = new ArrayList<>();
+        int hit = -1;
+        for (int i = 1; i <= ES_SLOTS; i++)
+        {
+            String nm;
+            try { nm = sanitiseKey(setName(i)); } catch (Throwable t) { nm = ""; }
+            if (nm.isEmpty()) nm = "set" + i;
+            names.add(nm);
+            if (hit < 0 && nm.toLowerCase().equals(w)) hit = i;
+        }
+
+        boolean clear = w.isEmpty() || w.equals("none") || w.equals("off");
+        if (!clear && hit < 0)
+            return "no entity set named '" + want + "' - nothing changed. available: "
+                    + String.join(",", names) + "\n";
+
+        synchronized (pendingConfig)
+        {
+            for (int i = 1; i <= ES_SLOTS; i++)
+                pendingConfig.add(new String[]{ "set" + i + "Enabled",
+                        (!clear && i == hit) ? "true" : "false" });
+        }
+        return clear ? "queued entityset=none - all sets off\n"
+                     : "queued entityset=" + names.get(hit - 1)
+                         + " (slot " + hit + "), all other sets off\n";
+    }
+
     private void rebuildWaypoints()
     {
         StringBuilder combined = new StringBuilder();
@@ -7088,6 +7386,10 @@ public class GEVisualAidPlugin extends Plugin
                 // verify a write landed, or discover what is configurable.
                 for (String[] k : REMOTE_KEYS)
                     reply.append(k[0]).append("=").append(readRemoteKey(k)).append("\n");
+                // v2.65: the sets are not single config keys, so report them
+                // here or a reader cannot tell which one is live.
+                reply.append("entityset_available=").append(esAvailable).append("\n");
+                reply.append("entityset_active=").append(esActive).append("\n");
             }
             else
             {
@@ -7097,6 +7399,14 @@ public class GEVisualAidPlugin extends Plugin
                     if (e <= 0) continue;
                     String name = kv.substring(0, e).trim().toLowerCase();
                     String val  = urlDecode(kv.substring(e + 1));
+
+                    // v2.65: entityset is not a single config key - it turns
+                    // one slot on and every other slot off.
+                    if (name.equals("entityset"))
+                    {
+                        reply.append(activateEntitySet(val));
+                        continue;
+                    }
 
                     String[] key = null;
                     for (String[] k : REMOTE_KEYS)
@@ -7206,6 +7516,7 @@ public class GEVisualAidPlugin extends Plugin
         // Force the filters and waypoints to re-parse on the next build
         // rather than waiting for a config string to happen to differ.
         waypointSpecRaw = null;
+        esSpecRaw       = null;   // v2.65
     }
 
     // -----------------------------------------------------------------------
@@ -7768,7 +8079,7 @@ public class GEVisualAidPlugin extends Plugin
         {
             if (playerLoc == null) { sb.append("gi_count=0\n"); return; }
 
-            giFilters = parseEntityFilter(config.groundItemFilter());
+            giFilters = parseEntityFilter(esItems);   // v2.65: always-on + enabled sets
             if (giFilters.isEmpty()) { sb.append("gi_count=0\n"); return; }
 
             int gRadius = clampInt(config.objectSearchRadius(), 1, 52);
@@ -7906,7 +8217,7 @@ public class GEVisualAidPlugin extends Plugin
         List<EntityFilter> npcFilters = new ArrayList<>();
         try
         {
-            npcFilters = parseEntityFilter(config.npcFilter());
+            npcFilters = parseEntityFilter(esNpcs);   // v2.65: always-on + enabled sets
             if (npcFilters.isEmpty()) { sb.append("npc_count=0\n"); return; }
             int tol     = anchorTolerance();
             // V2.39: NPCs are not swept by radius, but a per-entry radius
@@ -8049,7 +8360,7 @@ public class GEVisualAidPlugin extends Plugin
         {
             if (playerLoc == null) { sb.append("go_count=0\n"); return; }
 
-            goFilters = parseEntityFilter(config.gameObjectFilter());
+            goFilters = parseEntityFilter(esScenery);   // v2.65: always-on + enabled sets
             if (goFilters.isEmpty()) { sb.append("go_count=0\n"); return; }
 
             int gRadius = clampInt(config.objectSearchRadius(), 1, 52);

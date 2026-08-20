@@ -818,4 +818,320 @@ public interface GEVisualAidConfig extends Config
             section = objectSection, position = 5)
     @Range(min = 1, max = 12)
     default int objectMaxResults() { return 6; }
+
+    // -----------------------------------------------------------------------
+    // Entity Sets (Plugin v2.65)
+    //
+    // The scenery / NPC / ground item filters were a single global each, so
+    // configuring one activity overwrote another: setting up the Blast
+    // Furnace wiped the sailing and mining filters. These are ten named sets
+    // on the SAME model as Waypoint Bundles above -- each holds all three
+    // families together, and an enabled set is MERGED with the always-on
+    // boxes in Ground Items & NPCs rather than replacing them.
+    //
+    // Entry syntax is identical to the always-on boxes. Labels are NOT
+    // prefixed with the set name, so a consumer's key does not change when a
+    // set is reorganised. If two enabled sets use the same label the first
+    // wins and the collision is reported in entity_set_conflicts -- a
+    // duplicate label is otherwise silently DROPPED by selectResults.
+    //
+    // RuneLite config items must be declared statically, hence a fixed ten
+    // slots rather than an arbitrary list.
+    // -----------------------------------------------------------------------
+    @ConfigSection(name = "Entity Sets",
+            description = "Named sets of scenery / NPC / item filters that can be switched "
+                    + "on and off as a unit, and merged with the always-on boxes in "
+                    + "Ground Items & NPCs. Switch one on remotely with /filter?entityset=<name>.",
+            position = 17, closedByDefault = true)
+    String entitySetSection = "entitysets";
+
+    @ConfigItem(keyName = "set1Enabled", name = "1. Enabled",
+            description = "Merge set 1's entries into the live scenery / NPC / item filters",
+            section = entitySetSection, position = 10)
+    default boolean set1Enabled() { return false; }
+
+    @ConfigItem(keyName = "set1Name", name = "1. Name",
+            description = "Label for set 1, e.g. blastfurnace. This is the name "
+                    + "/filter?entityset=<name> switches on, and it is reported in "
+                    + "entity_sets_available and entity_sets_active.",
+            section = entitySetSection, position = 11)
+    default String set1Name() { return ""; }
+
+    @ConfigItem(keyName = "set1Scenery", name = "1. Scenery",
+            description = "Scenery entries for set 1. Same syntax as the always-on "
+                    + "Scenery box, and merged with it rather than replacing it.",
+            section = entitySetSection, position = 12)
+    default String set1Scenery() { return ""; }
+
+    @ConfigItem(keyName = "set1Npcs", name = "1. NPCs",
+            description = "NPC entries for set 1. Same syntax as the always-on NPC box.",
+            section = entitySetSection, position = 13)
+    default String set1Npcs() { return ""; }
+
+    @ConfigItem(keyName = "set1Items", name = "1. Ground items",
+            description = "Ground item entries for set 1. Same syntax as the always-on "
+                    + "item box.",
+            section = entitySetSection, position = 14)
+    default String set1Items() { return ""; }
+
+    @ConfigItem(keyName = "set2Enabled", name = "2. Enabled",
+            description = "Merge set 2's entries into the live scenery / NPC / item filters",
+            section = entitySetSection, position = 20)
+    default boolean set2Enabled() { return false; }
+
+    @ConfigItem(keyName = "set2Name", name = "2. Name",
+            description = "Label for set 2, e.g. blastfurnace. This is the name "
+                    + "/filter?entityset=<name> switches on, and it is reported in "
+                    + "entity_sets_available and entity_sets_active.",
+            section = entitySetSection, position = 21)
+    default String set2Name() { return ""; }
+
+    @ConfigItem(keyName = "set2Scenery", name = "2. Scenery",
+            description = "Scenery entries for set 2. Same syntax as the always-on "
+                    + "Scenery box, and merged with it rather than replacing it.",
+            section = entitySetSection, position = 22)
+    default String set2Scenery() { return ""; }
+
+    @ConfigItem(keyName = "set2Npcs", name = "2. NPCs",
+            description = "NPC entries for set 2. Same syntax as the always-on NPC box.",
+            section = entitySetSection, position = 23)
+    default String set2Npcs() { return ""; }
+
+    @ConfigItem(keyName = "set2Items", name = "2. Ground items",
+            description = "Ground item entries for set 2. Same syntax as the always-on "
+                    + "item box.",
+            section = entitySetSection, position = 24)
+    default String set2Items() { return ""; }
+
+    @ConfigItem(keyName = "set3Enabled", name = "3. Enabled",
+            description = "Merge set 3's entries into the live scenery / NPC / item filters",
+            section = entitySetSection, position = 30)
+    default boolean set3Enabled() { return false; }
+
+    @ConfigItem(keyName = "set3Name", name = "3. Name",
+            description = "Label for set 3, e.g. blastfurnace. This is the name "
+                    + "/filter?entityset=<name> switches on, and it is reported in "
+                    + "entity_sets_available and entity_sets_active.",
+            section = entitySetSection, position = 31)
+    default String set3Name() { return ""; }
+
+    @ConfigItem(keyName = "set3Scenery", name = "3. Scenery",
+            description = "Scenery entries for set 3. Same syntax as the always-on "
+                    + "Scenery box, and merged with it rather than replacing it.",
+            section = entitySetSection, position = 32)
+    default String set3Scenery() { return ""; }
+
+    @ConfigItem(keyName = "set3Npcs", name = "3. NPCs",
+            description = "NPC entries for set 3. Same syntax as the always-on NPC box.",
+            section = entitySetSection, position = 33)
+    default String set3Npcs() { return ""; }
+
+    @ConfigItem(keyName = "set3Items", name = "3. Ground items",
+            description = "Ground item entries for set 3. Same syntax as the always-on "
+                    + "item box.",
+            section = entitySetSection, position = 34)
+    default String set3Items() { return ""; }
+
+    @ConfigItem(keyName = "set4Enabled", name = "4. Enabled",
+            description = "Merge set 4's entries into the live scenery / NPC / item filters",
+            section = entitySetSection, position = 40)
+    default boolean set4Enabled() { return false; }
+
+    @ConfigItem(keyName = "set4Name", name = "4. Name",
+            description = "Label for set 4, e.g. blastfurnace. This is the name "
+                    + "/filter?entityset=<name> switches on, and it is reported in "
+                    + "entity_sets_available and entity_sets_active.",
+            section = entitySetSection, position = 41)
+    default String set4Name() { return ""; }
+
+    @ConfigItem(keyName = "set4Scenery", name = "4. Scenery",
+            description = "Scenery entries for set 4. Same syntax as the always-on "
+                    + "Scenery box, and merged with it rather than replacing it.",
+            section = entitySetSection, position = 42)
+    default String set4Scenery() { return ""; }
+
+    @ConfigItem(keyName = "set4Npcs", name = "4. NPCs",
+            description = "NPC entries for set 4. Same syntax as the always-on NPC box.",
+            section = entitySetSection, position = 43)
+    default String set4Npcs() { return ""; }
+
+    @ConfigItem(keyName = "set4Items", name = "4. Ground items",
+            description = "Ground item entries for set 4. Same syntax as the always-on "
+                    + "item box.",
+            section = entitySetSection, position = 44)
+    default String set4Items() { return ""; }
+
+    @ConfigItem(keyName = "set5Enabled", name = "5. Enabled",
+            description = "Merge set 5's entries into the live scenery / NPC / item filters",
+            section = entitySetSection, position = 50)
+    default boolean set5Enabled() { return false; }
+
+    @ConfigItem(keyName = "set5Name", name = "5. Name",
+            description = "Label for set 5, e.g. blastfurnace. This is the name "
+                    + "/filter?entityset=<name> switches on, and it is reported in "
+                    + "entity_sets_available and entity_sets_active.",
+            section = entitySetSection, position = 51)
+    default String set5Name() { return ""; }
+
+    @ConfigItem(keyName = "set5Scenery", name = "5. Scenery",
+            description = "Scenery entries for set 5. Same syntax as the always-on "
+                    + "Scenery box, and merged with it rather than replacing it.",
+            section = entitySetSection, position = 52)
+    default String set5Scenery() { return ""; }
+
+    @ConfigItem(keyName = "set5Npcs", name = "5. NPCs",
+            description = "NPC entries for set 5. Same syntax as the always-on NPC box.",
+            section = entitySetSection, position = 53)
+    default String set5Npcs() { return ""; }
+
+    @ConfigItem(keyName = "set5Items", name = "5. Ground items",
+            description = "Ground item entries for set 5. Same syntax as the always-on "
+                    + "item box.",
+            section = entitySetSection, position = 54)
+    default String set5Items() { return ""; }
+
+    @ConfigItem(keyName = "set6Enabled", name = "6. Enabled",
+            description = "Merge set 6's entries into the live scenery / NPC / item filters",
+            section = entitySetSection, position = 60)
+    default boolean set6Enabled() { return false; }
+
+    @ConfigItem(keyName = "set6Name", name = "6. Name",
+            description = "Label for set 6, e.g. blastfurnace. This is the name "
+                    + "/filter?entityset=<name> switches on, and it is reported in "
+                    + "entity_sets_available and entity_sets_active.",
+            section = entitySetSection, position = 61)
+    default String set6Name() { return ""; }
+
+    @ConfigItem(keyName = "set6Scenery", name = "6. Scenery",
+            description = "Scenery entries for set 6. Same syntax as the always-on "
+                    + "Scenery box, and merged with it rather than replacing it.",
+            section = entitySetSection, position = 62)
+    default String set6Scenery() { return ""; }
+
+    @ConfigItem(keyName = "set6Npcs", name = "6. NPCs",
+            description = "NPC entries for set 6. Same syntax as the always-on NPC box.",
+            section = entitySetSection, position = 63)
+    default String set6Npcs() { return ""; }
+
+    @ConfigItem(keyName = "set6Items", name = "6. Ground items",
+            description = "Ground item entries for set 6. Same syntax as the always-on "
+                    + "item box.",
+            section = entitySetSection, position = 64)
+    default String set6Items() { return ""; }
+
+    @ConfigItem(keyName = "set7Enabled", name = "7. Enabled",
+            description = "Merge set 7's entries into the live scenery / NPC / item filters",
+            section = entitySetSection, position = 70)
+    default boolean set7Enabled() { return false; }
+
+    @ConfigItem(keyName = "set7Name", name = "7. Name",
+            description = "Label for set 7, e.g. blastfurnace. This is the name "
+                    + "/filter?entityset=<name> switches on, and it is reported in "
+                    + "entity_sets_available and entity_sets_active.",
+            section = entitySetSection, position = 71)
+    default String set7Name() { return ""; }
+
+    @ConfigItem(keyName = "set7Scenery", name = "7. Scenery",
+            description = "Scenery entries for set 7. Same syntax as the always-on "
+                    + "Scenery box, and merged with it rather than replacing it.",
+            section = entitySetSection, position = 72)
+    default String set7Scenery() { return ""; }
+
+    @ConfigItem(keyName = "set7Npcs", name = "7. NPCs",
+            description = "NPC entries for set 7. Same syntax as the always-on NPC box.",
+            section = entitySetSection, position = 73)
+    default String set7Npcs() { return ""; }
+
+    @ConfigItem(keyName = "set7Items", name = "7. Ground items",
+            description = "Ground item entries for set 7. Same syntax as the always-on "
+                    + "item box.",
+            section = entitySetSection, position = 74)
+    default String set7Items() { return ""; }
+
+    @ConfigItem(keyName = "set8Enabled", name = "8. Enabled",
+            description = "Merge set 8's entries into the live scenery / NPC / item filters",
+            section = entitySetSection, position = 80)
+    default boolean set8Enabled() { return false; }
+
+    @ConfigItem(keyName = "set8Name", name = "8. Name",
+            description = "Label for set 8, e.g. blastfurnace. This is the name "
+                    + "/filter?entityset=<name> switches on, and it is reported in "
+                    + "entity_sets_available and entity_sets_active.",
+            section = entitySetSection, position = 81)
+    default String set8Name() { return ""; }
+
+    @ConfigItem(keyName = "set8Scenery", name = "8. Scenery",
+            description = "Scenery entries for set 8. Same syntax as the always-on "
+                    + "Scenery box, and merged with it rather than replacing it.",
+            section = entitySetSection, position = 82)
+    default String set8Scenery() { return ""; }
+
+    @ConfigItem(keyName = "set8Npcs", name = "8. NPCs",
+            description = "NPC entries for set 8. Same syntax as the always-on NPC box.",
+            section = entitySetSection, position = 83)
+    default String set8Npcs() { return ""; }
+
+    @ConfigItem(keyName = "set8Items", name = "8. Ground items",
+            description = "Ground item entries for set 8. Same syntax as the always-on "
+                    + "item box.",
+            section = entitySetSection, position = 84)
+    default String set8Items() { return ""; }
+
+    @ConfigItem(keyName = "set9Enabled", name = "9. Enabled",
+            description = "Merge set 9's entries into the live scenery / NPC / item filters",
+            section = entitySetSection, position = 90)
+    default boolean set9Enabled() { return false; }
+
+    @ConfigItem(keyName = "set9Name", name = "9. Name",
+            description = "Label for set 9, e.g. blastfurnace. This is the name "
+                    + "/filter?entityset=<name> switches on, and it is reported in "
+                    + "entity_sets_available and entity_sets_active.",
+            section = entitySetSection, position = 91)
+    default String set9Name() { return ""; }
+
+    @ConfigItem(keyName = "set9Scenery", name = "9. Scenery",
+            description = "Scenery entries for set 9. Same syntax as the always-on "
+                    + "Scenery box, and merged with it rather than replacing it.",
+            section = entitySetSection, position = 92)
+    default String set9Scenery() { return ""; }
+
+    @ConfigItem(keyName = "set9Npcs", name = "9. NPCs",
+            description = "NPC entries for set 9. Same syntax as the always-on NPC box.",
+            section = entitySetSection, position = 93)
+    default String set9Npcs() { return ""; }
+
+    @ConfigItem(keyName = "set9Items", name = "9. Ground items",
+            description = "Ground item entries for set 9. Same syntax as the always-on "
+                    + "item box.",
+            section = entitySetSection, position = 94)
+    default String set9Items() { return ""; }
+
+    @ConfigItem(keyName = "set10Enabled", name = "10. Enabled",
+            description = "Merge set 10's entries into the live scenery / NPC / item filters",
+            section = entitySetSection, position = 100)
+    default boolean set10Enabled() { return false; }
+
+    @ConfigItem(keyName = "set10Name", name = "10. Name",
+            description = "Label for set 10, e.g. blastfurnace. This is the name "
+                    + "/filter?entityset=<name> switches on, and it is reported in "
+                    + "entity_sets_available and entity_sets_active.",
+            section = entitySetSection, position = 101)
+    default String set10Name() { return ""; }
+
+    @ConfigItem(keyName = "set10Scenery", name = "10. Scenery",
+            description = "Scenery entries for set 10. Same syntax as the always-on "
+                    + "Scenery box, and merged with it rather than replacing it.",
+            section = entitySetSection, position = 102)
+    default String set10Scenery() { return ""; }
+
+    @ConfigItem(keyName = "set10Npcs", name = "10. NPCs",
+            description = "NPC entries for set 10. Same syntax as the always-on NPC box.",
+            section = entitySetSection, position = 103)
+    default String set10Npcs() { return ""; }
+
+    @ConfigItem(keyName = "set10Items", name = "10. Ground items",
+            description = "Ground item entries for set 10. Same syntax as the always-on "
+                    + "item box.",
+            section = entitySetSection, position = 104)
+    default String set10Items() { return ""; }
 }
