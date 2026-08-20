@@ -66,6 +66,11 @@ non-trivial change.
   with `Put-ore-on`, and the dead ones rank NEARER, so `go_<label>_0` is
   unclickable. Prefer `#Action` over a name wherever an action exists — it also
   self-corrects, e.g. a depleted rock loses `Mine`.
+- **Every entity family has a MASTER TOGGLE separate from its filter**
+  (`sceneryon` / `npcson` / `itemson` / `carriedon`). A filter with its toggle
+  off produces `<fam>_enabled=false` + `<fam>_count=0` — two honest readings
+  that combine to look exactly like "matched nothing". 2.67 names the case in
+  `filters_configured_but_off`; check it before debugging a filter.
 - **A scrolled-out bank item widget still has a RECTANGLE.** It is not hidden
   and its bounds are not empty — they are just elsewhere, possibly over the
   game world, so clicking it walks the player. 2.66 requires a child's bounds
