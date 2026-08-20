@@ -1540,6 +1540,27 @@ public class GEVisualAidPlugin extends Plugin
     //         New field rooftop_*_box_source: rooftop_object,
     //         agility_plugin or none. A wrong click is now traceable to
     //         which feed produced the target.
+    //  2.68 - EDITING A SET'S FILTER TEXT DID NOTHING UNTIL A RESTART.
+    //         A bug introduced by 2.65 itself. rebuildEntitySets guards on a
+    //         combined "spec" string so nothing re-parses until the config
+    //         really changes -- but the spec was built from the always-on
+    //         boxes plus the NAMES of the enabled sets, and never the sets'
+    //         own filter text. So typing a filter into an active set changed
+    //         nothing the guard could see: it returned early and the merged
+    //         string kept its previous value indefinitely.
+    //
+    //         rebuildWaypoints has always appended "<name>=<list>", the
+    //         actual content, for precisely this reason. 2.65 deviated from
+    //         the model it claimed to copy and this is what that cost.
+    //
+    //         The spec now carries every slot's name, its on/off state and
+    //         all four filter strings. Renaming a DISABLED set is included
+    //         too, since that changes entity_sets_available.
+    //
+    //         Symptom was "carried true (0)" with a correct filter in an
+    //         active set -- indistinguishable from a filter matching
+    //         nothing, which is the same class of fault 2.67 addressed and
+    //         the reason that diagnostic did not catch this one.
     //  2.67 - A CONFIGURED FILTER WITH ITS FAMILY SWITCHED OFF SAYS SO.
     //         Josh had a correct carried-item filter in an active entity
     //         set and got nothing, because the master "Track carried items"
@@ -1694,7 +1715,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.67";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.68";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -4345,16 +4366,33 @@ public class GEVisualAidPlugin extends Plugin
                 boolean on = setEnabled(i);
                 if (avail.length() > 0) avail.append(",");
                 avail.append(nm).append(on ? ":on" : ":off");
+
+                // 2.68: the guard below compares this spec, so EVERY input
+                // that can change the output has to appear in it. A name and
+                // an on/off flag for every slot, enabled or not, because a
+                // rename shows up in entity_sets_available.
+                spec.append("|").append(nm).append(on ? ":on" : ":off");
                 if (!on) continue;
 
-                esAppend(scen, setScenery(i));
-                esAppend(npcs, setNpcs(i));
-                esAppend(itms, setItems(i));
-                esAppend(boxs, setBoxes(i));
+                String sc = setScenery(i);
+                String np = setNpcs(i);
+                String im = setItems(i);
+                String bx = setBoxes(i);
+
+                // 2.68: the CONTENT, not just the name. Without this, editing
+                // a set's filter text changes nothing the guard can see, so
+                // the merge never rebuilds and the edit silently never takes
+                // effect until something unrelated happens to differ.
+                spec.append("=").append(sc).append("&").append(np)
+                    .append("&").append(im).append("&").append(bx);
+
+                esAppend(scen, sc);
+                esAppend(npcs, np);
+                esAppend(itms, im);
+                esAppend(boxs, bx);
 
                 if (act.length() > 0) act.append(",");
                 act.append(nm);
-                spec.append("|").append(nm);
             }
             catch (Throwable ignored) { }
         }

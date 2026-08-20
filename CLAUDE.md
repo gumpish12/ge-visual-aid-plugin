@@ -66,6 +66,12 @@ non-trivial change.
   with `Put-ore-on`, and the dead ones rank NEARER, so `go_<label>_0` is
   unclickable. Prefer `#Action` over a name wherever an action exists — it also
   self-corrects, e.g. a depleted rock loses `Mine`.
+- **A "has the config changed?" guard must contain EVERY input that changes
+  the output**, including the text of each source, not just its name. 2.65's
+  entity-set guard hashed the always-on boxes plus the set NAMES, so editing a
+  set's filter text was invisible to it and the merge never rebuilt — the edit
+  silently did nothing until a restart. `rebuildWaypoints` gets this right by
+  appending `<name>=<list>`. Copy that shape; don't paraphrase it.
 - **Every entity family has a MASTER TOGGLE separate from its filter**
   (`sceneryon` / `npcson` / `itemson` / `carriedon`). A filter with its toggle
   off produces `<fam>_enabled=false` + `<fam>_count=0` — two honest readings
