@@ -66,6 +66,21 @@ non-trivial change.
   with `Put-ore-on`, and the dead ones rank NEARER, so `go_<label>_0` is
   unclickable. Prefer `#Action` over a name wherever an action exists — it also
   self-corrects, e.g. a depleted rock loses `Mine`.
+- **A scrolled-out bank item widget still has a RECTANGLE.** It is not hidden
+  and its bounds are not empty — they are just elsewhere, possibly over the
+  game world, so clicking it walks the player. 2.66 requires a child's bounds
+  to intersect its container before emitting a box. Never trust `getBounds()`
+  on a container child without that test.
+- **For carried items, presence and position come from different places.**
+  Counts (`ib_*_inv_qty` / `_bank_qty` / `_worn`) come from the ItemContainer
+  and stay right when the bank scrolls or shuts; the click box comes from the
+  widget and exists only when the item is on screen. Do not merge them —
+  `state` separates `scrolled_out` (scroll or change tab) from `bank_closed`
+  (a remembered count; the container stays populated after the bank closes).
+- **An object's ACTION LIST changes with its state, and that is a free
+  readiness signal.** The Blast Furnace bar dispenser reads `Check` while
+  smelting and `Take|Check` once bars are ready (observed live, both states).
+  Prefer `#Take` over polling a varbit or a lookup table.
 - **Bank placeholders are real entries in the bank container.** An emptied slot
   keeps a placeholder: a DISTINCT item id carrying the real item's name, so an
   exact-name match counts it and it contributes a quantity of 1. 2.63 skips
