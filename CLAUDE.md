@@ -50,6 +50,22 @@ non-trivial change.
 - **An isometric tile is a diamond filling half its bounding box.** Uniform
   sampling of the bounds puts ~50% of clicks on a neighbouring tile.
 - **Multi-tile GameObjects are returned by every tile they cover.**
+- **Per-activity filters go in an ENTITY SET, not the global box.** 2.65 added
+  ten named sets (Enabled / Name / Scenery / NPCs / Items), merged with the
+  always-on boxes rather than replacing them. Use the always-on boxes only for
+  what is genuinely common. `/filter?entityset=<name>` switches one on and all
+  others off; an unknown name changes nothing rather than blanking everything.
+  Overwriting the global with `/filter?scenery=` still works but destroys
+  whatever another activity had, and it persists to the RuneLite profile.
+- **A duplicate filter label is silently DROPPED, not merged.**
+  `selectResults()` skips a label it has already emitted, so the second entry
+  matches nothing forever while looking configured. 2.65 reports these in
+  `entity_set_conflicts` — check it before believing an area is empty.
+- **Same scenery name can be several different objects, only one clickable.**
+  At the Blast Furnace `Conveyor belt` is 9101 twice with NO actions plus 9100
+  with `Put-ore-on`, and the dead ones rank NEARER, so `go_<label>_0` is
+  unclickable. Prefer `#Action` over a name wherever an action exists — it also
+  self-corrects, e.g. a depleted rock loses `Mine`.
 - **Bank placeholders are real entries in the bank container.** An emptied slot
   keeps a placeholder: a DISTINCT item id carrying the real item's name, so an
   exact-name match counts it and it contributes a quantity of 1. 2.63 skips
