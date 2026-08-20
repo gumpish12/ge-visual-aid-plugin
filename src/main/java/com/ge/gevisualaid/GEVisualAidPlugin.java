@@ -1540,6 +1540,31 @@ public class GEVisualAidPlugin extends Plugin
     //         New field rooftop_*_box_source: rooftop_object,
     //         agility_plugin or none. A wrong click is now traceable to
     //         which feed produced the target.
+    //  2.70 - THE MERGED FILTERS ARE NEVER CACHED. STALENESS MADE
+    //         STRUCTURALLY IMPOSSIBLE.
+    //         Josh, having hit 2.68's bug from the other side: "i delete
+    //         all of the carried items and it still shows them in the
+    //         plugin state."
+    //
+    //         2.68 fixed the guard by adding the missing inputs to it.
+    //         That was the wrong shape of fix: it leaves a rule that has
+    //         to keep being obeyed every time a field is added, and the
+    //         penalty for forgetting is silent stale output rather than a
+    //         failure. Two rounds were lost to it already.
+    //
+    //         The guard was also nearly worthless. It BUILT its comparison
+    //         string by reading every config field, so the reads it was
+    //         meant to avoid happened anyway; all it saved was four string
+    //         splits and some assignments.
+    //
+    //         So the merged strings are now assigned UNCONDITIONALLY every
+    //         time. The only thing still guarded is the conflict scan and
+    //         its log line, which exist purely to avoid logging identical
+    //         text every tick -- and if that guard is ever wrong the worst
+    //         case is a stale WARNING, never stale data.
+    //
+    //         esSpecRaw therefore no longer gates output, and the
+    //         invalidation in applyPendingConfig is no longer load-bearing.
     //  2.69 - /filter SHOWS WHAT EACH SLOT ACTUALLY HOLDS.
     //         Two rounds were spent guessing whether a filter had been typed
     //         into an entity set's field or the always-on box, because
@@ -1745,7 +1770,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.69";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.70";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -4427,10 +4452,18 @@ public class GEVisualAidPlugin extends Plugin
             catch (Throwable ignored) { }
         }
 
-        String raw = spec.toString();
-        if (raw.equals(esSpecRaw)) return;
-        esSpecRaw = raw;
-
+        // 2.70: ASSIGNED UNCONDITIONALLY. There is deliberately no early
+        // return above this point.
+        //
+        // 2.65 guarded these on a spec string and forgot to put the sets'
+        // filter text in it, so edits did not take. 2.68 added the missing
+        // inputs, which fixes the instance and leaves the trap: any field
+        // added later has to be remembered, and forgetting produces silently
+        // stale output instead of an error.
+        //
+        // The guard bought almost nothing anyway - it read every config
+        // field to build its own comparison string, so the reads it was
+        // meant to skip happened regardless.
         esScenery   = scen.toString();
         esNpcs      = npcs.toString();
         esItems     = itms.toString();
@@ -4442,6 +4475,15 @@ public class GEVisualAidPlugin extends Plugin
         // because selectResults() skips a label it has already emitted. Same
         // for anything past parseEntityFilter's 24-entry cap. Both are
         // reported rather than left to look like an empty area.
+        //
+        // 2.70: this half IS still guarded, because it exists to write a log
+        // line and repeating that every tick would bury everything else. The
+        // asymmetry is the point - if this guard is ever wrong the cost is a
+        // stale warning, never stale data.
+        String raw = spec.toString();
+        if (raw.equals(esSpecRaw)) return;
+        esSpecRaw = raw;
+
         StringBuilder bad = new StringBuilder();
         esCheck(bad, "scenery", esScenery);
         esCheck(bad, "npc",     esNpcs);
