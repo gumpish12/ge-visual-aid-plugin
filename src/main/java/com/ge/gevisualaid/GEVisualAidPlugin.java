@@ -1540,6 +1540,26 @@ public class GEVisualAidPlugin extends Plugin
     //         New field rooftop_*_box_source: rooftop_object,
     //         agility_plugin or none. A wrong click is now traceable to
     //         which feed produced the target.
+    //  2.71 - AN ENTITY SET CAN CARRY ITS OWN WAYPOINTS.
+    //         Josh: "can we not move these custom waypoint bundles into
+    //         the entity sets. so i dont have a blast furnace entity set
+    //         and blast furnace waypoints?"
+    //
+    //         Right: an activity is one thing, and having its scenery in
+    //         a set while its positioning lives in a separately-toggled
+    //         bundle means two switches that must agree. Each set slot
+    //         gains a Waypoints field, merged into the same parse as the
+    //         always-on list and the enabled bundles.
+    //
+    //         THE BUNDLES ARE UNTOUCHED and still work. This is another
+    //         source, not a replacement, so nothing anyone has already
+    //         configured moves or breaks. A name defined in both still
+    //         resolves first-wins with the collision reported in
+    //         waypoint_name_conflicts, exactly as 2.25 established.
+    //
+    //         Set waypoints are attributed to the SET's name in
+    //         wp_<name>_bundle, so the output says where a waypoint came
+    //         from without anyone having to remember.
     //  2.70 - THE MERGED FILTERS ARE NEVER CACHED. STALENESS MADE
     //         STRUCTURALLY IMPOSSIBLE.
     //         Josh, having hit 2.68's bug from the other side: "i delete
@@ -1770,7 +1790,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.70";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.71";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -4433,13 +4453,15 @@ public class GEVisualAidPlugin extends Plugin
                 String np = setNpcs(i);
                 String im = setItems(i);
                 String bx = setBoxes(i);
+                String wp = setWaypoints(i);   // 2.71
 
                 // 2.68: the CONTENT, not just the name. Without this, editing
                 // a set's filter text changes nothing the guard can see, so
                 // the merge never rebuilds and the edit silently never takes
                 // effect until something unrelated happens to differ.
                 spec.append("=").append(sc).append("&").append(np)
-                    .append("&").append(im).append("&").append(bx);
+                    .append("&").append(im).append("&").append(bx)
+                    .append("&").append(wp);
 
                 esAppend(scen, sc);
                 esAppend(npcs, np);
@@ -4635,6 +4657,24 @@ public class GEVisualAidPlugin extends Plugin
         return "";
     }
 
+    private String setWaypoints(int i)
+    {
+        switch (i)
+        {
+            case 1:  return config.set1Waypoints();
+            case 2:  return config.set2Waypoints();
+            case 3:  return config.set3Waypoints();
+            case 4:  return config.set4Waypoints();
+            case 5:  return config.set5Waypoints();
+            case 6:  return config.set6Waypoints();
+            case 7:  return config.set7Waypoints();
+            case 8:  return config.set8Waypoints();
+            case 9:  return config.set9Waypoints();
+            case 10: return config.set10Waypoints();
+        }
+        return "";
+    }
+
     private String setBoxes(int i)
     {
         switch (i)
@@ -4722,6 +4762,30 @@ public class GEVisualAidPlugin extends Plugin
                 combined.append("|").append(bname).append("=").append(list);
                 if (active.length() > 0) active.append(",");
                 active.append(bname);
+            }
+            catch (Throwable ignored) { }
+        }
+
+        // 2.71: an ENABLED ENTITY SET is a third source, so an activity's
+        // positioning can live with its scenery instead of in a separately
+        // toggled bundle that has to be kept in agreement. Bundles above
+        // are untouched; this adds to them rather than replacing them, and
+        // a name defined twice still resolves first-wins with the clash
+        // reported in waypoint_name_conflicts.
+        for (int i = 1; i <= ES_SLOTS; i++)
+        {
+            try
+            {
+                if (!setEnabled(i)) continue;
+                String list = setWaypoints(i);
+                if (list == null || list.trim().isEmpty()) continue;
+                String sname = sanitiseKey(setName(i));
+                if (sname.isEmpty()) sname = "set" + i;
+                chunks.add(list);
+                sources.add(sname);
+                combined.append("|set:").append(sname).append("=").append(list);
+                if (active.length() > 0) active.append(",");
+                active.append(sname);
             }
             catch (Throwable ignored) { }
         }

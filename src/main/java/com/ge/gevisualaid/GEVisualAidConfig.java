@@ -904,6 +904,14 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 15)
     default String set1Boxes() { return ""; }
 
+    @ConfigItem(keyName = "set1Waypoints", name = "1. Waypoints",
+            description = "Waypoints for set 1. Same syntax as the Waypoint Bundles "
+                    + "section: name:x:y[:plane], or name:x1:y1-x2:y2[:plane] for a "
+                    + "cluster. Merged with the always-on list and any enabled bundles, "
+                    + "so a set can carry its own positioning without a matching bundle.",
+            section = entitySetSection, position = 16)
+    default String set1Waypoints() { return ""; }
+
     @ConfigItem(keyName = "set2Enabled", name = "2. Enabled",
             description = "Merge set 2's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 20)
@@ -938,6 +946,14 @@ public interface GEVisualAidConfig extends Config
                     + "Same syntax as the always-on Carried items box.",
             section = entitySetSection, position = 25)
     default String set2Boxes() { return ""; }
+
+    @ConfigItem(keyName = "set2Waypoints", name = "2. Waypoints",
+            description = "Waypoints for set 2. Same syntax as the Waypoint Bundles "
+                    + "section: name:x:y[:plane], or name:x1:y1-x2:y2[:plane] for a "
+                    + "cluster. Merged with the always-on list and any enabled bundles, "
+                    + "so a set can carry its own positioning without a matching bundle.",
+            section = entitySetSection, position = 26)
+    default String set2Waypoints() { return ""; }
 
     @ConfigItem(keyName = "set3Enabled", name = "3. Enabled",
             description = "Merge set 3's entries into the live scenery / NPC / item filters",
@@ -974,6 +990,14 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 35)
     default String set3Boxes() { return ""; }
 
+    @ConfigItem(keyName = "set3Waypoints", name = "3. Waypoints",
+            description = "Waypoints for set 3. Same syntax as the Waypoint Bundles "
+                    + "section: name:x:y[:plane], or name:x1:y1-x2:y2[:plane] for a "
+                    + "cluster. Merged with the always-on list and any enabled bundles, "
+                    + "so a set can carry its own positioning without a matching bundle.",
+            section = entitySetSection, position = 36)
+    default String set3Waypoints() { return ""; }
+
     @ConfigItem(keyName = "set4Enabled", name = "4. Enabled",
             description = "Merge set 4's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 40)
@@ -1008,6 +1032,14 @@ public interface GEVisualAidConfig extends Config
                     + "Same syntax as the always-on Carried items box.",
             section = entitySetSection, position = 45)
     default String set4Boxes() { return ""; }
+
+    @ConfigItem(keyName = "set4Waypoints", name = "4. Waypoints",
+            description = "Waypoints for set 4. Same syntax as the Waypoint Bundles "
+                    + "section: name:x:y[:plane], or name:x1:y1-x2:y2[:plane] for a "
+                    + "cluster. Merged with the always-on list and any enabled bundles, "
+                    + "so a set can carry its own positioning without a matching bundle.",
+            section = entitySetSection, position = 46)
+    default String set4Waypoints() { return ""; }
 
     @ConfigItem(keyName = "set5Enabled", name = "5. Enabled",
             description = "Merge set 5's entries into the live scenery / NPC / item filters",
@@ -1044,6 +1076,14 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 55)
     default String set5Boxes() { return ""; }
 
+    @ConfigItem(keyName = "set5Waypoints", name = "5. Waypoints",
+            description = "Waypoints for set 5. Same syntax as the Waypoint Bundles "
+                    + "section: name:x:y[:plane], or name:x1:y1-x2:y2[:plane] for a "
+                    + "cluster. Merged with the always-on list and any enabled bundles, "
+                    + "so a set can carry its own positioning without a matching bundle.",
+            section = entitySetSection, position = 56)
+    default String set5Waypoints() { return ""; }
+
     @ConfigItem(keyName = "set6Enabled", name = "6. Enabled",
             description = "Merge set 6's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 60)
@@ -1078,6 +1118,14 @@ public interface GEVisualAidConfig extends Config
                     + "Same syntax as the always-on Carried items box.",
             section = entitySetSection, position = 65)
     default String set6Boxes() { return ""; }
+
+    @ConfigItem(keyName = "set6Waypoints", name = "6. Waypoints",
+            description = "Waypoints for set 6. Same syntax as the Waypoint Bundles "
+                    + "section: name:x:y[:plane], or name:x1:y1-x2:y2[:plane] for a "
+                    + "cluster. Merged with the always-on list and any enabled bundles, "
+                    + "so a set can carry its own positioning without a matching bundle.",
+            section = entitySetSection, position = 66)
+    default String set6Waypoints() { return ""; }
 
     @ConfigItem(keyName = "set7Enabled", name = "7. Enabled",
             description = "Merge set 7's entries into the live scenery / NPC / item filters",
@@ -1114,6 +1162,14 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 75)
     default String set7Boxes() { return ""; }
 
+    @ConfigItem(keyName = "set7Waypoints", name = "7. Waypoints",
+            description = "Waypoints for set 7. Same syntax as the Waypoint Bundles "
+                    + "section: name:x:y[:plane], or name:x1:y1-x2:y2[:plane] for a "
+                    + "cluster. Merged with the always-on list and any enabled bundles, "
+                    + "so a set can carry its own positioning without a matching bundle.",
+            section = entitySetSection, position = 76)
+    default String set7Waypoints() { return ""; }
+
     @ConfigItem(keyName = "set8Enabled", name = "8. Enabled",
             description = "Merge set 8's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 80)
@@ -1148,6 +1204,14 @@ public interface GEVisualAidConfig extends Config
                     + "Same syntax as the always-on Carried items box.",
             section = entitySetSection, position = 85)
     default String set8Boxes() { return ""; }
+
+    @ConfigItem(keyName = "set8Waypoints", name = "8. Waypoints",
+            description = "Waypoints for set 8. Same syntax as the Waypoint Bundles "
+                    + "section: name:x:y[:plane], or name:x1:y1-x2:y2[:plane] for a "
+                    + "cluster. Merged with the always-on list and any enabled bundles, "
+                    + "so a set can carry its own positioning without a matching bundle.",
+            section = entitySetSection, position = 86)
+    default String set8Waypoints() { return ""; }
 
     @ConfigItem(keyName = "set9Enabled", name = "9. Enabled",
             description = "Merge set 9's entries into the live scenery / NPC / item filters",
@@ -1184,6 +1248,14 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 95)
     default String set9Boxes() { return ""; }
 
+    @ConfigItem(keyName = "set9Waypoints", name = "9. Waypoints",
+            description = "Waypoints for set 9. Same syntax as the Waypoint Bundles "
+                    + "section: name:x:y[:plane], or name:x1:y1-x2:y2[:plane] for a "
+                    + "cluster. Merged with the always-on list and any enabled bundles, "
+                    + "so a set can carry its own positioning without a matching bundle.",
+            section = entitySetSection, position = 96)
+    default String set9Waypoints() { return ""; }
+
     @ConfigItem(keyName = "set10Enabled", name = "10. Enabled",
             description = "Merge set 10's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 100)
@@ -1218,4 +1290,12 @@ public interface GEVisualAidConfig extends Config
                     + "Same syntax as the always-on Carried items box.",
             section = entitySetSection, position = 105)
     default String set10Boxes() { return ""; }
+
+    @ConfigItem(keyName = "set10Waypoints", name = "10. Waypoints",
+            description = "Waypoints for set 10. Same syntax as the Waypoint Bundles "
+                    + "section: name:x:y[:plane], or name:x1:y1-x2:y2[:plane] for a "
+                    + "cluster. Merged with the always-on list and any enabled bundles, "
+                    + "so a set can carry its own positioning without a matching bundle.",
+            section = entitySetSection, position = 106)
+    default String set10Waypoints() { return ""; }
 }
