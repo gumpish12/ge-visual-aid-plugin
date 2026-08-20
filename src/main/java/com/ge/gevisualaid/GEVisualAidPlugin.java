@@ -1540,6 +1540,36 @@ public class GEVisualAidPlugin extends Plugin
     //         New field rooftop_*_box_source: rooftop_object,
     //         agility_plugin or none. A wrong click is now traceable to
     //         which feed produced the target.
+    //  2.69 - /filter SHOWS WHAT EACH SLOT ACTUALLY HOLDS.
+    //         Two rounds were spent guessing whether a filter had been typed
+    //         into an entity set's field or the always-on box, because
+    //         nothing exposed either. The state output reports what a filter
+    //         FOUND; it never reported what the filter WAS.
+    //
+    //         GET /filter with no parameters now also dumps, per slot, the
+    //         name, the on/off flag and all four filter strings exactly as
+    //         stored, plus the four MERGED strings the scan really uses.
+    //         Comparing "what I typed" with "what is merged" settles in one
+    //         command what was previously inference.
+    //
+    //         Diagnostic only. On /filter, not in the per-tick state, so it
+    //         costs nothing in the hot path.
+    //
+    //         Three fixes to 2.66 that its first real reading exposed:
+    //
+    //         (1) AN ITEM IN THE INVENTORY WITH THE TAB CLOSED READ AS
+    //             not_found. It is not missing, it is not on screen, and
+    //             those are different instructions: one says give up, the
+    //             other says open the inventory. Now not_visible.
+    //
+    //         (2) id AND name WERE -1 AND THE LOWERCASED FILTER TEXT unless
+    //             a widget happened to be visible, so an equipped item could
+    //             not be identified at all. Both are now resolved from
+    //             whichever container holds it.
+    //
+    //         (3) bank_qty=0 MEANT BOTH "the bank holds none" AND "the bank
+    //             has never been opened this session". New ib_bank_known
+    //             separates them, matching bank_available in the bank family.
     //  2.68 - EDITING A SET'S FILTER TEXT DID NOTHING UNTIL A RESTART.
     //         A bug introduced by 2.65 itself. rebuildEntitySets guards on a
     //         combined "spec" string so nothing re-parses until the config
@@ -1715,7 +1745,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.68";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.69";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -6189,6 +6219,10 @@ public class GEVisualAidPlugin extends Plugin
         }
         catch (Throwable ignored) { }
         sb.append("ib_bank_open=").append(bankOpen).append("\n");
+        // 2.69: without this, bank_qty=0 means both "the bank holds none of
+        // these" and "the bank has never been opened, so I have no idea".
+        // Acting on the first when it is really the second wastes a trip.
+        sb.append("ib_bank_known=").append(bank != null).append("\n");
 
         List<Object[]> vis = ibVisibleItems();
         Map<Integer, String> nameOf = new HashMap<>();
@@ -6248,11 +6282,28 @@ public class GEVisualAidPlugin extends Plugin
                 int wornQty = ibCount(worn, f, forCount, false);
                 boolean ph  = ibCount(bank, f, forCount, true) > 0;
 
+                // 2.69: ordered by what the caller would have to DO about it.
+                // Every branch that knows the item exists also resolves its
+                // real id, so id and name are meaningful even with no box.
                 if (hit != null)
                 {
                     where = (String) hit[2];
                     box   = boundsBox((Rectangle) hit[1], canvasOk, ox, oy, dsx, dsy);
                     state = box != null ? "ok" : "no_canvas";
+                }
+                else if (invQty > 0)
+                {
+                    // In the inventory but no widget: the tab is not showing.
+                    // That is "open the inventory", not "you do not have it".
+                    where   = "inventory";
+                    state   = "not_visible";
+                    foundId = ibFindId(inv, f, forCount);
+                }
+                else if (wornQty > 0)
+                {
+                    where   = "equipped";
+                    state   = "equipped";
+                    foundId = ibFindId(worn, f, forCount);
                 }
                 else if (bankQty > 0)
                 {
@@ -6262,13 +6313,9 @@ public class GEVisualAidPlugin extends Plugin
                     // bank_closed means "this is a remembered count, go to a
                     // bank". Conflating them would have the caller scrolling
                     // an interface that is not on screen.
-                    where = "bank";
-                    state = bankOpen ? "scrolled_out" : "bank_closed";
-                }
-                else if (wornQty > 0)
-                {
-                    where = "equipped";
-                    state = "equipped";
+                    where   = "bank";
+                    state   = bankOpen ? "scrolled_out" : "bank_closed";
+                    foundId = ibFindId(bank, f, forCount);
                 }
                 else state = "not_found";
 
@@ -6299,6 +6346,34 @@ public class GEVisualAidPlugin extends Plugin
             appendBox(sb, k, (int[]) r[5]);
         }
         sb.append("ib_names=").append(names).append("\n");
+    }
+
+    // 2.69: the id of the first real item in this container matching the
+    // entry, or -1. Lets an item that has no widget on screen still be
+    // identified, which is the difference between "worn=true" and knowing
+    // WHAT is worn.
+    private int ibFindId(ItemContainer c, EntityFilter f, String wantName)
+    {
+        if (c == null) return -1;
+        try
+        {
+            for (Item it : c.getItems())
+            {
+                if (it == null || it.getId() <= 0 || it.getQuantity() <= 0) continue;
+                if (isBankPlaceholder(it.getId())) continue;
+                if (f.id >= 0)
+                {
+                    if (f.id == it.getId()) return it.getId();
+                    continue;
+                }
+                if (wantName == null) continue;
+                String nm = safeItemName(it.getId()).toLowerCase();
+                if (!nm.isEmpty() && (wantName.equals("*") || nm.equals(wantName)))
+                    return it.getId();
+            }
+        }
+        catch (Throwable ignored) { }
+        return -1;
     }
 
     // Counts one filter entry against a container. Placeholders are excluded
@@ -7744,6 +7819,37 @@ public class GEVisualAidPlugin extends Plugin
                 // here or a reader cannot tell which one is live.
                 reply.append("entityset_available=").append(esAvailable).append("\n");
                 reply.append("entityset_active=").append(esActive).append("\n");
+
+                // v2.69: what is actually STORED, per slot, and what the scan
+                // actually USES. The state output only ever said what a
+                // filter found, never what it was, which made "typed into the
+                // wrong box" and "matched nothing" indistinguishable.
+                for (int i = 1; i <= ES_SLOTS; i++)
+                {
+                    try
+                    {
+                        String nm = setName(i);
+                        String sc = setScenery(i), np = setNpcs(i);
+                        String im = setItems(i),   bx = setBoxes(i);
+                        boolean on = setEnabled(i);
+                        if (!on && nm.trim().isEmpty() && sc.trim().isEmpty()
+                                && np.trim().isEmpty() && im.trim().isEmpty()
+                                && bx.trim().isEmpty())
+                            continue;   // untouched slot, nothing to say
+                        reply.append("set").append(i).append("=")
+                             .append(nm).append(on ? " :ON" : " :off")
+                             .append(" | scenery[").append(sc).append("]")
+                             .append(" | npcs[").append(np).append("]")
+                             .append(" | items[").append(im).append("]")
+                             .append(" | carried[").append(bx).append("]")
+                             .append("\n");
+                    }
+                    catch (Throwable ignored) { }
+                }
+                reply.append("merged_scenery=").append(esScenery).append("\n");
+                reply.append("merged_npcs=").append(esNpcs).append("\n");
+                reply.append("merged_items=").append(esItems).append("\n");
+                reply.append("merged_carried=").append(esBoxes).append("\n");
             }
             else
             {
