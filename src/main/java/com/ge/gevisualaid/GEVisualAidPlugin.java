@@ -1540,6 +1540,38 @@ public class GEVisualAidPlugin extends Plugin
     //         New field rooftop_*_box_source: rooftop_object,
     //         agility_plugin or none. A wrong click is now traceable to
     //         which feed produced the target.
+    //  2.66 - CARRIED ITEMS: CLICK BOXES FOR INVENTORY AND BANK ITEMS.
+    //         Josh: "can we add like item ids (for example ice gloves) and it
+    //         give screen coordinates for those in my inventory and in the
+    //         bank. i know we can look up the inventory using http. but the
+    //         bank we dont, but the plugins always manage to outline them."
+    //
+    //         New ib_<label>_* family, filtered exactly like the scenery and
+    //         NPC families (label=, id or exact name, * to discover) and
+    //         carried in entity sets alongside them.
+    //
+    //         PRESENCE AND POSITION ARE DELIBERATELY SEPARATE, and this is
+    //         the whole design:
+    //           - the COUNTS (ib_*_inv_qty, _bank_qty, _worn) come from the
+    //             ItemContainer, so they are right even when the bank is
+    //             scrolled elsewhere, on another tab, or shut.
+    //           - the CLICK BOX comes from the widget, and is only emitted
+    //             when the item is really on screen.
+    //         Collapsing the two would produce the two worst readings we
+    //         could ship: "you have none" when the bank simply scrolled, and
+    //         a box to click when the item is not visible.
+    //
+    //         A SCROLLED-OUT BANK CHILD KEEPS A RECTANGLE. It is not hidden
+    //         and its bounds are not empty -- they are just somewhere else,
+    //         possibly over the game world. Clicking that would walk the
+    //         player. So a child's bounds must INTERSECT ITS CONTAINER before
+    //         the box is emitted; otherwise state is scrolled_out, meaning
+    //         "it is definitely there, scroll or search for it". findItemWidget
+    //         (the Blast Furnace ItemStep source) now goes through the same
+    //         check and inherits the fix.
+    //
+    //         Bank placeholders are skipped for counting, as 2.63 established,
+    //         but reported in ib_*_bank_placeholder as 2.64 established.
     //  2.65 - ENTITY SETS: THE FILTERS STOP OVERWRITING EACH OTHER.
     //         Josh: "this blast furnace scenery names etc, overwrites over
     //         scenery names ive got. for sailing, and coal rocks etc. can we
@@ -1649,7 +1681,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.65";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.66";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -1718,6 +1750,7 @@ public class GEVisualAidPlugin extends Plugin
     private String             esActive      = "";
     private String             esAvailable   = "";
     private String             esConflicts   = "";
+    private String             esBoxes       = "";   // v2.66 carried items
     // V2.28: id -> scenery name. Only non-morphing objects are cached; an
     // impostor's name depends on game state and must be resolved each time.
     private final Map<Integer, String> objNameCache = new HashMap<>();
@@ -1923,6 +1956,8 @@ public class GEVisualAidPlugin extends Plugin
             { "itemson",     "groundItemsEnabled",     "b" },
             { "npcson",      "npcTrackingEnabled",     "b" },
             { "sceneryon",   "gameObjectsEnabled",     "b" },
+            { "carried",     "itemBoxFilter",          "s" },   // v2.66
+            { "carriedon",   "itemBoxesEnabled",       "b" },
             { "waypointson", "waypointsEnabled",       "b" },
             { "hoveron",     "hoverTileEnabled",       "b" },
             { "cameraon",    "cameraStateEnabled",     "b" },
@@ -3960,6 +3995,15 @@ public class GEVisualAidPlugin extends Plugin
         else
             sb.append("npc_count=0\n");
 
+        // ---- Carried items (v2.66) ------------------------------------------
+        boolean wantBoxes = false;
+        try { wantBoxes = config.itemBoxesEnabled(); } catch (Throwable ignored) { }
+        sb.append("ib_enabled=").append(wantBoxes).append("\n");
+        if (online && wantBoxes)
+            appendItemBoxes(sb, canvasOk, ox, oy, dsx, dsy);
+        else
+            sb.append("ib_count=0\n");
+
         boolean wantObjs = false;
         try { wantObjs = config.gameObjectsEnabled(); } catch (Throwable ignored) { }
         sb.append("go_enabled=").append(wantObjs).append("\n");
@@ -4256,10 +4300,13 @@ public class GEVisualAidPlugin extends Plugin
         StringBuilder act   = new StringBuilder();
         StringBuilder avail = new StringBuilder();
 
+        StringBuilder boxs = new StringBuilder();
         try { esAppend(scen, config.gameObjectFilter()); } catch (Throwable ignored) { }
         try { esAppend(npcs, config.npcFilter());        } catch (Throwable ignored) { }
         try { esAppend(itms, config.groundItemFilter()); } catch (Throwable ignored) { }
-        spec.append(scen).append("|").append(npcs).append("|").append(itms);
+        try { esAppend(boxs, config.itemBoxFilter());    } catch (Throwable ignored) { }
+        spec.append(scen).append("|").append(npcs).append("|").append(itms)
+            .append("|").append(boxs);
 
         for (int i = 1; i <= ES_SLOTS; i++)
         {
@@ -4276,6 +4323,7 @@ public class GEVisualAidPlugin extends Plugin
                 esAppend(scen, setScenery(i));
                 esAppend(npcs, setNpcs(i));
                 esAppend(itms, setItems(i));
+                esAppend(boxs, setBoxes(i));
 
                 if (act.length() > 0) act.append(",");
                 act.append(nm);
@@ -4291,6 +4339,7 @@ public class GEVisualAidPlugin extends Plugin
         esScenery   = scen.toString();
         esNpcs      = npcs.toString();
         esItems     = itms.toString();
+        esBoxes     = boxs.toString();
         esActive    = act.toString();
         esAvailable = avail.toString();
 
@@ -4302,6 +4351,7 @@ public class GEVisualAidPlugin extends Plugin
         esCheck(bad, "scenery", esScenery);
         esCheck(bad, "npc",     esNpcs);
         esCheck(bad, "item",    esItems);
+        esCheck(bad, "carried", esBoxes);
         esConflicts = bad.toString();
 
         log.info("GEVisualAid v{} entity sets active [{}]", PLUGIN_OUTPUT_VERSION, esActive);
@@ -4438,6 +4488,24 @@ public class GEVisualAidPlugin extends Plugin
             case 8:  return config.set8Items();
             case 9:  return config.set9Items();
             case 10: return config.set10Items();
+        }
+        return "";
+    }
+
+    private String setBoxes(int i)
+    {
+        switch (i)
+        {
+            case 1:  return config.set1Boxes();
+            case 2:  return config.set2Boxes();
+            case 3:  return config.set3Boxes();
+            case 4:  return config.set4Boxes();
+            case 5:  return config.set5Boxes();
+            case 6:  return config.set6Boxes();
+            case 7:  return config.set7Boxes();
+            case 8:  return config.set8Boxes();
+            case 9:  return config.set9Boxes();
+            case 10: return config.set10Boxes();
         }
         return "";
     }
@@ -5953,15 +6021,39 @@ public class GEVisualAidPlugin extends Plugin
             { 149, 0 }, { 15, 3 }, { 12, 13 }, { 467, 0 }, { 12, 12 }
     };
 
-    private Rectangle findItemWidget(int[] ids)
+    // v2.66: BF_ITEM_CONTAINERS with a role attached, so a hit can say WHERE
+    // it was found. Third field: 1 = bank, 0 = inventory.
+    private static final int[][] IB_CONTAINERS = {
+            { 149, 0, 0 },   // inventory
+            { 467, 0, 0 },   // inventory, alternate interface
+            { 15,  3, 0 },   // the bank's own inventory panel
+            { 12, 13, 1 },   // bank items
+            { 12, 12, 1 }
+    };
+
+    // v2.66: ONE pass over every item container, done once per caller rather
+    // than once per filter entry -- an open bank has hundreds of children and
+    // this runs on the client thread every tick.
+    //
+    // Returns rows of { itemId, Rectangle, where }, in container order.
+    //
+    // THE INTERSECTION TEST IS THE POINT. A bank child scrolled out of view
+    // is NOT hidden and its bounds are NOT empty -- they are simply somewhere
+    // else, and on a tall bank that can be off over the game world. Emitting
+    // those bounds hands the caller a click that walks the player instead of
+    // withdrawing. So the child must overlap its own container to count.
+    private List<Object[]> ibVisibleItems()
     {
-        if (ids == null || ids.length == 0) return null;
+        List<Object[]> out = new ArrayList<>();
         try
         {
-            for (int[] c : BF_ITEM_CONTAINERS)
+            for (int[] c : IB_CONTAINERS)
             {
                 Widget cont = client.getWidget(c[0], c[1]);
                 if (cont == null || cont.isHidden()) continue;
+
+                Rectangle cb = null;
+                try { cb = cont.getBounds(); } catch (Throwable ignored) { }
 
                 Widget[] kids = cont.getDynamicChildren();
                 if (kids == null) continue;
@@ -5969,19 +6061,210 @@ public class GEVisualAidPlugin extends Plugin
                 for (Widget kid : kids)
                 {
                     if (kid == null || kid.isHidden()) continue;
-                    int kidItem;
-                    try { kidItem = kid.getItemId(); } catch (Throwable t) { continue; }
-                    for (int id : ids)
-                        if (kidItem == id)
-                        {
-                            Rectangle r = kid.getBounds();
-                            if (r != null && r.width > 0 && r.height > 0) return r;
-                        }
+                    int id;
+                    try { id = kid.getItemId(); } catch (Throwable t) { continue; }
+                    if (id <= 0) continue;
+
+                    Rectangle r = kid.getBounds();
+                    if (r == null || r.width <= 0 || r.height <= 0) continue;
+                    if (cb != null && cb.width > 0 && cb.height > 0 && !cb.intersects(r))
+                        continue;   // scrolled out of its own container
+
+                    out.add(new Object[]{ id, r, c[2] == 1 ? "bank" : "inventory" });
                 }
             }
         }
         catch (Throwable ignored) { }
+        return out;
+    }
+
+    private Rectangle findItemWidget(int[] ids)
+    {
+        if (ids == null || ids.length == 0) return null;
+        for (Object[] row : ibVisibleItems())
+            for (int id : ids)
+                if (((Integer) row[0]) == id) return (Rectangle) row[1];
         return null;
+    }
+
+    // -----------------------------------------------------------------------
+    // Carried items (v2.66).
+    //
+    // Counts come from the ItemContainer and are therefore honest regardless
+    // of what the bank interface is showing. The click box comes from the
+    // widget and is only present when the item is genuinely on screen. See
+    // the 2.66 changelog note for why those two must not be merged.
+    // -----------------------------------------------------------------------
+    private void appendItemBoxes(StringBuilder sb, boolean canvasOk,
+                                 int ox, int oy, double dsx, double dsy)
+    {
+        List<EntityFilter> fs = new ArrayList<>();
+        try { fs = parseEntityFilter(esBoxes); } catch (Throwable ignored) { }
+        if (fs.isEmpty()) { sb.append("ib_count=0\n"); return; }
+
+        ItemContainer inv = null, bank = null, worn = null;
+        try { inv  = client.getItemContainer(InventoryID.INV);  } catch (Throwable ignored) { }
+        try { bank = client.getItemContainer(InventoryID.BANK); } catch (Throwable ignored) { }
+        try { worn = client.getItemContainer(InventoryID.WORN); } catch (Throwable ignored) { }
+
+        // The client keeps the bank container populated after the bank has
+        // been opened once, so a bank count alone cannot tell "scrolled out
+        // of view" from "nowhere near a bank". Same test appendBank uses.
+        boolean bankOpen = false;
+        try
+        {
+            Widget bw = client.getWidget(12, 0);
+            bankOpen = bw != null && !bw.isHidden();
+        }
+        catch (Throwable ignored) { }
+        sb.append("ib_bank_open=").append(bankOpen).append("\n");
+
+        List<Object[]> vis = ibVisibleItems();
+        Map<Integer, String> nameOf = new HashMap<>();
+
+        List<Object[]> rows  = new ArrayList<>();
+        List<String>   taken = new ArrayList<>();
+        for (int i = 0; i < fs.size(); i++)
+        {
+            EntityFilter f = fs.get(i);
+            String label = f.label.isEmpty() ? Integer.toString(rows.size()) : f.label;
+            // A duplicate label would overwrite the first entry's keys. They
+            // are already reported in entity_set_conflicts; drop it here so
+            // the output never carries the same key twice.
+            if (taken.contains(label)) continue;
+            taken.add(label);
+
+            // What are we looking for: an id, or a name?
+            String want = f.id >= 0 ? safeItemName(f.id).toLowerCase() : f.name;
+            boolean wild = "*".equals(want);
+
+            // Everything on screen this entry matches, in container order.
+            List<Object[]> hits = new ArrayList<>();
+            for (Object[] v : vis)
+            {
+                int vid = (Integer) v[0];
+                boolean hit;
+                if (f.id >= 0) hit = f.id == vid;
+                else
+                {
+                    String nm = nameOf.get(vid);
+                    if (nm == null) { nm = safeItemName(vid).toLowerCase(); nameOf.put(vid, nm); }
+                    hit = !nm.isEmpty() && (wild || nm.equals(want));
+                }
+                if (hit) hits.add(v);
+            }
+
+            int n = f.count <= 1 ? 1 : f.count;
+            for (int r = 0; r < n; r++)
+            {
+                Object[] hit = r < hits.size() ? hits.get(r) : null;
+                String   key = n > 1 ? label + "_" + r : label;
+
+                int    foundId = hit != null ? (Integer) hit[0] : (f.id >= 0 ? f.id : -1);
+                String where   = "none";
+                int[]  box     = null;
+                String state;
+
+                // A wildcard row counts the item it actually landed on;
+                // a named row counts by its own name, so notes and charges
+                // of the same item still add up.
+                String forCount = wild
+                        ? (foundId >= 0 ? safeItemName(foundId).toLowerCase() : null)
+                        : want;
+
+                int invQty  = ibCount(inv,  f, forCount, false);
+                int bankQty = ibCount(bank, f, forCount, false);
+                int wornQty = ibCount(worn, f, forCount, false);
+                boolean ph  = ibCount(bank, f, forCount, true) > 0;
+
+                if (hit != null)
+                {
+                    where = (String) hit[2];
+                    box   = boundsBox((Rectangle) hit[1], canvasOk, ox, oy, dsx, dsy);
+                    state = box != null ? "ok" : "no_canvas";
+                }
+                else if (bankQty > 0)
+                {
+                    // Provably present, just not on screen. Never call this
+                    // missing - that reading costs a pointless withdraw.
+                    // scrolled_out means "open the right tab or scroll";
+                    // bank_closed means "this is a remembered count, go to a
+                    // bank". Conflating them would have the caller scrolling
+                    // an interface that is not on screen.
+                    where = "bank";
+                    state = bankOpen ? "scrolled_out" : "bank_closed";
+                }
+                else if (wornQty > 0)
+                {
+                    where = "equipped";
+                    state = "equipped";
+                }
+                else state = "not_found";
+
+                String nm = foundId >= 0 ? safeItemName(foundId) : "";
+                if (nm.isEmpty() && want != null && !wild) nm = want;
+
+                rows.add(new Object[]{ key, foundId, nm, where, state, box,
+                        invQty, bankQty, wornQty, ph });
+            }
+        }
+
+        sb.append("ib_count=").append(rows.size()).append("\n");
+        StringBuilder names = new StringBuilder();
+        for (Object[] r : rows)
+        {
+            String k = "ib_" + r[0] + "_";
+            if (names.length() > 0) names.append(",");
+            names.append(r[0]);
+            sb.append(k).append("id=").append(r[1]).append("\n");
+            sb.append(k).append("name=").append(r[2]).append("\n");
+            sb.append(k).append("where=").append(r[3]).append("\n");
+            sb.append(k).append("state=").append(r[4]).append("\n");
+            sb.append(k).append("visible=").append(r[5] != null).append("\n");
+            sb.append(k).append("inv_qty=").append(r[6]).append("\n");
+            sb.append(k).append("bank_qty=").append(r[7]).append("\n");
+            sb.append(k).append("worn=").append(((Integer) r[8]) > 0).append("\n");
+            sb.append(k).append("bank_placeholder=").append(r[9]).append("\n");
+            appendBox(sb, k, (int[]) r[5]);
+        }
+        sb.append("ib_names=").append(names).append("\n");
+    }
+
+    // Counts one filter entry against a container. Placeholders are excluded
+    // from the count (2.63) but findable on their own (2.64), because a
+    // placeholder proves the name is real and the bank slot is reserved.
+    private int ibCount(ItemContainer c, EntityFilter f, String wantName,
+                        boolean placeholdersOnly)
+    {
+        if (c == null) return 0;
+        int total = 0;
+        try
+        {
+            for (Item it : c.getItems())
+            {
+                if (it == null || it.getId() <= 0 || it.getQuantity() <= 0) continue;
+                boolean ph = isBankPlaceholder(it.getId());
+                if (ph != placeholdersOnly) continue;
+
+                boolean hit;
+                if (f.id >= 0 && !ph)
+                {
+                    hit = f.id == it.getId();
+                }
+                else if (wantName == null)
+                {
+                    hit = false;
+                }
+                else
+                {
+                    String nm = safeItemName(it.getId()).toLowerCase();
+                    hit = !nm.isEmpty() && nm.equals(wantName);
+                }
+                if (hit) total += placeholdersOnly ? 1 : it.getQuantity();
+            }
+        }
+        catch (Throwable ignored) { }
+        return total;
     }
 
     // -----------------------------------------------------------------------

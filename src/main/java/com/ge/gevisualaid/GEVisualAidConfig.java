@@ -794,6 +794,30 @@ public interface GEVisualAidConfig extends Config
             section = objectSection, position = 7)
     default String gameObjectFilter() { return ""; }
 
+    // -----------------------------------------------------------------------
+    // Carried items (Plugin v2.66). Inventory / bank / equipment, by name or
+    // ID, reported with a click box. Ground items are a different family:
+    // those lie on the floor, these are in a container.
+    // -----------------------------------------------------------------------
+    @ConfigItem(keyName = "itemBoxesEnabled", name = "Track carried items",
+            description = "Emit a click box for matching items in the inventory and the "
+                    + "open bank, and report whether each is equipped",
+            section = objectSection, position = 9)
+    default boolean itemBoxesEnabled() { return false; }
+
+    @ConfigItem(keyName = "itemBoxFilter", name = "Carried item names / IDs",
+            description = "Comma or newline separated. A numeric entry matches an item ID, "
+                    + "anything else matches the item name exactly (case insensitive). "
+                    + "Optional label= gives a stable output key. Use * to list everything "
+                    + "carried, which is how to discover exact names and IDs. "
+                    + "Reported as ib_<label>_*, with where=inventory|bank, an inv/bank/worn "
+                    + "count taken from the CONTAINER (so it is right even when the bank is "
+                    + "scrolled away) and a click box only when the item is genuinely "
+                    + "on screen. "
+                    + "Example: ice=Ice gloves, gaunt=Goldsmith gauntlets, 2357",
+            section = objectSection, position = 10)
+    default String itemBoxFilter() { return ""; }
+
     @ConfigItem(keyName = "objectSearchRadius", name = "Ground item / scenery search radius",
             description = "How many tiles around the player to scan for ground items and "
                     + "scenery. Cost grows with the square of this, so 52 (the whole loaded "
@@ -874,6 +898,12 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 14)
     default String set1Items() { return ""; }
 
+    @ConfigItem(keyName = "set1Boxes", name = "1. Carried items",
+            description = "Inventory / bank items to emit a click box for in set 1. "
+                    + "Same syntax as the always-on Carried items box.",
+            section = entitySetSection, position = 15)
+    default String set1Boxes() { return ""; }
+
     @ConfigItem(keyName = "set2Enabled", name = "2. Enabled",
             description = "Merge set 2's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 20)
@@ -902,6 +932,12 @@ public interface GEVisualAidConfig extends Config
                     + "item box.",
             section = entitySetSection, position = 24)
     default String set2Items() { return ""; }
+
+    @ConfigItem(keyName = "set2Boxes", name = "2. Carried items",
+            description = "Inventory / bank items to emit a click box for in set 2. "
+                    + "Same syntax as the always-on Carried items box.",
+            section = entitySetSection, position = 25)
+    default String set2Boxes() { return ""; }
 
     @ConfigItem(keyName = "set3Enabled", name = "3. Enabled",
             description = "Merge set 3's entries into the live scenery / NPC / item filters",
@@ -932,6 +968,12 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 34)
     default String set3Items() { return ""; }
 
+    @ConfigItem(keyName = "set3Boxes", name = "3. Carried items",
+            description = "Inventory / bank items to emit a click box for in set 3. "
+                    + "Same syntax as the always-on Carried items box.",
+            section = entitySetSection, position = 35)
+    default String set3Boxes() { return ""; }
+
     @ConfigItem(keyName = "set4Enabled", name = "4. Enabled",
             description = "Merge set 4's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 40)
@@ -960,6 +1002,12 @@ public interface GEVisualAidConfig extends Config
                     + "item box.",
             section = entitySetSection, position = 44)
     default String set4Items() { return ""; }
+
+    @ConfigItem(keyName = "set4Boxes", name = "4. Carried items",
+            description = "Inventory / bank items to emit a click box for in set 4. "
+                    + "Same syntax as the always-on Carried items box.",
+            section = entitySetSection, position = 45)
+    default String set4Boxes() { return ""; }
 
     @ConfigItem(keyName = "set5Enabled", name = "5. Enabled",
             description = "Merge set 5's entries into the live scenery / NPC / item filters",
@@ -990,6 +1038,12 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 54)
     default String set5Items() { return ""; }
 
+    @ConfigItem(keyName = "set5Boxes", name = "5. Carried items",
+            description = "Inventory / bank items to emit a click box for in set 5. "
+                    + "Same syntax as the always-on Carried items box.",
+            section = entitySetSection, position = 55)
+    default String set5Boxes() { return ""; }
+
     @ConfigItem(keyName = "set6Enabled", name = "6. Enabled",
             description = "Merge set 6's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 60)
@@ -1018,6 +1072,12 @@ public interface GEVisualAidConfig extends Config
                     + "item box.",
             section = entitySetSection, position = 64)
     default String set6Items() { return ""; }
+
+    @ConfigItem(keyName = "set6Boxes", name = "6. Carried items",
+            description = "Inventory / bank items to emit a click box for in set 6. "
+                    + "Same syntax as the always-on Carried items box.",
+            section = entitySetSection, position = 65)
+    default String set6Boxes() { return ""; }
 
     @ConfigItem(keyName = "set7Enabled", name = "7. Enabled",
             description = "Merge set 7's entries into the live scenery / NPC / item filters",
@@ -1048,6 +1108,12 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 74)
     default String set7Items() { return ""; }
 
+    @ConfigItem(keyName = "set7Boxes", name = "7. Carried items",
+            description = "Inventory / bank items to emit a click box for in set 7. "
+                    + "Same syntax as the always-on Carried items box.",
+            section = entitySetSection, position = 75)
+    default String set7Boxes() { return ""; }
+
     @ConfigItem(keyName = "set8Enabled", name = "8. Enabled",
             description = "Merge set 8's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 80)
@@ -1076,6 +1142,12 @@ public interface GEVisualAidConfig extends Config
                     + "item box.",
             section = entitySetSection, position = 84)
     default String set8Items() { return ""; }
+
+    @ConfigItem(keyName = "set8Boxes", name = "8. Carried items",
+            description = "Inventory / bank items to emit a click box for in set 8. "
+                    + "Same syntax as the always-on Carried items box.",
+            section = entitySetSection, position = 85)
+    default String set8Boxes() { return ""; }
 
     @ConfigItem(keyName = "set9Enabled", name = "9. Enabled",
             description = "Merge set 9's entries into the live scenery / NPC / item filters",
@@ -1106,6 +1178,12 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 94)
     default String set9Items() { return ""; }
 
+    @ConfigItem(keyName = "set9Boxes", name = "9. Carried items",
+            description = "Inventory / bank items to emit a click box for in set 9. "
+                    + "Same syntax as the always-on Carried items box.",
+            section = entitySetSection, position = 95)
+    default String set9Boxes() { return ""; }
+
     @ConfigItem(keyName = "set10Enabled", name = "10. Enabled",
             description = "Merge set 10's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 100)
@@ -1134,4 +1212,10 @@ public interface GEVisualAidConfig extends Config
                     + "item box.",
             section = entitySetSection, position = 104)
     default String set10Items() { return ""; }
+
+    @ConfigItem(keyName = "set10Boxes", name = "10. Carried items",
+            description = "Inventory / bank items to emit a click box for in set 10. "
+                    + "Same syntax as the always-on Carried items box.",
+            section = entitySetSection, position = 105)
+    default String set10Boxes() { return ""; }
 }
