@@ -1790,7 +1790,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.71";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.72";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -1897,6 +1897,25 @@ public class GEVisualAidPlugin extends Plugin
     private boolean    actMoved    = false;
 
     private volatile int    pendingHopWorld = -1;
+
+    // 2.72: remote plugin control. Josh: "'rooftop agility improved' never
+    // seems to load, i have to turn it off then on. Then it works."
+    //
+    // A RESTART IS TWO PHASES ON PURPOSE - stopped now, started a few ticks
+    // later - because that is what fixes it by hand. A same-tick stop and
+    // start gives the plugin no chance to notice the region again, which is
+    // the whole reason for doing it.
+    //
+    // The listing is rebuilt on the CLIENT THREAD each tick and read from
+    // the volatile snapshot by the HTTP thread, the same discipline the
+    // scene block uses. Plugin metadata is not scene data, but there is no
+    // reason to have two rules.
+    private volatile String pendingPluginName   = null;
+    private volatile String pendingPluginAction = null;
+    private volatile String pluginActionStatus  = "idle";
+    private volatile String pluginListSnapshot  = "";
+    private String  pluginRestartName  = null;
+    private int     pluginRestartTicks = 0;
     private Object          hopTarget       = null;   // net.runelite.api.World
     private int             hopTicksLeft    = 0;
     private int             hopLastRequested = -1;
@@ -3723,6 +3742,10 @@ public class GEVisualAidPlugin extends Plugin
             // client thread, never in the HTTP handler.
             applyPendingConfig();
             if (online) applyPendingHop();
+            // 2.72: NOT gated on being online. Restarting a plugin at the
+            // login screen is exactly when it is most likely to be wanted.
+            applyPendingPluginAction();
+            refreshPluginListSnapshot();
             if (online) updatePlayerActivity(); else resetPlayerActivity();
             int agReq = pendingAgStep;
             if (agReq != Integer.MIN_VALUE)
@@ -7642,6 +7665,183 @@ public class GEVisualAidPlugin extends Plugin
         catch (Throwable ignored) { }
     }
 
+    // 2.72: exact name wins; otherwise a substring must match exactly ONE
+    // plugin. Two matches is REFUSED rather than guessed - the duplicate
+    // filter label taught that lesson, and "restarted the wrong plugin" is
+    // a worse outcome than "did nothing and said so".
+    private Plugin findPluginByName(String want)
+    {
+        if (want == null) return null;
+        String w = want.trim().toLowerCase();
+        if (w.isEmpty()) return null;
+        Plugin sub = null;
+        int subs = 0;
+        for (Plugin p : pluginManager.getPlugins())
+        {
+            String n = p.getName();
+            if (n == null) continue;
+            if (n.equalsIgnoreCase(want.trim())) return p;
+            if (n.toLowerCase().contains(w)) { sub = p; subs++; }
+        }
+        return subs == 1 ? sub : null;
+    }
+
+    // Client thread. Both states are published because they DISAGREE in
+    // exactly the case this endpoint exists for: enabled in the config but
+    // not actually running, which is what "never seems to load" looks like
+    // from the outside.
+    private void refreshPluginListSnapshot()
+    {
+        try
+        {
+            java.util.List<String> names = new java.util.ArrayList<>();
+            for (Plugin p : pluginManager.getPlugins())
+            {
+                String n = p.getName();
+                if (n == null || n.trim().isEmpty()) continue;
+                names.add(n
+                        + "|" + (pluginManager.isPluginEnabled(p) ? "enabled" : "disabled")
+                        + "|" + (pluginManager.isPluginActive(p)  ? "active"  : "inactive"));
+            }
+            java.util.Collections.sort(names);
+            StringBuilder sb = new StringBuilder();
+            sb.append("plugin_count=").append(names.size()).append("\n");
+            for (String n : names) sb.append("plugin=").append(n).append("\n");
+            pluginListSnapshot = sb.toString();
+        }
+        catch (Throwable ignored) { }
+    }
+
+    // Client thread.
+    private void applyPendingPluginAction()
+    {
+        // Second half of a restart: stopped a few ticks ago, start it now.
+        if (pluginRestartTicks > 0 && --pluginRestartTicks == 0)
+        {
+            String want = pluginRestartName;
+            pluginRestartName = null;
+            Plugin p = want == null ? null : findPluginByName(want);
+            if (p == null) { pluginActionStatus = "restart_failed_no_match " + want; return; }
+            try
+            {
+                pluginManager.setPluginEnabled(p, true);
+                pluginManager.startPlugin(p);
+                pluginActionStatus = "restarted " + p.getName();
+                log.info("GEVisualAid restarted plugin {}", p.getName());
+            }
+            catch (Throwable t)
+            {
+                pluginActionStatus = "restart_start_failed " + t.getMessage();
+                log.warn("GEVisualAid could not start {}: {}", p.getName(), t.getMessage());
+            }
+            return;
+        }
+
+        String want = pendingPluginName;
+        String act  = pendingPluginAction;
+        if (want == null || act == null) return;
+        pendingPluginName   = null;
+        pendingPluginAction = null;
+
+        Plugin p = findPluginByName(want);
+        if (p == null)
+        {
+            // No match AND ambiguous both land here on purpose: either way
+            // there is nothing safe to act on. /plugin with no name lists
+            // the real names.
+            pluginActionStatus = "no_single_match_for " + want;
+            return;
+        }
+
+        try
+        {
+            if (act.equals("on"))
+            {
+                pluginManager.setPluginEnabled(p, true);
+                pluginManager.startPlugin(p);
+                pluginActionStatus = "started " + p.getName();
+                log.info("GEVisualAid started plugin {}", p.getName());
+            }
+            else if (act.equals("off"))
+            {
+                pluginManager.setPluginEnabled(p, false);
+                pluginManager.stopPlugin(p);
+                pluginActionStatus = "stopped " + p.getName();
+                log.info("GEVisualAid stopped plugin {}", p.getName());
+            }
+            else if (act.equals("restart"))
+            {
+                pluginManager.setPluginEnabled(p, false);
+                pluginManager.stopPlugin(p);
+                // Resolved again on the way back in, by NAME, because the
+                // Plugin instance is not guaranteed to be the same object
+                // after a stop.
+                pluginRestartName  = p.getName();
+                pluginRestartTicks = 4;          // ~2.4s, the pause a hand makes
+                pluginActionStatus = "restarting " + p.getName();
+                log.info("GEVisualAid restarting plugin {}", p.getName());
+            }
+        }
+        catch (Throwable t)
+        {
+            pluginActionStatus = "error " + t.getMessage();
+            log.warn("GEVisualAid plugin action {} on {} failed: {}", act, want, t.getMessage());
+        }
+    }
+
+    // 2.72: /plugin
+    //   no name        -> list every plugin with enabled and active state
+    //   name + action  -> queue on|off|restart for the client thread
+    private void handlePluginRequest(HttpExchange ex)
+    {
+        StringBuilder reply = new StringBuilder();
+        try
+        {
+            String q = ex.getRequestURI().getRawQuery();
+            String name = "", action = "";
+            if (q != null)
+                for (String kv : q.split("&"))
+                {
+                    int e = kv.indexOf('=');
+                    if (e <= 0) continue;
+                    String k = kv.substring(0, e).trim();
+                    String v = urlDecode(kv.substring(e + 1)).trim();
+                    if (k.equalsIgnoreCase("name"))   name   = v;
+                    if (k.equalsIgnoreCase("action")) action = v.toLowerCase();
+                }
+
+            reply.append("last_action=").append(pluginActionStatus).append("\n");
+
+            if (name.isEmpty())
+            {
+                reply.append(pluginListSnapshot);
+                reply.append("usage=/plugin?name=<part of the name>&action=on|off|restart\n");
+            }
+            else if (!action.equals("on") && !action.equals("off") && !action.equals("restart"))
+            {
+                reply.append("usage=/plugin?name=").append(name)
+                     .append("&action=on|off|restart\n");
+            }
+            else
+            {
+                pendingPluginName   = name;
+                pendingPluginAction = action;
+                reply.append("queued=").append(action).append(" ").append(name).append("\n");
+            }
+        }
+        catch (Throwable t) { reply.append("err ").append(t.getMessage()).append("\n"); }
+
+        try
+        {
+            byte[] out = reply.toString().getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "text/plain; charset=utf-8");
+            ex.sendResponseHeaders(200, out.length);
+            ex.getResponseBody().write(out);
+            ex.getResponseBody().close();
+        }
+        catch (Throwable ignored) { }
+    }
+
     // Client thread. Hopping needs the world switcher open before
     // hopToWorld() takes effect, so this opens it and retries for a few
     // ticks. No widget id lookup — the retry is robust across interface
@@ -10163,6 +10363,7 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/filter", this::handleFilterRequest);
             httpServer.createContext("/hop",    this::handleHopRequest);
             httpServer.createContext("/agility", this::handleAgilityRequest);
+            httpServer.createContext("/plugin",  this::handlePluginRequest);
             httpServer.setExecutor(Executors.newSingleThreadExecutor(r ->
             {
                 Thread t = new Thread(r, "GEVisualAid-HTTP");
