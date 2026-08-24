@@ -1792,7 +1792,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.74";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.75";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -6710,6 +6710,33 @@ public class GEVisualAidPlugin extends Plugin
     // still waiting behind it. Everything here is a public method except the
     // coursesManager field itself.
     // -----------------------------------------------------------------------
+    // 2.75: the plugin instance survives a stop/start but its
+    // coursesManager does not. Re-read it, and if it has been replaced,
+    // re-derive the method handles from the new one - they come off the
+    // manager's class, which could in principle differ after a reload.
+    //
+    // Anything unexpected leaves the existing link alone: a failed
+    // refresh must never be worse than not refreshing.
+    private void refreshRooftopManager()
+    {
+        try
+        {
+            if (rtPlugin == null) return;
+            java.lang.reflect.Field f = rtPlugin.getClass().getDeclaredField("coursesManager");
+            f.setAccessible(true);
+            Object live = f.get(rtPlugin);
+            if (live == null || live == rtManager) return;
+
+            rtManager    = live;
+            Class<?> cm  = live.getClass();
+            rtGetCourse  = cm.getMethod("getCourse");
+            rtGetMarks   = cm.getMethod("getMarksOfGraces");
+            rtIsStopping = cm.getMethod("isStoppingObstacle", int.class);
+            log.info("GEVisualAid: Rooftop coursesManager was replaced - relinked");
+        }
+        catch (Throwable ignored) { }
+    }
+
     private boolean linkRooftops()
     {
         if (rtManager != null && rtGetCourse != null) return true;
@@ -6773,6 +6800,21 @@ public class GEVisualAidPlugin extends Plugin
                                 int ox, int oy, double dsx, double dsy, Rectangle clip,
                                 List<Object[]> agObs)
     {
+        // 2.75: RE-READ coursesManager EVERY TIME. Josh restarted Rooftop
+        // (by hand, and later through /plugin), the overlays came back,
+        // and rooftop_course stayed empty forever.
+        //
+        // Cause: startUp() builds a NEW coursesManager, and we cached the
+        // old one at link time. RuneLite keeps the same Plugin object
+        // across a stop/start, so nothing here looked broken - we simply
+        // kept asking an object nobody was updating any more. A cached
+        // handle that outlives what it points at, which is the same
+        // shape as the entity-set cache and the bank placeholders.
+        //
+        // The field read is one reflective get per tick. The classes and
+        // methods below it are stable and stay cached.
+        refreshRooftopManager();
+
         boolean linked = false;
         try { linked = (rtManager != null && rtGetCourse != null) || linkRooftops(); }
         catch (Throwable ignored) { }
@@ -7780,6 +7822,11 @@ public class GEVisualAidPlugin extends Plugin
             return;
         }
 
+        // 2.75: whatever we had reflected into this plugin is about to be
+        // stale. Dropping the link costs one re-link on the next tick;
+        // keeping it costs a feed that never reports again.
+        forgetPluginLinks(nm);
+
         // restart: off, pause, on.
         pluginActionStatus = "restarting " + nm;
         log.info("GEVisualAid restarting plugin {}", nm);
@@ -7816,6 +7863,22 @@ public class GEVisualAidPlugin extends Plugin
                 ? "restarted " + nm + activeSuffix(nm)
                 : "restart_start_failed " + nm + ": " + e2;
         log.info("GEVisualAid restart {} -> {}", nm, pluginActionStatus);
+    }
+
+    // 2.75: a plugin we reflect into has been stopped or started, so
+    // every handle we hold for it is suspect. Only the links for THAT
+    // plugin are dropped - re-linking is cheap, but doing it to
+    // everything on every action would be noise.
+    private void forgetPluginLinks(String nm)
+    {
+        if (nm == null) return;
+        String n = nm.toLowerCase();
+        if (n.contains("rooftop"))
+        {
+            rtPlugin = null; rtManager = null; rtGetCourse = null;
+            rtGetMarks = null; rtIsStopping = null; rtLinkTried = false;
+            log.info("GEVisualAid: dropped the Rooftop link ahead of a restart");
+        }
     }
 
     // 2.73: the outcome, not the intention. "restarted X active" and
