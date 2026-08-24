@@ -80,6 +80,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -1790,7 +1791,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.72";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.73";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -1910,12 +1911,17 @@ public class GEVisualAidPlugin extends Plugin
     // the volatile snapshot by the HTTP thread, the same discipline the
     // scene block uses. Plugin metadata is not scene data, but there is no
     // reason to have two rules.
-    private volatile String pendingPluginName   = null;
-    private volatile String pendingPluginAction = null;
+    // 2.73: NOT on the client thread, and not on the HTTP thread either.
+    // Starting or stopping a plugin registers and unregisters EventBus
+    // subscribers. Doing that from inside onGameTick means mutating the
+    // subscriber list while the bus is still dispatching that very tick,
+    // which throws - caught, logged, and the plugin never actually
+    // cycled. That is why 2.72 queued the restart, said "queued", and
+    // nothing happened. RuneLite's own plugin panel uses a separate
+    // executor for exactly this reason, so this does too.
     private volatile String pluginActionStatus  = "idle";
     private volatile String pluginListSnapshot  = "";
-    private String  pluginRestartName  = null;
-    private int     pluginRestartTicks = 0;
+    private ExecutorService pluginExec = null;
     private Object          hopTarget       = null;   // net.runelite.api.World
     private int             hopTicksLeft    = 0;
     private int             hopLastRequested = -1;
@@ -3742,9 +3748,8 @@ public class GEVisualAidPlugin extends Plugin
             // client thread, never in the HTTP handler.
             applyPendingConfig();
             if (online) applyPendingHop();
-            // 2.72: NOT gated on being online. Restarting a plugin at the
-            // login screen is exactly when it is most likely to be wanted.
-            applyPendingPluginAction();
+            // 2.73: the plugin ACTION no longer runs here - see the note on
+            // pluginExec. Only the listing is built on the client thread.
             refreshPluginListSnapshot();
             if (online) updatePlayerActivity(); else resetPlayerActivity();
             int agReq = pendingAgStep;
@@ -7712,37 +7717,14 @@ public class GEVisualAidPlugin extends Plugin
         catch (Throwable ignored) { }
     }
 
-    // Client thread.
-    private void applyPendingPluginAction()
+    // 2.73: runs on pluginExec, never on the client thread or the HTTP
+    // thread. See the note on the field for why.
+    //
+    // The sleep between stop and start is the point of the whole thing:
+    // it is the pause a hand makes, and a plugin that "never seems to
+    // load" needs the gap to notice the region on the way back up.
+    private void runPluginAction(String want, String act)
     {
-        // Second half of a restart: stopped a few ticks ago, start it now.
-        if (pluginRestartTicks > 0 && --pluginRestartTicks == 0)
-        {
-            String want = pluginRestartName;
-            pluginRestartName = null;
-            Plugin p = want == null ? null : findPluginByName(want);
-            if (p == null) { pluginActionStatus = "restart_failed_no_match " + want; return; }
-            try
-            {
-                pluginManager.setPluginEnabled(p, true);
-                pluginManager.startPlugin(p);
-                pluginActionStatus = "restarted " + p.getName();
-                log.info("GEVisualAid restarted plugin {}", p.getName());
-            }
-            catch (Throwable t)
-            {
-                pluginActionStatus = "restart_start_failed " + t.getMessage();
-                log.warn("GEVisualAid could not start {}: {}", p.getName(), t.getMessage());
-            }
-            return;
-        }
-
-        String want = pendingPluginName;
-        String act  = pendingPluginAction;
-        if (want == null || act == null) return;
-        pendingPluginName   = null;
-        pendingPluginAction = null;
-
         Plugin p = findPluginByName(want);
         if (p == null)
         {
@@ -7750,8 +7732,10 @@ public class GEVisualAidPlugin extends Plugin
             // there is nothing safe to act on. /plugin with no name lists
             // the real names.
             pluginActionStatus = "no_single_match_for " + want;
+            log.warn("GEVisualAid /plugin: no single match for '{}'", want);
             return;
         }
+        String nm = p.getName();
 
         try
         {
@@ -7759,34 +7743,70 @@ public class GEVisualAidPlugin extends Plugin
             {
                 pluginManager.setPluginEnabled(p, true);
                 pluginManager.startPlugin(p);
-                pluginActionStatus = "started " + p.getName();
-                log.info("GEVisualAid started plugin {}", p.getName());
+                pluginActionStatus = "started " + nm + activeSuffix(nm);
+                log.info("GEVisualAid started plugin {}", nm);
+                return;
             }
-            else if (act.equals("off"))
+            if (act.equals("off"))
             {
                 pluginManager.setPluginEnabled(p, false);
                 pluginManager.stopPlugin(p);
-                pluginActionStatus = "stopped " + p.getName();
-                log.info("GEVisualAid stopped plugin {}", p.getName());
+                pluginActionStatus = "stopped " + nm + activeSuffix(nm);
+                log.info("GEVisualAid stopped plugin {}", nm);
+                return;
             }
-            else if (act.equals("restart"))
+
+            // restart
+            pluginActionStatus = "restarting " + nm;
+            log.info("GEVisualAid restarting plugin {}", nm);
+            pluginManager.setPluginEnabled(p, false);
+            pluginManager.stopPlugin(p);
+
+            try { Thread.sleep(2500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+
+            // Resolved again BY NAME: the Plugin instance is not
+            // guaranteed to be the same object after a stop.
+            Plugin again = findPluginByName(nm);
+            if (again == null)
             {
-                pluginManager.setPluginEnabled(p, false);
-                pluginManager.stopPlugin(p);
-                // Resolved again on the way back in, by NAME, because the
-                // Plugin instance is not guaranteed to be the same object
-                // after a stop.
-                pluginRestartName  = p.getName();
-                pluginRestartTicks = 4;          // ~2.4s, the pause a hand makes
-                pluginActionStatus = "restarting " + p.getName();
-                log.info("GEVisualAid restarting plugin {}", p.getName());
+                pluginActionStatus = "restart_failed_gone " + nm;
+                log.warn("GEVisualAid restart: {} vanished after stop", nm);
+                return;
             }
+            pluginManager.setPluginEnabled(again, true);
+            pluginManager.startPlugin(again);
+            pluginActionStatus = "restarted " + nm + activeSuffix(nm);
+            log.info("GEVisualAid restarted plugin {} -> {}", nm, pluginActionStatus);
         }
         catch (Throwable t)
         {
-            pluginActionStatus = "error " + t.getMessage();
-            log.warn("GEVisualAid plugin action {} on {} failed: {}", act, want, t.getMessage());
+            pluginActionStatus = "error " + act + " " + nm + ": " + t;
+            log.warn("GEVisualAid plugin action {} on {} failed", act, nm, t);
         }
+    }
+
+    // 2.73: the outcome, not the intention. "restarted X active" and
+    // "restarted X INACTIVE" are different facts and only one of them is
+    // worth celebrating.
+    private String activeSuffix(String nm)
+    {
+        try
+        {
+            Plugin p = findPluginByName(nm);
+            if (p == null) return " gone";
+            return pluginManager.isPluginActive(p) ? " active" : " INACTIVE";
+        }
+        catch (Throwable t) { return " unknown"; }
+    }
+
+    // One plugin's line, for verifying a restart landed.
+    private String pluginStatusLine(String want)
+    {
+        Plugin p = findPluginByName(want);
+        if (p == null) return "match=none\n";
+        return "match=" + p.getName()
+             + "\nenabled=" + pluginManager.isPluginEnabled(p)
+             + "\nactive="  + pluginManager.isPluginActive(p) + "\n";
     }
 
     // 2.72: /plugin
@@ -7817,16 +7837,30 @@ public class GEVisualAidPlugin extends Plugin
                 reply.append(pluginListSnapshot);
                 reply.append("usage=/plugin?name=<part of the name>&action=on|off|restart\n");
             }
+            else if (action.isEmpty())
+            {
+                // 2.73: a name with NO action is a READ. This is how a
+                // caller verifies a restart actually landed, which 2.72
+                // gave it no way to do.
+                reply.append(pluginStatusLine(name));
+            }
             else if (!action.equals("on") && !action.equals("off") && !action.equals("restart"))
             {
                 reply.append("usage=/plugin?name=").append(name)
                      .append("&action=on|off|restart\n");
             }
+            else if (pluginExec == null)
+            {
+                reply.append("err=plugin executor not running\n");
+            }
             else
             {
-                pendingPluginName   = name;
-                pendingPluginAction = action;
+                final String fn = name, fa = action;
+                pluginActionStatus = "queued " + fa + " " + fn;
+                pluginExec.submit(() -> runPluginAction(fn, fa));
                 reply.append("queued=").append(action).append(" ").append(name).append("\n");
+                reply.append("note=a restart takes about 3s; read /plugin?name=")
+                     .append(name).append(" to see whether it came back active\n");
             }
         }
         catch (Throwable t) { reply.append("err ").append(t.getMessage()).append("\n"); }
@@ -10364,6 +10398,14 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/hop",    this::handleHopRequest);
             httpServer.createContext("/agility", this::handleAgilityRequest);
             httpServer.createContext("/plugin",  this::handlePluginRequest);
+            // 2.73: one thread, so two plugin actions can never overlap,
+            // and a daemon so it cannot hold the client open on exit.
+            pluginExec = Executors.newSingleThreadExecutor(r ->
+            {
+                Thread t = new Thread(r, "GEVisualAid-PluginCtl");
+                t.setDaemon(true);
+                return t;
+            });
             httpServer.setExecutor(Executors.newSingleThreadExecutor(r ->
             {
                 Thread t = new Thread(r, "GEVisualAid-HTTP");
@@ -10382,6 +10424,15 @@ public class GEVisualAidPlugin extends Plugin
 
     private void stopHttpServer()
     {
+        try
+        {
+            if (pluginExec != null)
+            {
+                pluginExec.shutdownNow();
+                pluginExec = null;
+            }
+        }
+        catch (Throwable ignored) { }
         try
         {
             if (httpServer != null)
