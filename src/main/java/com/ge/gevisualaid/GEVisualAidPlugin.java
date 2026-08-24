@@ -1792,7 +1792,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.75";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.76";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -4985,6 +4985,34 @@ public class GEVisualAidPlugin extends Plugin
                                  boolean canvasOk, int ox, int oy, double dsx, double dsy,
                                  Rectangle clip)
     {
+        return resolveTile(wv, worldX, worldY, plane, canvasOk, ox, oy, dsx, dsy, clip, false);
+    }
+
+    // 2.76: liftToItems raises the box to where the ITEM is actually drawn.
+    //
+    // Josh, on the Pollnivneach mark that sits on a table: "not the mark, a
+    // section of the green ground highlighted by the agility plugin below
+    // it... most of them are fine and work well, but this one is a table so
+    // it keeps clicking under it."
+    //
+    // A tile polygon is at FLOOR level. An item resting on a table renders
+    // a long way above its own tile - his screenshot has the reported click
+    // at 2140,1059 with the mark sprite about two hundred pixels higher. The
+    // box was never wrong about WHICH tile, only about where on the screen
+    // that tile's contents are.
+    //
+    // Tile.getItemLayer().getHeight() is the offset the client itself draws
+    // the item at, so localToCanvas with that height gives the real point.
+    // The whole box is shifted by the difference, which keeps the tile's
+    // shape and size and only moves it up.
+    //
+    // OFF by default. Only callers clicking something LYING on a tile want
+    // this; an obstacle's box must not jump because a bone happens to be on
+    // the same square.
+    private Object[] resolveTile(WorldView wv, int worldX, int worldY, int plane,
+                                 boolean canvasOk, int ox, int oy, double dsx, double dsy,
+                                 Rectangle clip, boolean liftToItems)
+    {
         Tile[][][] tiles;
         try { tiles = wv.getScene().getTiles(); }
         catch (Throwable t) { return new Object[]{ "no_scene", null }; }
@@ -5006,25 +5034,48 @@ public class GEVisualAidPlugin extends Plugin
         if (c == null) return new Object[]{ "offscreen", null };
         if (!canvasOk) return new Object[]{ "no_canvas", null };
 
+        // 2.76: how far ABOVE the floor the item on this tile is drawn.
+        // Zero for anything at ground level, which is nearly everything -
+        // so this changes nothing except where it matters.
+        int lift = 0;
+        if (liftToItems)
+        {
+            try
+            {
+                net.runelite.api.ItemLayer il = t.getItemLayer();
+                if (il != null && il.getHeight() != 0)
+                {
+                    net.runelite.api.Point ch =
+                            Perspective.localToCanvas(client, lp, plane, il.getHeight());
+                    if (ch != null) lift = ch.getY() - c.getY();
+                }
+            }
+            catch (Throwable ignored) { }   // no lift is the safe answer
+        }
+
+        int cy = c.getY() + lift;
+
         // V2.26: localToCanvas happily returns coordinates outside the
         // window, so an explicit viewport test is what actually decides
-        // whether this tile is on screen.
-        if (clip != null && !clip.contains(c.getX(), c.getY()))
+        // whether this tile is on screen. 2.76: tested at the LIFTED point,
+        // because that is the one we are going to click.
+        if (clip != null && !clip.contains(c.getX(), cy))
             return new Object[]{ "offscreen", null };
 
         Polygon poly = Perspective.getCanvasTilePoly(client, lp);
         Rectangle r  = poly != null
                 ? poly.getBounds()
                 : new Rectangle(c.getX() - 16, c.getY() - 16, 32, 32);
+        if (lift != 0) r = new Rectangle(r.x, r.y + lift, r.width, r.height);
 
         // V2.24: largest axis-aligned rectangle that fits inside the tile
         // polygon, computed in canvas space then converted like everything
         // else. Null when the tile is too small on screen to hold one.
-        int[] inner = inscribedBox(poly, c.getX(), c.getY(), r, clip);
+        int[] inner = inscribedBox(poly, c.getX(), cy, r, clip);
 
         int[] box = new int[]{
                 (int) ((ox + c.getX())            * dsx),
-                (int) ((oy + c.getY())            * dsy),
+                (int) ((oy + cy)                  * dsy),
                 (int) ((ox + r.x)                 * dsx),
                 (int) ((oy + r.y)                 * dsy),
                 (int) ((ox + r.x + r.width)       * dsx),
@@ -7502,8 +7553,10 @@ public class GEVisualAidPlugin extends Plugin
             int[]  box   = null;
             try
             {
+                // 2.76: lifted. A mark of grace is an ITEM lying on the tile,
+                // and at Pollnivneach one of them sits on a table.
                 Object[] rt = resolveTile(wv, w.getX(), w.getY(), w.getPlane(),
-                        canvasOk, ox, oy, dsx, dsy, clip);
+                        canvasOk, ox, oy, dsx, dsy, clip, true);
                 state = (String) rt[0];
                 box   = (int[])  rt[1];
             }
@@ -9072,7 +9125,8 @@ public class GEVisualAidPlugin extends Plugin
             int[]  box   = null;
             try
             {
-                Object[] r = resolveTile(wv, wx, wy, pl, canvasOk, ox, oy, dsx, dsy, clip);
+                // 2.76: lifted - these are items ON the tile, not the tile.
+                Object[] r = resolveTile(wv, wx, wy, pl, canvasOk, ox, oy, dsx, dsy, clip, true);
                 state = (String) r[0];
                 box   = (int[])  r[1];
             }
