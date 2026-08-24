@@ -114,6 +114,29 @@ non-trivial change.
   or started. Two versions of `/plugin` shipped broken on exactly this,
   reporting "queued" both times. **An action that half-succeeds is worse than
   one that fails** — check the OUTCOME (`isPluginActive`), never the intent.
+- **A RESTARTED PLUGIN KEEPS ITS `Plugin` OBJECT BUT REBUILDS WHAT IS INSIDE.**
+  `startUp()` made Rooftop a NEW `coursesManager`; we had cached the old one at
+  link time and asked it forever. Overlays drew fine, `rooftop_course` stayed
+  empty, nothing errored. Any identity check on the `Plugin` itself passes, so
+  **re-read reflected sub-objects every tick** (2.75) rather than caching them,
+  and drop a plugin’s links before cycling it. Josh’s manual off-and-on had
+  been silently orphaning the link the same way for weeks.
+- **Restarting a plugin STEALS THE KEYBOARD.** `startPlugin` rebuilds RuneLite’s
+  config panel on the Swing thread and the search field takes focus, so the next
+  keys sent land in that box — Josh got `agi,2` and `6,2,2226` typed into it.
+  Reclaim focus with a click on the client BEFORE sending anything, and note the
+  general form: after any action that touches RuneLite’s own UI, assume focus is
+  gone.
+- **A tile polygon is FLOOR-level geometry.** A ground item on a table renders
+  far above its own tile, so a tile-derived box points at the floor beneath it
+  (observed: reported click 2140,1059, sprite ~200px higher). `ItemLayer` extends
+  `TileObject`, so **`getClickbox()` gives the real shape the client tests the
+  mouse against** — use it for anything LYING on a tile (2.77). The lifted-tile
+  fallback reports `ok_tile` rather than `ok`, because a wrong click in those two
+  cases has different causes.
+- **The item clickbox covers the whole PILE on that tile**, not one item. For a
+  lone mark of grace that is the mark; on a busy tile it is still what a click
+  would hit, which is the honest answer either way.
 - **Confirm an API method exists with `javap` against the resolved jar** in the
   Gradle cache before using it. `build.gradle` pins `latest.release`, so the
   cached `runelite-api-*.jar` is the authority, not the wiki.
