@@ -1792,7 +1792,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.76";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.77";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -5034,9 +5034,41 @@ public class GEVisualAidPlugin extends Plugin
         if (c == null) return new Object[]{ "offscreen", null };
         if (!canvasOk) return new Object[]{ "no_canvas", null };
 
-        // 2.76: how far ABOVE the floor the item on this tile is drawn.
-        // Zero for anything at ground level, which is nearly everything -
-        // so this changes nothing except where it matters.
+        // 2.77: ASK THE CLIENT FOR THE ITEM'S OWN CLICKBOX. Josh: "so that
+        // it just draws the clickbox around the mark of grace... give us
+        // exact coordinates, not just lets guess based of the floor etc."
+        //
+        // Exactly right, and 2.76 was still a guess - a better one, but a
+        // tile polygon shoved upwards. ItemLayer extends TileObject, which
+        // has getClickbox(): the same shape the client tests the mouse
+        // against, and the same one the scenery path here has used all
+        // along. No derivation, no assumption about item height.
+        //
+        // The clickbox covers everything ON that tile, since the game
+        // stacks a pile into one layer. For a mark of grace lying by
+        // itself that is the mark; on a tile with three other drops it is
+        // the pile, which is still the thing a click will hit.
+        //
+        // "ok" means the box came from the clickbox. "ok_tile" means we
+        // fell back to geometry, so a wrong click there is a different
+        // problem - the two must not be reported as one.
+        if (liftToItems)
+        {
+            try
+            {
+                net.runelite.api.ItemLayer il = t.getItemLayer();
+                if (il != null)
+                {
+                    int[] cb = shapeBox(il.getClickbox(), canvasOk, ox, oy, dsx, dsy, clip);
+                    if (cb != null) return new Object[]{ "ok", cb };
+                }
+            }
+            catch (Throwable ignored) { }   // fall through to the geometry
+        }
+
+        // 2.76: no clickbox to be had, so fall back to the tile polygon
+        // raised by however far above the floor the item is drawn. Zero
+        // for anything at ground level, which is nearly everything.
         int lift = 0;
         if (liftToItems)
         {
@@ -5085,7 +5117,9 @@ public class GEVisualAidPlugin extends Plugin
                 inner != null ? (int) ((ox + inner[2]) * dsx) : -1,
                 inner != null ? (int) ((oy + inner[3]) * dsy) : -1
         };
-        return new Object[]{ "ok", box };
+        // 2.77: a caller that wanted the ITEM and got geometry instead is
+        // told so. Everything else still gets plain "ok" as before.
+        return new Object[]{ liftToItems ? "ok_tile" : "ok", box };
     }
 
     // -----------------------------------------------------------------------
