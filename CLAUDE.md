@@ -102,6 +102,18 @@ non-trivial change.
   to match.** `Gold_ore` matches nothing forever while still publishing
   `bank_Gold_ore=0`. Write the ITEM name — `sanitiseKey` turns spaces into
   underscores, so the key is unchanged.
+- **`PluginManager.startPlugin` / `stopPlugin` assert they are on the SWING EDT.**
+  Both open with `assert SwingUtilities.isEventDispatchThread()` (checked with
+  `javap -c` against `client-1.12.36.jar`), and RuneLite runs with assertions
+  on — so from the client thread, an HTTP thread, or your own executor they
+  throw `AssertionError`. Use `SwingUtilities.invokeAndWait`, and keep any
+  pause between a stop and a start OFF the EDT.
+- **`setPluginEnabled` has NO such assertion**, so it succeeds while the
+  start/stop beside it throws. That combination flips the config flag and
+  changes nothing else: the plugin ends up marked disabled and never stopped
+  or started. Two versions of `/plugin` shipped broken on exactly this,
+  reporting "queued" both times. **An action that half-succeeds is worse than
+  one that fails** — check the OUTCOME (`isPluginActive`), never the intent.
 - **Confirm an API method exists with `javap` against the resolved jar** in the
   Gradle cache before using it. `build.gradle` pins `latest.release`, so the
   cached `runelite-api-*.jar` is the authority, not the wiki.
