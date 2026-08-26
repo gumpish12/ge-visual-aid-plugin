@@ -149,6 +149,28 @@ non-trivial change.
 - **Don't inherit a diagnosis from a previous changelog.** The v2.18 changelog's
   stated cause for the offer-screen hang was wrong on both counts.
 
+- **THE PLUGIN PUBLISHES ITS OWN SETTINGS PANEL** at `/config` (2.79), built
+  by REFLECTION over the `@ConfigItem` and `@ConfigSection` annotations that
+  already draw the RuneLite side panel — all 178 keys with name, description,
+  section, type, enum options and effective value, as JSON. A hand-written
+  mirror would list keys that do not exist and miss ones that do; this cannot.
+  The value comes from INVOKING the config method, not from `ConfigManager`,
+  so an unset key reports its real default rather than null.
+- **`/filter` writes the entity-set slots by PATTERN** (2.78):
+  `set<N><field>` maps onto the config key names, so `set10carried` becomes
+  `set10Boxes`. No seventy-row table — that would only be a second spelling of
+  something `GEVisualAidConfig` already spells once.
+- **`/filter`'s per-set SUMMARY LINE IS NOT PARSEABLE.** It uses `|` and `[`
+  as punctuation and an ordinary filter value contains both
+  (`Bank booth|#Bank,Bank chest[1]`). 2.78 emits one line per field beside it:
+  the summary is for a person reading `/filter` in a browser, the fields are
+  for machines. Parse the fields.
+- **THE HTTP SERVER BINDS TO 127.0.0.1 DELIBERATELY.** `/filter` and `/config`
+  write RuneLite config and start and stop plugins with **no authentication**.
+  Do not "fix" this by binding `0.0.0.0`. The skilling script forwards from its
+  own already-LAN-reachable port instead — see `GET /plugin/config` there.
+  Josh chose this knowingly on 2026-08-26.
+
 ## Versioning and deploy
 
 - Filename stays `GEVisualAidPlugin.java` — Java requires it to match the class.
