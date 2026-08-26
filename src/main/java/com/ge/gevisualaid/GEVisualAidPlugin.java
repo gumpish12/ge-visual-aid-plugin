@@ -1792,7 +1792,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.78";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.79";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -8344,6 +8344,230 @@ public class GEVisualAidPlugin extends Plugin
     // Runs on an HTTP thread, so it only validates and queues. The actual
     // ConfigManager write happens on the client thread in onGameTick.
     // -----------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // 2.79 — /config : the WHOLE settings panel, read and write.
+    // ------------------------------------------------------------------
+    // Josh: "i want two tabs, the skiller settings we have and the plugin
+    // settings ... i just want to be able to remotely control the plugin
+    // settings, so expose it all."
+    //
+    // /filter only ever exposed 21 keys plus the ten entity sets - about half
+    // the panel - so notifications, overlay colours, the feature toggles and
+    // all ten WAYPOINT BUNDLES could not be touched remotely.
+    //
+    // THIS PUBLISHES ITS OWN PANEL BY REFLECTION. Every field below comes
+    // from the @ConfigItem and @ConfigSection annotations that already draw
+    // the RuneLite side panel, so the remote copy cannot list a key that does
+    // not exist, miss one that does, or disagree about its section, label or
+    // description. A hand-written mirror of 178 keys would do all three
+    // within a month. The VALUE is read by invoking the config method, not by
+    // asking ConfigManager, so an unset key reports its real default rather
+    // than null.
+    //
+    // NOTE ON EXPOSURE, because it is a real trade: this is every setting,
+    // including the Discord webhook and Pushover keys, on an endpoint with no
+    // authentication. It is still bound to 127.0.0.1 and only reachable
+    // through the skilling script's own LAN port, which is the door Josh
+    // already opened. He asked for it explicitly and it is his network.
+    private void handleConfigRequest(HttpExchange ex)
+    {
+        StringBuilder reply = new StringBuilder();
+        try
+        {
+            String q = ex.getRequestURI().getRawQuery();
+
+            if (q == null || q.trim().isEmpty())
+            {
+                reply.append("{\"plugin\":\"").append(PLUGIN_OUTPUT_VERSION).append("\",\"settings\":[");
+                boolean first = true;
+                for (ConfigRow r : configRows())
+                {
+                    if (!first) reply.append(",");
+                    first = false;
+                    reply.append("{\"key\":").append(jsonStr(r.key))
+                         .append(",\"name\":").append(jsonStr(r.name))
+                         .append(",\"description\":").append(jsonStr(r.description))
+                         .append(",\"section\":").append(jsonStr(r.section))
+                         .append(",\"position\":").append(r.position)
+                         .append(",\"type\":").append(jsonStr(r.type))
+                         .append(",\"value\":").append(jsonStr(r.value))
+                         .append(",\"options\":").append(jsonStr(r.options))
+                         .append("}");
+                }
+                reply.append("]}");
+            }
+            else
+            {
+                Map<String, ConfigRow> byKey = new HashMap<>();
+                for (ConfigRow r : configRows())
+                    byKey.put(r.key.toLowerCase(), r);
+
+                StringBuilder out = new StringBuilder();
+                for (String kv : q.split("&"))
+                {
+                    int e = kv.indexOf('=');
+                    if (e <= 0) continue;
+                    String name = urlDecode(kv.substring(0, e)).trim();
+                    String val  = urlDecode(kv.substring(e + 1));
+
+                    ConfigRow r = byKey.get(name.toLowerCase());
+                    if (r == null)
+                    {
+                        out.append("unknown key: ").append(name).append("\n");
+                        continue;
+                    }
+                    // Reuse the same normaliser /filter uses, so a boolean or
+                    // an int is validated identically whichever door it came
+                    // through. Anything else is stored as given - RuneLite
+                    // parses enums and colours out of their own strings.
+                    String norm = val;
+                    if (r.type.equals("boolean") || r.type.equals("int"))
+                    {
+                        norm = normaliseRemoteValue(r.type.equals("boolean") ? "b" : "i", val);
+                        if (norm == null)
+                        {
+                            out.append("bad value for ").append(r.key)
+                               .append(": ").append(val).append("\n");
+                            continue;
+                        }
+                    }
+                    synchronized (pendingConfig)
+                    {
+                        pendingConfig.add(new String[]{ r.key, norm });
+                    }
+                    out.append("queued ").append(r.key).append("=").append(norm).append("\n");
+                }
+                reply.append(out);
+            }
+        }
+        catch (Throwable t) { reply.append("err ").append(t.getMessage()).append("\n"); }
+
+        try
+        {
+            byte[] outBytes = reply.toString().getBytes(StandardCharsets.UTF_8);
+            String ct = (reply.length() > 0 && reply.charAt(0) == '{')
+                    ? "application/json; charset=utf-8" : "text/plain; charset=utf-8";
+            ex.getResponseHeaders().add("Content-Type", ct);
+            ex.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+            ex.sendResponseHeaders(200, outBytes.length);
+            ex.getResponseBody().write(outBytes);
+        }
+        catch (Throwable ignored) { }
+        finally { ex.close(); }
+    }
+
+    /** One row of the settings panel, as the annotations describe it. */
+    private static final class ConfigRow
+    {
+        String key = "", name = "", description = "", section = "";
+        String type = "string", value = "", options = "";
+        int position = 0;
+    }
+
+    // Walk GEVisualAidConfig's annotations. Sections are declared as String
+    // constants carrying @ConfigSection, and an item's `section = xField`
+    // resolves to that constant's VALUE - so map value -> display name first,
+    // then look each item up by it.
+    private java.util.List<ConfigRow> configRows()
+    {
+        java.util.List<ConfigRow> rows = new java.util.ArrayList<>();
+        Map<String, String> sectionNames = new HashMap<>();
+        try
+        {
+            for (java.lang.reflect.Field f : GEVisualAidConfig.class.getDeclaredFields())
+            {
+                net.runelite.client.config.ConfigSection cs =
+                        f.getAnnotation(net.runelite.client.config.ConfigSection.class);
+                if (cs == null) continue;
+                try { sectionNames.put(String.valueOf(f.get(null)), cs.name()); }
+                catch (Throwable ignored) { }
+            }
+        }
+        catch (Throwable ignored) { }
+
+        for (java.lang.reflect.Method m : GEVisualAidConfig.class.getMethods())
+        {
+            if (m.getParameterCount() != 0) continue;
+            net.runelite.client.config.ConfigItem ci =
+                    m.getAnnotation(net.runelite.client.config.ConfigItem.class);
+            if (ci == null) continue;
+
+            ConfigRow r = new ConfigRow();
+            r.key = ci.keyName();
+            r.name = ci.name();
+            r.description = ci.description();
+            r.position = ci.position();
+            String sec = ci.section();
+            r.section = sectionNames.containsKey(sec) ? sectionNames.get(sec)
+                      : (sec == null || sec.isEmpty() ? "General" : sec);
+
+            Class<?> rt = m.getReturnType();
+            if (rt == boolean.class || rt == Boolean.class)      r.type = "boolean";
+            else if (rt == int.class || rt == Integer.class)     r.type = "int";
+            else if (rt == java.awt.Color.class)                 r.type = "color";
+            else if (rt.isEnum())
+            {
+                r.type = "enum";
+                StringBuilder o = new StringBuilder();
+                for (Object c : rt.getEnumConstants())
+                {
+                    if (o.length() > 0) o.append(",");
+                    o.append(((Enum<?>) c).name());
+                }
+                r.options = o.toString();
+            }
+            else r.type = "string";
+
+            // The EFFECTIVE value: invoking the method returns the stored one
+            // or the interface default, which is what the panel shows.
+            try
+            {
+                Object v = m.invoke(config);
+                if (v == null) r.value = "";
+                else if (v instanceof java.awt.Color)
+                {
+                    java.awt.Color c = (java.awt.Color) v;
+                    r.value = String.format("#%02X%02X%02X%02X",
+                            c.getAlpha(), c.getRed(), c.getGreen(), c.getBlue());
+                }
+                else if (v instanceof Enum) r.value = ((Enum<?>) v).name();
+                else r.value = String.valueOf(v);
+            }
+            catch (Throwable t) { r.value = ""; }
+
+            rows.add(r);
+        }
+        rows.sort((a, b) -> {
+            int s = a.section.compareTo(b.section);
+            return s != 0 ? s : Integer.compare(a.position, b.position);
+        });
+        return rows;
+    }
+
+    /** Minimal JSON string escaping - this is the only JSON the plugin emits. */
+    private static String jsonStr(String s)
+    {
+        if (s == null) return "\"\"";
+        StringBuilder b = new StringBuilder("\"");
+        for (int i = 0; i < s.length(); i++)
+        {
+            char c = s.charAt(i);
+            switch (c)
+            {
+                case '"':  b.append("\\\""); break;
+                case '\\': b.append("\\\\"); break;
+                case '\n': b.append("\\n");  break;
+                case '\r': b.append("\\r");  break;
+                case '\t': b.append("\\t");  break;
+                default:
+                    if (c < 0x20) b.append(String.format("\\u%04x", (int) c));
+                    else b.append(c);
+            }
+        }
+        return b.append('"').toString();
+    }
+
     private void handleFilterRequest(HttpExchange ex)
     {
         StringBuilder reply = new StringBuilder();
@@ -10653,6 +10877,7 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/state", this::handleStateRequest);
             httpServer.createContext("/path",  this::handlePathRequest);
             httpServer.createContext("/filter", this::handleFilterRequest);
+            httpServer.createContext("/config", this::handleConfigRequest);   // 2.79
             httpServer.createContext("/hop",    this::handleHopRequest);
             httpServer.createContext("/agility", this::handleAgilityRequest);
             httpServer.createContext("/plugin",  this::handlePluginRequest);
