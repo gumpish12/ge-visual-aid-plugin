@@ -1792,7 +1792,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.77";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.78";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -2103,6 +2103,25 @@ public class GEVisualAidPlugin extends Plugin
             { "aggroon",     "aggroTimerEnabled",      "b" },
             { "sceneon",     "sceneTrackingEnabled",   "b" }
     };
+    // 2.78 — the ten entity-set slots, writable over /filter.
+    // set<N><field>, e.g. set3scenery=Bank booth  or  set3on=1.
+    // The right-hand side is the CONFIG KEY SUFFIX, so this is a spelling
+    // map for the query parameter and not a second list of what exists —
+    // the slots themselves are still whatever GEVisualAidConfig declares.
+    private static final java.util.regex.Pattern ES_KEY =
+            java.util.regex.Pattern.compile("^set(\\d{1,2})(scenery|npcs|items|carried|waypoints|name|on)$");
+    private static final java.util.Map<String, String> ES_FIELDS = new java.util.HashMap<>();
+    static
+    {
+        ES_FIELDS.put("scenery",   "Scenery");
+        ES_FIELDS.put("npcs",      "Npcs");
+        ES_FIELDS.put("items",     "Items");
+        ES_FIELDS.put("carried",   "Boxes");     // the config key is Boxes
+        ES_FIELDS.put("waypoints", "Waypoints");
+        ES_FIELDS.put("name",      "Name");
+        ES_FIELDS.put("on",        "Enabled");
+    }
+
     private static final int   WP_MAX_CLUSTER_TILES = 400;
 
     // Plugin v2.21 — NPC aggression tracking. anchorA is the older of the two
@@ -8354,10 +8373,11 @@ public class GEVisualAidPlugin extends Plugin
                         String nm = setName(i);
                         String sc = setScenery(i), np = setNpcs(i);
                         String im = setItems(i),   bx = setBoxes(i);
+                        String wp = setWaypoints(i);   // 2.78
                         boolean on = setEnabled(i);
                         if (!on && nm.trim().isEmpty() && sc.trim().isEmpty()
                                 && np.trim().isEmpty() && im.trim().isEmpty()
-                                && bx.trim().isEmpty())
+                                && bx.trim().isEmpty() && wp.trim().isEmpty())
                             continue;   // untouched slot, nothing to say
                         reply.append("set").append(i).append("=")
                              .append(nm).append(on ? " :ON" : " :off")
@@ -8365,7 +8385,22 @@ public class GEVisualAidPlugin extends Plugin
                              .append(" | npcs[").append(np).append("]")
                              .append(" | items[").append(im).append("]")
                              .append(" | carried[").append(bx).append("]")
+                             .append(" | waypoints[").append(wp).append("]")
                              .append("\n");
+                        // 2.78 — ALSO one line per field, machine-readable.
+                        // The summary line above is for a person reading
+                        // /filter in a browser; a consumer that wants to EDIT
+                        // a set needs each field on its own, because a value
+                        // may legitimately contain the "|" and "[" the summary
+                        // uses as punctuation. Same slot, said twice, for two
+                        // different readers.
+                        reply.append("set").append(i).append("on=").append(on ? "1" : "0").append("\n");
+                        reply.append("set").append(i).append("name=").append(nm).append("\n");
+                        reply.append("set").append(i).append("scenery=").append(sc).append("\n");
+                        reply.append("set").append(i).append("npcs=").append(np).append("\n");
+                        reply.append("set").append(i).append("items=").append(im).append("\n");
+                        reply.append("set").append(i).append("carried=").append(bx).append("\n");
+                        reply.append("set").append(i).append("waypoints=").append(wp).append("\n");
                     }
                     catch (Throwable ignored) { }
                 }
@@ -8388,6 +8423,45 @@ public class GEVisualAidPlugin extends Plugin
                     if (name.equals("entityset"))
                     {
                         reply.append(activateEntitySet(val));
+                        continue;
+                    }
+
+                    // 2.78 — WRITE THE SET SLOTS THEMSELVES.
+                    // Until now /filter could REPORT the ten sets and activate
+                    // one, but not change what is in them, so the only way to
+                    // edit a set was the RuneLite side panel on that machine.
+                    // That is exactly the half of "setup in the tracker" that
+                    // was missing.
+                    //
+                    // Matched by PATTERN, not by seventy more REMOTE_KEYS rows:
+                    // set<N><field> maps straight onto the config key names
+                    // (set3Scenery, set10Boxes), so a table would only be a
+                    // second spelling of something already spelled once.
+                    java.util.regex.Matcher sm = ES_KEY.matcher(name);
+                    if (sm.matches())
+                    {
+                        int slot = Integer.parseInt(sm.group(1));
+                        if (slot < 1 || slot > ES_SLOTS)
+                        {
+                            reply.append("no such set: ").append(slot).append("\n");
+                            continue;
+                        }
+                        String field = ES_FIELDS.get(sm.group(2));
+                        String norm  = normaliseRemoteValue(
+                                field.equals("Enabled") ? "b" : "s", val);
+                        if (norm == null)
+                        {
+                            reply.append("bad value for ").append(name)
+                                 .append(": ").append(val).append("\n");
+                            continue;
+                        }
+                        String cfgKey = "set" + slot + field;
+                        synchronized (pendingConfig)
+                        {
+                            pendingConfig.add(new String[]{ cfgKey, norm });
+                        }
+                        reply.append("queued ").append(cfgKey).append("=")
+                             .append(norm).append("\n");
                         continue;
                     }
 
