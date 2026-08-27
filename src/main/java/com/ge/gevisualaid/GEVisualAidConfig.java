@@ -506,11 +506,22 @@ public interface GEVisualAidConfig extends Config
     default boolean widgetsEnabled() { return false; }
 
     @ConfigItem(keyName = "widgetList", name = "Widgets",
-            description = "label=group:child or label=group:child:index, comma or newline "
+            description = "label=group.child or label=group.child.index, comma or newline "
                     + "separated. Find the ids with RuneLite's Widget Inspector under "
                     + "Developer Tools - they are NOT hardcoded here because widget ids "
-                    + "move between client versions. "
-                    + "Example: spec=160:35, prayer=160:31, style2=593:5",
+                    + "move between client versions. Copy what the Inspector shows: its "
+                    + "S / D prefix does not matter, the BRACKET does - S 160.25 is "
+                    + "160.25, D 15.3[0] is 15.3.0. Dots and colons are both accepted "
+                    + "(2.80; before that only colons were, and a dotted id was dropped "
+                    + "in silence). Add @80 for a click inset - the percent of the "
+                    + "rectangle kept about its centre, for a target whose own edge "
+                    + "must not be clicked. Separate FALLBACKS with | and the first "
+                    + "one that resolves wins (2.82): the inventory is 149.0.N "
+                    + "normally, 15.3.N with the bank open and 467.0.N at the Grand "
+                    + "Exchange, and only the bank one has a rectangle for an EMPTY "
+                    + "slot - so one label needs all three. "
+                    + "Example: spec=160.38, logout=164.34@80, "
+                    + "inv1=149.0.0|15.3.0|467.0.0",
             section = widgetSection, position = 1)
     default String widgetList() { return ""; }
 
@@ -912,6 +923,17 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 16)
     default String set1Waypoints() { return ""; }
 
+    @ConfigItem(keyName = "set1Widgets", name = "1. Widgets",
+            description = "Widget ids for this set, merged into the always-on "
+                    + "Widgets box while the set is enabled - so the general ones "
+                    + "(inventory, orbs, tabs) live there once and only the "
+                    + "activity's own go here. Same spelling as that box: "
+                    + "label=group.child[.index], @80 for a click inset, | between "
+                    + "fallbacks. /filter?entityset=<name> switches this set on and "
+                    + "the rest off.",
+            section = entitySetSection, position = 17)
+    default String set1Widgets() { return ""; }
+
     @ConfigItem(keyName = "set2Enabled", name = "2. Enabled",
             description = "Merge set 2's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 20)
@@ -954,6 +976,17 @@ public interface GEVisualAidConfig extends Config
                     + "so a set can carry its own positioning without a matching bundle.",
             section = entitySetSection, position = 26)
     default String set2Waypoints() { return ""; }
+
+    @ConfigItem(keyName = "set2Widgets", name = "2. Widgets",
+            description = "Widget ids for this set, merged into the always-on "
+                    + "Widgets box while the set is enabled - so the general ones "
+                    + "(inventory, orbs, tabs) live there once and only the "
+                    + "activity's own go here. Same spelling as that box: "
+                    + "label=group.child[.index], @80 for a click inset, | between "
+                    + "fallbacks. /filter?entityset=<name> switches this set on and "
+                    + "the rest off.",
+            section = entitySetSection, position = 27)
+    default String set2Widgets() { return ""; }
 
     @ConfigItem(keyName = "set3Enabled", name = "3. Enabled",
             description = "Merge set 3's entries into the live scenery / NPC / item filters",
@@ -998,6 +1031,17 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 36)
     default String set3Waypoints() { return ""; }
 
+    @ConfigItem(keyName = "set3Widgets", name = "3. Widgets",
+            description = "Widget ids for this set, merged into the always-on "
+                    + "Widgets box while the set is enabled - so the general ones "
+                    + "(inventory, orbs, tabs) live there once and only the "
+                    + "activity's own go here. Same spelling as that box: "
+                    + "label=group.child[.index], @80 for a click inset, | between "
+                    + "fallbacks. /filter?entityset=<name> switches this set on and "
+                    + "the rest off.",
+            section = entitySetSection, position = 37)
+    default String set3Widgets() { return ""; }
+
     @ConfigItem(keyName = "set4Enabled", name = "4. Enabled",
             description = "Merge set 4's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 40)
@@ -1040,6 +1084,17 @@ public interface GEVisualAidConfig extends Config
                     + "so a set can carry its own positioning without a matching bundle.",
             section = entitySetSection, position = 46)
     default String set4Waypoints() { return ""; }
+
+    @ConfigItem(keyName = "set4Widgets", name = "4. Widgets",
+            description = "Widget ids for this set, merged into the always-on "
+                    + "Widgets box while the set is enabled - so the general ones "
+                    + "(inventory, orbs, tabs) live there once and only the "
+                    + "activity's own go here. Same spelling as that box: "
+                    + "label=group.child[.index], @80 for a click inset, | between "
+                    + "fallbacks. /filter?entityset=<name> switches this set on and "
+                    + "the rest off.",
+            section = entitySetSection, position = 47)
+    default String set4Widgets() { return ""; }
 
     @ConfigItem(keyName = "set5Enabled", name = "5. Enabled",
             description = "Merge set 5's entries into the live scenery / NPC / item filters",
@@ -1084,6 +1139,17 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 56)
     default String set5Waypoints() { return ""; }
 
+    @ConfigItem(keyName = "set5Widgets", name = "5. Widgets",
+            description = "Widget ids for this set, merged into the always-on "
+                    + "Widgets box while the set is enabled - so the general ones "
+                    + "(inventory, orbs, tabs) live there once and only the "
+                    + "activity's own go here. Same spelling as that box: "
+                    + "label=group.child[.index], @80 for a click inset, | between "
+                    + "fallbacks. /filter?entityset=<name> switches this set on and "
+                    + "the rest off.",
+            section = entitySetSection, position = 57)
+    default String set5Widgets() { return ""; }
+
     @ConfigItem(keyName = "set6Enabled", name = "6. Enabled",
             description = "Merge set 6's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 60)
@@ -1126,6 +1192,17 @@ public interface GEVisualAidConfig extends Config
                     + "so a set can carry its own positioning without a matching bundle.",
             section = entitySetSection, position = 66)
     default String set6Waypoints() { return ""; }
+
+    @ConfigItem(keyName = "set6Widgets", name = "6. Widgets",
+            description = "Widget ids for this set, merged into the always-on "
+                    + "Widgets box while the set is enabled - so the general ones "
+                    + "(inventory, orbs, tabs) live there once and only the "
+                    + "activity's own go here. Same spelling as that box: "
+                    + "label=group.child[.index], @80 for a click inset, | between "
+                    + "fallbacks. /filter?entityset=<name> switches this set on and "
+                    + "the rest off.",
+            section = entitySetSection, position = 67)
+    default String set6Widgets() { return ""; }
 
     @ConfigItem(keyName = "set7Enabled", name = "7. Enabled",
             description = "Merge set 7's entries into the live scenery / NPC / item filters",
@@ -1170,6 +1247,17 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 76)
     default String set7Waypoints() { return ""; }
 
+    @ConfigItem(keyName = "set7Widgets", name = "7. Widgets",
+            description = "Widget ids for this set, merged into the always-on "
+                    + "Widgets box while the set is enabled - so the general ones "
+                    + "(inventory, orbs, tabs) live there once and only the "
+                    + "activity's own go here. Same spelling as that box: "
+                    + "label=group.child[.index], @80 for a click inset, | between "
+                    + "fallbacks. /filter?entityset=<name> switches this set on and "
+                    + "the rest off.",
+            section = entitySetSection, position = 77)
+    default String set7Widgets() { return ""; }
+
     @ConfigItem(keyName = "set8Enabled", name = "8. Enabled",
             description = "Merge set 8's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 80)
@@ -1212,6 +1300,17 @@ public interface GEVisualAidConfig extends Config
                     + "so a set can carry its own positioning without a matching bundle.",
             section = entitySetSection, position = 86)
     default String set8Waypoints() { return ""; }
+
+    @ConfigItem(keyName = "set8Widgets", name = "8. Widgets",
+            description = "Widget ids for this set, merged into the always-on "
+                    + "Widgets box while the set is enabled - so the general ones "
+                    + "(inventory, orbs, tabs) live there once and only the "
+                    + "activity's own go here. Same spelling as that box: "
+                    + "label=group.child[.index], @80 for a click inset, | between "
+                    + "fallbacks. /filter?entityset=<name> switches this set on and "
+                    + "the rest off.",
+            section = entitySetSection, position = 87)
+    default String set8Widgets() { return ""; }
 
     @ConfigItem(keyName = "set9Enabled", name = "9. Enabled",
             description = "Merge set 9's entries into the live scenery / NPC / item filters",
@@ -1256,6 +1355,17 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 96)
     default String set9Waypoints() { return ""; }
 
+    @ConfigItem(keyName = "set9Widgets", name = "9. Widgets",
+            description = "Widget ids for this set, merged into the always-on "
+                    + "Widgets box while the set is enabled - so the general ones "
+                    + "(inventory, orbs, tabs) live there once and only the "
+                    + "activity's own go here. Same spelling as that box: "
+                    + "label=group.child[.index], @80 for a click inset, | between "
+                    + "fallbacks. /filter?entityset=<name> switches this set on and "
+                    + "the rest off.",
+            section = entitySetSection, position = 97)
+    default String set9Widgets() { return ""; }
+
     @ConfigItem(keyName = "set10Enabled", name = "10. Enabled",
             description = "Merge set 10's entries into the live scenery / NPC / item filters",
             section = entitySetSection, position = 100)
@@ -1298,4 +1408,15 @@ public interface GEVisualAidConfig extends Config
                     + "so a set can carry its own positioning without a matching bundle.",
             section = entitySetSection, position = 106)
     default String set10Waypoints() { return ""; }
+
+    @ConfigItem(keyName = "set10Widgets", name = "10. Widgets",
+            description = "Widget ids for this set, merged into the always-on "
+                    + "Widgets box while the set is enabled - so the general ones "
+                    + "(inventory, orbs, tabs) live there once and only the "
+                    + "activity's own go here. Same spelling as that box: "
+                    + "label=group.child[.index], @80 for a click inset, | between "
+                    + "fallbacks. /filter?entityset=<name> switches this set on and "
+                    + "the rest off.",
+            section = entitySetSection, position = 107)
+    default String set10Widgets() { return ""; }
 }

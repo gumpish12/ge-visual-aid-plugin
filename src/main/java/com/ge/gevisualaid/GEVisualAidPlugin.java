@@ -1792,7 +1792,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.79";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.84";   // package-visible: the panel shows it
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -1855,6 +1855,8 @@ public class GEVisualAidPlugin extends Plugin
     private static final int   ES_SLOTS      = 10;
     private static final int   ES_FILTER_CAP = 24;   // parseEntityFilter's own limit
     private String             esSpecRaw     = null;
+    // 2.83: the always-on Widgets box plus every enabled set's widgets.
+    private volatile String    esWidgets     = "";
     private String             esScenery     = "";
     private String             esNpcs        = "";
     private String             esItems       = "";
@@ -2058,7 +2060,45 @@ public class GEVisualAidPlugin extends Plugin
     // V2.43 — parsed widget list.
     private String            wgSpecRaw = null;
     private final List<String> wgNames  = new ArrayList<>();
-    private final List<int[]>  wgIds    = new ArrayList<>();   // {group, child, index}
+    // 2.82: one label, several ids, first that resolves wins.
+    //
+    // The same thing lives in a DIFFERENT WIDGET depending on what is open.
+    // Inventory slot 1 is 149.0.0 normally, 15.3.0 with the bank open and
+    // 467.0.0 at the Grand Exchange - and the normal and GE ones only have a
+    // rectangle when the slot is occupied, while the bank one has one either
+    // way. No single id answers "where is slot 1"; the answer is whichever
+    // of them is live, which is a thing only the client can say.
+    //
+    // Deliberately GENERAL rather than an inventory special case, and
+    // deliberately NOT a hardcoded table of group numbers: the ids stay
+    // data in the coordinates INI, and a chain that resolves nothing says
+    // not_found rather than quietly pointing at the wrong interface.
+    private final List<WidgetSpec> wgSpecs = new ArrayList<>();
+
+    /** One labelled widget: a click inset and the ids to try, in order. */
+    private static final class WidgetSpec
+    {
+        int inset = 100;
+        final List<int[]> chain = new ArrayList<>();   // each {group, child, index}
+
+        String describe()
+        {
+            StringBuilder b = new StringBuilder();
+            for (int[] c : chain)
+            {
+                if (b.length() > 0) b.append("|");
+                b.append(c[0]).append(".").append(c[1]);
+                if (c[2] >= 0) b.append(".").append(c[2]);
+            }
+            if (inset != 100) b.append("@").append(inset);
+            return b.toString();
+        }
+    }
+    // 2.81: /widgets renders this. Built on the CLIENT THREAD in
+    // appendWidgets like everything else that touches widget geometry, and
+    // read by the HTTP thread - so it is a volatile snapshot, never a live
+    // client read from the handler.
+    private volatile String wgReportBlock = "";
 
     // V2.41 — ordered course and where we have got to.
     private String            agCourseRaw   = null;
@@ -2094,6 +2134,13 @@ public class GEVisualAidPlugin extends Plugin
             { "carried",     "itemBoxFilter",          "s" },   // v2.66
             { "carriedon",   "itemBoxesEnabled",       "b" },
             { "waypointson", "waypointsEnabled",       "b" },
+            // 2.83: the always-on WIDGET box and its master toggle, so the
+            // family is reachable through /filter like every other one. It
+            // was only ever writable through /config, which meant the
+            // tracker's filter tab could edit each set's widgets but not
+            // the general list they all merge with.
+            { "widgets",     "widgetList",             "s" },
+            { "widgetson",   "widgetsEnabled",         "b" },
             { "hoveron",     "hoverTileEnabled",       "b" },
             { "cameraon",    "cameraStateEnabled",     "b" },
             { "canvason",    "canvasGeometryEnabled",  "b" },
@@ -2109,7 +2156,7 @@ public class GEVisualAidPlugin extends Plugin
     // map for the query parameter and not a second list of what exists —
     // the slots themselves are still whatever GEVisualAidConfig declares.
     private static final java.util.regex.Pattern ES_KEY =
-            java.util.regex.Pattern.compile("^set(\\d{1,2})(scenery|npcs|items|carried|waypoints|name|on)$");
+            java.util.regex.Pattern.compile("^set(\\d{1,2})(scenery|npcs|items|carried|waypoints|widgets|name|on)$");
     private static final java.util.Map<String, String> ES_FIELDS = new java.util.HashMap<>();
     static
     {
@@ -2118,6 +2165,7 @@ public class GEVisualAidPlugin extends Plugin
         ES_FIELDS.put("items",     "Items");
         ES_FIELDS.put("carried",   "Boxes");     // the config key is Boxes
         ES_FIELDS.put("waypoints", "Waypoints");
+        ES_FIELDS.put("widgets",   "Widgets");    // 2.83
         ES_FIELDS.put("name",      "Name");
         ES_FIELDS.put("on",        "Enabled");
     }
@@ -4472,12 +4520,14 @@ public class GEVisualAidPlugin extends Plugin
         StringBuilder avail = new StringBuilder();
 
         StringBuilder boxs = new StringBuilder();
+        StringBuilder wgts = new StringBuilder();
         try { esAppend(scen, config.gameObjectFilter()); } catch (Throwable ignored) { }
         try { esAppend(npcs, config.npcFilter());        } catch (Throwable ignored) { }
         try { esAppend(itms, config.groundItemFilter()); } catch (Throwable ignored) { }
         try { esAppend(boxs, config.itemBoxFilter());    } catch (Throwable ignored) { }
+        try { esAppend(wgts, config.widgetList());       } catch (Throwable ignored) { }
         spec.append(scen).append("|").append(npcs).append("|").append(itms)
-            .append("|").append(boxs);
+            .append("|").append(boxs).append("|").append(wgts);
 
         for (int i = 1; i <= ES_SLOTS; i++)
         {
@@ -4502,6 +4552,7 @@ public class GEVisualAidPlugin extends Plugin
                 String im = setItems(i);
                 String bx = setBoxes(i);
                 String wp = setWaypoints(i);   // 2.71
+                String wg = setWidgets(i);     // 2.83
 
                 // 2.68: the CONTENT, not just the name. Without this, editing
                 // a set's filter text changes nothing the guard can see, so
@@ -4509,12 +4560,13 @@ public class GEVisualAidPlugin extends Plugin
                 // effect until something unrelated happens to differ.
                 spec.append("=").append(sc).append("&").append(np)
                     .append("&").append(im).append("&").append(bx)
-                    .append("&").append(wp);
+                    .append("&").append(wp).append("&").append(wg);
 
                 esAppend(scen, sc);
                 esAppend(npcs, np);
                 esAppend(itms, im);
                 esAppend(boxs, bx);
+                esAppend(wgts, wg);
 
                 if (act.length() > 0) act.append(",");
                 act.append(nm);
@@ -4538,6 +4590,7 @@ public class GEVisualAidPlugin extends Plugin
         esNpcs      = npcs.toString();
         esItems     = itms.toString();
         esBoxes     = boxs.toString();
+        esWidgets   = wgts.toString();
         esActive    = act.toString();
         esAvailable = avail.toString();
 
@@ -4719,6 +4772,29 @@ public class GEVisualAidPlugin extends Plugin
             case 8:  return config.set8Waypoints();
             case 9:  return config.set9Waypoints();
             case 10: return config.set10Waypoints();
+        }
+        return "";
+    }
+
+    // 2.83: widgets are a per-set field like the rest. Josh: "theres no way
+    // of me splitting them up between flipping, skilling or general use."
+    // General use stays in the always-on Widgets box - the inventory, the
+    // orbs, the tabs are wanted whatever is running - and an activity's own
+    // go in its set, exactly as its scenery already does.
+    private String setWidgets(int i)
+    {
+        switch (i)
+        {
+            case 1:  return config.set1Widgets();
+            case 2:  return config.set2Widgets();
+            case 3:  return config.set3Widgets();
+            case 4:  return config.set4Widgets();
+            case 5:  return config.set5Widgets();
+            case 6:  return config.set6Widgets();
+            case 7:  return config.set7Widgets();
+            case 8:  return config.set8Widgets();
+            case 9:  return config.set9Widgets();
+            case 10: return config.set10Widgets();
         }
         return "";
     }
@@ -6705,7 +6781,11 @@ public class GEVisualAidPlugin extends Plugin
         if (spec.equals(wgSpecRaw)) return;
         wgSpecRaw = spec;
         wgNames.clear();
-        wgIds.clear();
+        wgSpecs.clear();
+
+        StringBuilder rejected = new StringBuilder();
+        int rejectedCount = 0;
+        boolean truncated = false;
 
         for (String tok : spec.split("[,;\r\n]+"))
         {
@@ -6714,29 +6794,140 @@ public class GEVisualAidPlugin extends Plugin
             try
             {
                 int eq = tok.indexOf('=');
-                if (eq <= 0) continue;
+                if (eq <= 0)
+                {
+                    if (rejected.length() > 0) rejected.append(", ");
+                    rejected.append(tok);
+                    rejectedCount++;
+                    continue;
+                }
                 String name = sanitiseKey(tok.substring(0, eq).trim());
-                if (name.isEmpty() || wgNames.contains(name)) continue;
+                // A DUPLICATE LABEL IS DROPPED, NOT MERGED - the same trap
+                // the entity-set filters have. Say so: the second entry
+                // otherwise matches nothing forever while looking configured.
+                if (name.isEmpty() || wgNames.contains(name))
+                {
+                    if (rejected.length() > 0) rejected.append(", ");
+                    rejected.append(tok).append(name.isEmpty() ? " (no usable label)" : " (duplicate label)");
+                    rejectedCount++;
+                    continue;
+                }
 
-                String[] p = tok.substring(eq + 1).trim().split(":");
-                if (p.length < 2) continue;
-                int g = Integer.parseInt(p[0].trim());
-                int c = Integer.parseInt(p[1].trim());
-                int i = p.length >= 3 && !p[2].trim().isEmpty()
-                        ? Integer.parseInt(p[2].trim()) : -1;
+                // 2.80: ACCEPT THE DOT AS WELL AS THE COLON.
+                //
+                // RuneLite's Widget Inspector - the only place these ids can
+                // be read from - displays them as "160.38". The setting here
+                // documented "160:38", and until now anything else fell out
+                // of split(":") with length 1 and was dropped with no error.
+                // Josh's live config held "spec=160.38" and the client log
+                // read "parsed 0 widget(s): []" on every startup from
+                // 2026-08-10 to 2026-08-26: the feature was configured,
+                // reported nothing, and never once said why.
+                //
+                // A setting whose only correct spelling is not the one its
+                // own source tool prints is a trap, not a format. Both are
+                // read now, and a token that still cannot be parsed is
+                // NAMED in the log rather than silently skipped.
+                // 2.81: an optional "@<pct>" CLICK INSET, e.g. "164.34@80".
+                // Some targets must not be clicked at their own edge - the
+                // logout X is a glyph inside a border, "Click here to logout"
+                // is a line of text with dead space either side. The inset
+                // keeps <pct>% of the rectangle about its CENTRE: it shrinks
+                // the target, it never moves it. Absent means 100.
+                String idPart = tok.substring(eq + 1).trim();
+                int inset = 100;
+                int at = idPart.indexOf('@');
+                if (at >= 0)
+                {
+                    try
+                    {
+                        inset = Integer.parseInt(idPart.substring(at + 1).trim());
+                    }
+                    catch (Exception e) { inset = -1; }
+                    idPart = idPart.substring(0, at).trim();
+                    if (inset < 1 || inset > 100)
+                    {
+                        // A nonsense inset is refused outright rather than
+                        // clamped. Clamping 800 to 100 would click the whole
+                        // widget while the setting still reads 800, which
+                        // looks like the inset is being ignored - and it is.
+                        if (rejected.length() > 0) rejected.append(", ");
+                        rejected.append(tok).append(" (inset must be 1-100)");
+                        rejectedCount++;
+                        continue;
+                    }
+                }
+                // 2.82: "|" separates FALLBACKS, tried in order.
+                //   inv1=149.0.0|15.3.0|467.0.0
+                // The first one with a real rectangle wins, and the feed
+                // says which it was in wg_<name>_resolved_by - so "it moved"
+                // and "the bank is open instead" stay distinguishable.
+                // "spec" is already this method's parameter - the whole setting
+                // string. This one is the single entry being read out of it.
+                WidgetSpec ws = new WidgetSpec();
+                ws.inset = inset;
+                boolean bad = false;
+                for (String one : idPart.split("\\|"))
+                {
+                    one = one.trim();
+                    if (one.isEmpty()) continue;
+                    String[] p = one.split("[:.]");
+                    if (p.length < 2) { bad = true; break; }
+                    int g = Integer.parseInt(p[0].trim());
+                    int c = Integer.parseInt(p[1].trim());
+                    int i = p.length >= 3 && !p[2].trim().isEmpty()
+                            ? Integer.parseInt(p[2].trim()) : -1;
+                    ws.chain.add(new int[]{ g, c, i });
+                }
+                if (bad || ws.chain.isEmpty())
+                {
+                    if (rejected.length() > 0) rejected.append(", ");
+                    rejected.append(tok);
+                    rejectedCount++;
+                    continue;
+                }
                 wgNames.add(name);
-                wgIds.add(new int[]{ g, c, i });
+                wgSpecs.add(ws);
             }
-            catch (Exception ignored) { }
-            if (wgNames.size() >= 24) break;
+            catch (Exception ignored)
+            {
+                if (rejected.length() > 0) rejected.append(", ");
+                rejected.append(tok);
+                rejectedCount++;
+            }
+            // 2.80: was 24, which the suite outgrew the moment a real list
+            // was written - the inventory alone is 28 children and Josh's
+            // first pass is 50. The cap is a runaway stop, not a budget:
+            // a widget costs one getWidget + getBounds a tick. What it
+            // really costs is ~16 lines of state feed each, so a list this
+            // long is a deliberate choice, not an accident.
+            if (wgNames.size() >= 128)
+            {
+                truncated = true;
+                break;
+            }
         }
-        log.info("GEVisualAid v2.43 parsed {} widget(s): {}", wgNames.size(), wgNames);
+        // Never just a count. A list that parsed 24 of 50 and a list that
+        // was written with 24 entries print the same number, and they are
+        // completely different problems.
+        log.info("GEVisualAid {} parsed {} widget(s): {}",
+                PLUGIN_OUTPUT_VERSION, wgNames.size(), wgNames);
+        if (rejected.length() > 0)
+            log.warn("GEVisualAid {} DROPPED {} unparseable widget entr{}: {}",
+                    PLUGIN_OUTPUT_VERSION, rejectedCount,
+                    rejectedCount == 1 ? "y" : "ies", rejected);
+        if (truncated)
+            log.warn("GEVisualAid {} widget list hit the {} cap - later entries were ignored",
+                    PLUGIN_OUTPUT_VERSION, 128);
     }
 
     private void appendWidgets(StringBuilder sb, boolean canvasOk,
                                int ox, int oy, double dsx, double dsy)
     {
-        try { parseWidgets(config.widgetList()); } catch (Throwable ignored) { }
+        // 2.83: the MERGED list - the always-on box plus every enabled
+        // set - not config.widgetList() on its own. rebuildEntitySets has
+        // already run this tick, in the same scene build.
+        try { parseWidgets(esWidgets); } catch (Throwable ignored) { }
 
         StringBuilder names = new StringBuilder();
         for (int i = 0; i < wgNames.size(); i++)
@@ -6746,10 +6937,28 @@ public class GEVisualAidPlugin extends Plugin
         }
         sb.append("wg_count=").append(wgNames.size()).append("\n");
         sb.append("wg_names=").append(names).append("\n");
+        // 2.83: which sets contributed. A widget that vanished because its
+        // set was switched off looks exactly like one whose id has moved,
+        // unless the active sets are on the page beside it.
+        sb.append("wg_sets_active=").append(esActive).append("\n");
+
+        StringBuilder rep = new StringBuilder();
+        rep.append("WIDGET COORDINATES - where every configured id resolves right now")
+           .append(System.lineSeparator());
+        rep.append("plugin ").append(PLUGIN_OUTPUT_VERSION)
+           .append("   sets ").append(esActive.isEmpty() ? "none" : esActive)
+           .append("   widgets ").append(wgNames.size())
+           .append("   read ").append(new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date()))
+           .append(System.lineSeparator());
+        rep.append("CLICK is the point to click - the rect centre, after any inset.")
+           .append(System.lineSeparator());
+        rep.append("--------------------------------------------------------------------------")
+           .append(System.lineSeparator());
+        int okCount = 0;
 
         for (int i = 0; i < wgNames.size(); i++)
         {
-            int[]  id = wgIds.get(i);
+            WidgetSpec spec = wgSpecs.get(i);
             String k  = "wg_" + wgNames.get(i) + "_";
 
             String  state  = "not_found";
@@ -6757,31 +6966,82 @@ public class GEVisualAidPlugin extends Plugin
             String  text   = "";
             Rectangle r    = null;
             int sprite = -1, opacity = -1, itemId = -1, itemQty = -1;
-            try
+            int[] id = spec.chain.get(0);   // reported if nothing resolves
+            int usedLink = -1;              // -1 means NOTHING in the chain resolved
+            boolean first = true;
+
+            // Walk the chain and keep the FIRST link that actually has a
+            // rectangle. A link that is merely present but hidden, or present
+            // with no bounds, is not an answer - that is the whole reason
+            // there is a chain. Its state is remembered though, so a chain
+            // that resolves nothing still reports the most informative
+            // reason rather than a flat "not_found".
+            for (int link = 0; link < spec.chain.size(); link++)
             {
-                Widget w = client.getWidget(id[0], id[1]);
-                if (w != null && id[2] >= 0)
+                int[] cand = spec.chain.get(link);
+                String  cState  = "not_found";
+                boolean cHidden = true;
+                String  cText   = "";
+                Rectangle cr    = null;
+                int cSprite = -1, cOpacity = -1, cItemId = -1, cItemQty = -1;
+                try
                 {
-                    Widget[] kids = w.getDynamicChildren();
-                    if (kids != null && id[2] < kids.length) w = kids[id[2]];
-                    else w = w.getChild(id[2]);
+                    Widget w = client.getWidget(cand[0], cand[1]);
+                    if (w != null && cand[2] >= 0)
+                    {
+                        Widget[] kids = w.getDynamicChildren();
+                        if (kids != null && cand[2] < kids.length) w = kids[cand[2]];
+                        else w = w.getChild(cand[2]);
+                    }
+                    if (w != null)
+                    {
+                        cHidden = w.isHidden();
+                        try { cText = w.getText() == null ? "" : w.getText().replace("\n", " "); }
+                        catch (Throwable ignored) { }
+                        // V2.44: state, not just geometry. Each guarded on its
+                        // own so one missing accessor cannot lose the rest.
+                        try { cSprite  = w.getSpriteId();      } catch (Throwable ignored) { }
+                        try { cOpacity = w.getOpacity();       } catch (Throwable ignored) { }
+                        try { cItemId  = w.getItemId();        } catch (Throwable ignored) { }
+                        try { cItemQty = w.getItemQuantity();  } catch (Throwable ignored) { }
+                        cr = w.getBounds();
+                        cState = cHidden ? "hidden" : (cr == null ? "no_bounds" : "ok");
+                    }
                 }
-                if (w != null)
+                catch (Throwable ignored) { cState = "error"; }
+
+                boolean usable = "ok".equals(cState) && cr != null
+                        && cr.width > 0 && cr.height > 0;
+
+                // Two separate questions, kept separate:
+                //
+                //   usable  - this link IS the answer. Take it and stop.
+                //   better  - nothing has answered yet, and this link at
+                //             least explains itself better than what we are
+                //             holding. "hidden" tells you the bank is shut;
+                //             "not_found" tells you nothing at all, so
+                //             anything outranks it.
+                //
+                // Conflating the two is what made the first version of this
+                // unreadable, and an unreadable rule is one nobody can check.
+                boolean better = !"not_found".equals(cState)
+                        && "not_found".equals(state);
+
+                if (usable || better || first)
                 {
-                    hidden = w.isHidden();
-                    try { text = w.getText() == null ? "" : w.getText().replace("\n", " "); }
-                    catch (Throwable ignored) { }
-                    // V2.44: state, not just geometry. Each guarded on its
-                    // own so one missing accessor cannot lose the rest.
-                    try { sprite  = w.getSpriteId();      } catch (Throwable ignored) { }
-                    try { opacity = w.getOpacity();       } catch (Throwable ignored) { }
-                    try { itemId  = w.getItemId();        } catch (Throwable ignored) { }
-                    try { itemQty = w.getItemQuantity();  } catch (Throwable ignored) { }
-                    r = w.getBounds();
-                    state = hidden ? "hidden" : (r == null ? "no_bounds" : "ok");
+                    state = cState; hidden = cHidden; text = cText; r = cr;
+                    sprite = cSprite; opacity = cOpacity;
+                    itemId = cItemId; itemQty = cItemQty;
+                    id = cand;
+                }
+                first = false;
+
+                if (usable)
+                {
+                    usedLink = link;
+                    break;
                 }
             }
-            catch (Throwable ignored) { state = "error"; }
 
             sb.append(k).append("group=").append(id[0]).append("\n");
             sb.append(k).append("child=").append(id[1]).append("\n");
@@ -6796,13 +7056,111 @@ public class GEVisualAidPlugin extends Plugin
 
             boolean ok = "ok".equals(state) && r != null && canvasOk
                     && r.width > 0 && r.height > 0;
+            if (ok) okCount++;
+
+            int x1 = ok ? (int) ((ox + r.x)            * dsx) : -1;
+            int y1 = ok ? (int) ((oy + r.y)            * dsy) : -1;
+            int x2 = ok ? (int) ((ox + r.x + r.width)  * dsx) : -1;
+            int y2 = ok ? (int) ((oy + r.y + r.height) * dsy) : -1;
+
+            // 2.81: THE POINT A SCRIPT SHOULD ACTUALLY CLICK, after the
+            // entry's inset. Published separately from screen_x/screen_y,
+            // which stay the raw centre so nothing already reading them
+            // changes meaning underneath it. With no inset the two agree.
+            int cx = -1, cy = -1;
+            if (ok)
+            {
+                int ix1 = x1, iy1 = y1, ix2 = x2, iy2 = y2;
+                int pct = spec.inset;
+                if (pct >= 1 && pct < 100)
+                {
+                    int w = x2 - x1, h = y2 - y1;
+                    int dx = (w - w * pct / 100) / 2;
+                    int dy = (h - h * pct / 100) / 2;
+                    // A rectangle too small to inset survives whole. A 1px
+                    // target is worse than a slightly generous one.
+                    if (w - 2 * dx >= 2) { ix1 += dx; ix2 -= dx; }
+                    if (h - 2 * dy >= 2) { iy1 += dy; iy2 -= dy; }
+                }
+                cx = (ix1 + ix2) / 2;
+                cy = (iy1 + iy2) / 2;
+            }
+
             sb.append(k).append("visible=").append(ok).append("\n");
+            sb.append(k).append("chain=").append(spec.describe()).append("\n");
+            sb.append(k).append("chain_len=").append(spec.chain.size()).append("\n");
+            // Which link answered. With one id this is always 0 and says
+            // nothing; with a chain it is the difference between "the bank
+            // is open" and "the id moved", which look identical otherwise.
+            sb.append(k).append("resolved_by=")
+              .append(usedLink < 0 ? "" : (id[0] + "." + id[1] + (id[2] >= 0 ? "." + id[2] : "")))
+              .append("\n");
+            sb.append(k).append("resolved_link=").append(usedLink).append("\n");
+            sb.append(k).append("inset=").append(spec.inset).append("\n");
+            sb.append(k).append("click_x=").append(cx).append("\n");
+            sb.append(k).append("click_y=").append(cy).append("\n");
             sb.append(k).append("screen_x=").append(ok ? (int) ((ox + r.x + r.width / 2)  * dsx) : -1).append("\n");
             sb.append(k).append("screen_y=").append(ok ? (int) ((oy + r.y + r.height / 2) * dsy) : -1).append("\n");
-            sb.append(k).append("x1=").append(ok ? (int) ((ox + r.x)            * dsx) : -1).append("\n");
-            sb.append(k).append("y1=").append(ok ? (int) ((oy + r.y)            * dsy) : -1).append("\n");
-            sb.append(k).append("x2=").append(ok ? (int) ((ox + r.x + r.width)  * dsx) : -1).append("\n");
-            sb.append(k).append("y2=").append(ok ? (int) ((oy + r.y + r.height) * dsy) : -1).append("\n");
+            sb.append(k).append("x1=").append(x1).append("\n");
+            sb.append(k).append("y1=").append(y1).append("\n");
+            sb.append(k).append("x2=").append(x2).append("\n");
+            sb.append(k).append("y2=").append(y2).append("\n");
+
+            // A three-way chain is 22 characters and blew the old 14-wide
+            // column, which pushed every state out of alignment and made the
+            // table unreadable exactly where it matters most. Unresolved
+            // chains show the count rather than the whole thing.
+            String idCol = usedLink >= 0
+                    ? (id[0] + "." + id[1] + (id[2] >= 0 ? "." + id[2] : ""))
+                      + (spec.chain.size() > 1 ? " (" + (usedLink + 1) + "/" + spec.chain.size() + ")" : "")
+                    : (spec.chain.size() > 1
+                        ? spec.chain.get(0)[0] + "." + spec.chain.get(0)[1]
+                          + (spec.chain.get(0)[2] >= 0 ? "." + spec.chain.get(0)[2] : "")
+                          + " (0/" + spec.chain.size() + ")"
+                        : spec.describe());
+            rep.append(String.format("%-40s %-16s %-4s ",
+                    wgNames.get(i), idCol,
+                    spec.inset != 100 ? spec.inset + "%" : ""));
+            if (ok)
+                rep.append(String.format("CLICK %-11s rect (%d,%d)-(%d,%d)%n",
+                        cx + "," + cy, x1, y1, x2, y2));
+            else
+                rep.append(explainWidgetState(state)).append(System.lineSeparator());
+        }
+
+        rep.append("--------------------------------------------------------------------------").append(System.lineSeparator());
+        rep.append(okCount).append(" resolved, ").append(wgNames.size() - okCount).append(" did not.")
+           .append(System.lineSeparator());
+        rep.append("An id can only resolve while its interface is open. Open the bank, the GE,")
+           .append(System.lineSeparator())
+           .append("the prayer book and the inventory tab, reload, and what is left is a real fault.")
+           .append(System.lineSeparator());
+        wgReportBlock = rep.toString();
+    }
+
+    // Why a widget did not resolve.
+    //
+    // 2.84 CORRECTS THIS TEXT. It used to read "not_found - the id has
+    // moved", which is a diagnosis the plugin cannot actually make. A widget
+    // whose interface is not LOADED returns null from getWidget() and lands
+    // here exactly as a wrong id does: with the bank shut, 12.47 is null and
+    // 12.47-typed-wrong is null, and nothing distinguishes them from here.
+    // Josh read "the id has moved" against four ids that were all correct.
+    //
+    // The honest form names both causes and the one action that separates
+    // them - open the interface and look again. A widget that is merely
+    // HIDDEN is different and worth keeping distinct: its interface IS
+    // loaded, so the id is definitely right.
+    private String explainWidgetState(String state)
+    {
+        switch (state == null ? "" : state)
+        {
+            case "not_found": return "not loaded - its interface is closed, OR the id is wrong."
+                                   + " Open that interface and look again";
+            case "hidden":    return "hidden - loaded but not drawn, so the id is right";
+            case "no_bounds": return "found but has no usable rectangle";
+            case "error":     return "the plugin threw reading it";
+            default:          return state;
         }
     }
 
@@ -8346,6 +8704,93 @@ public class GEVisualAidPlugin extends Plugin
     // -----------------------------------------------------------------------
 
     // ------------------------------------------------------------------
+    // 2.81 — /widgets : every configured widget id and where it lands.
+    // ------------------------------------------------------------------
+    // Josh: "can the widgets be added to the state screen, along with the
+    // clickable coordinates so i can test them".
+    //
+    // They ARE in /state - as wg_<name>_click_x and fifteen sibling lines
+    // each. At fifty widgets that is eight hundred lines to scroll, which is
+    // not a thing anyone can test against. This is the same data, one line
+    // per widget, with the CLICK POINT first because that is the number
+    // being tested.
+    //
+    // It renders wgReportBlock, built on the client thread in appendWidgets.
+    // The HTTP thread never reads the client - same rule as everything else
+    // that touches widget geometry.
+    //
+    // Every way of having nothing to show says which one it is. "Off",
+    // "logged out", "list is empty" and "the ids do not resolve" produce an
+    // identical blank page otherwise, and they are four different repairs.
+    private void handleWidgetsRequest(HttpExchange ex)
+    {
+        StringBuilder reply = new StringBuilder();
+        try
+        {
+            boolean on = false;
+            try { on = config.widgetsEnabled(); } catch (Throwable ignored) { }
+            // 2.83: the MERGED list. Judging "is anything configured" by the
+            // always-on box alone would report an empty list while an enabled
+            // set was supplying every id in use.
+            String spec = esWidgets;
+            boolean online = client.getGameState() == GameState.LOGGED_IN;
+
+            if (!on)
+            {
+                reply.append("Widget coordinates is switched OFF in the plugin.\n\n")
+                     .append("Turn on \"Widget coordinates\" in the GEVisualAid panel, or:\n")
+                     .append("  /config?widgetsEnabled=true\n");
+            }
+            else if (spec == null || spec.trim().isEmpty())
+            {
+                reply.append("Widget coordinates is on, but the widget list is EMPTY.\n\n")
+                     .append("Put ids in the \"Widgets\" setting as label=group.child, or\n")
+                     .append("label=group.child.index for a bracketed child, or push the\n")
+                     .append("whole set from the calibrator with Shift+F12.\n");
+            }
+            else if (wgNames.isEmpty())
+            {
+                reply.append("The widget list is set, but NOTHING IN IT PARSED.\n\n")
+                     .append("Every entry was rejected. The client log names each one.\n")
+                     .append("Ids look like 160.25, or 15.3.0 for what the Widget\n")
+                     .append("Inspector shows as D 15.3[0]. An optional @80 sets a\n")
+                     .append("click inset.\n\nThe list as stored:\n  ")
+                     .append(spec.trim()).append("\n");
+            }
+            else if (!online)
+            {
+                reply.append("Not logged in.\n\n")
+                     .append("The plugin publishes no widget geometry while logged out -\n")
+                     .append("there is no client interface to measure. ")
+                     .append(wgNames.size()).append(" id(s) are\n")
+                     .append("configured and waiting:\n\n");
+                for (int i = 0; i < wgNames.size(); i++)
+                    reply.append("  ").append(wgNames.get(i)).append(" = ")
+                         .append(wgSpecs.get(i).describe()).append("\n");
+            }
+            else
+            {
+                String block = wgReportBlock;
+                reply.append(block == null || block.isEmpty()
+                        ? "Logged in, but no widget reading has been taken yet.\n"
+                        + "Give it a game tick and reload.\n"
+                        : block);
+            }
+        }
+        catch (Throwable t) { reply.append("err ").append(t.getMessage()).append("\n"); }
+
+        try
+        {
+            byte[] outBytes = reply.toString().getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "text/plain; charset=utf-8");
+            ex.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+            ex.sendResponseHeaders(200, outBytes.length);
+            ex.getResponseBody().write(outBytes);
+        }
+        catch (Throwable ignored) { }
+        finally { ex.close(); }
+    }
+
     // 2.79 — /config : the WHOLE settings panel, read and write.
     // ------------------------------------------------------------------
     // Josh: "i want two tabs, the skiller settings we have and the plugin
@@ -8598,10 +9043,12 @@ public class GEVisualAidPlugin extends Plugin
                         String sc = setScenery(i), np = setNpcs(i);
                         String im = setItems(i),   bx = setBoxes(i);
                         String wp = setWaypoints(i);   // 2.78
+                        String wg = setWidgets(i);     // 2.83
                         boolean on = setEnabled(i);
                         if (!on && nm.trim().isEmpty() && sc.trim().isEmpty()
                                 && np.trim().isEmpty() && im.trim().isEmpty()
-                                && bx.trim().isEmpty() && wp.trim().isEmpty())
+                                && bx.trim().isEmpty() && wp.trim().isEmpty()
+                                && wg.trim().isEmpty())
                             continue;   // untouched slot, nothing to say
                         reply.append("set").append(i).append("=")
                              .append(nm).append(on ? " :ON" : " :off")
@@ -8610,6 +9057,7 @@ public class GEVisualAidPlugin extends Plugin
                              .append(" | items[").append(im).append("]")
                              .append(" | carried[").append(bx).append("]")
                              .append(" | waypoints[").append(wp).append("]")
+                             .append(" | widgets[").append(wg).append("]")
                              .append("\n");
                         // 2.78 — ALSO one line per field, machine-readable.
                         // The summary line above is for a person reading
@@ -8625,6 +9073,7 @@ public class GEVisualAidPlugin extends Plugin
                         reply.append("set").append(i).append("items=").append(im).append("\n");
                         reply.append("set").append(i).append("carried=").append(bx).append("\n");
                         reply.append("set").append(i).append("waypoints=").append(wp).append("\n");
+                        reply.append("set").append(i).append("widgets=").append(wg).append("\n");
                     }
                     catch (Throwable ignored) { }
                 }
@@ -8632,6 +9081,7 @@ public class GEVisualAidPlugin extends Plugin
                 reply.append("merged_npcs=").append(esNpcs).append("\n");
                 reply.append("merged_items=").append(esItems).append("\n");
                 reply.append("merged_carried=").append(esBoxes).append("\n");
+                reply.append("merged_widgets=").append(esWidgets).append("\n");
             }
             else
             {
@@ -10878,6 +11328,7 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/path",  this::handlePathRequest);
             httpServer.createContext("/filter", this::handleFilterRequest);
             httpServer.createContext("/config", this::handleConfigRequest);   // 2.79
+            httpServer.createContext("/widgets", this::handleWidgetsRequest); // 2.81
             httpServer.createContext("/hop",    this::handleHopRequest);
             httpServer.createContext("/agility", this::handleAgilityRequest);
             httpServer.createContext("/plugin",  this::handlePluginRequest);

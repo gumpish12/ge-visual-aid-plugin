@@ -171,6 +171,61 @@ non-trivial change.
   own already-LAN-reachable port instead — see `GET /plugin/config` there.
   Josh chose this knowingly on 2026-08-26.
 
+- **WIDGET COORDINATES ARE THE THIRD COORDINATE SOURCE** (2.80-2.84), beside
+  the suite's 4K and measured-1080p literals. `widgetList` maps a label to
+  one or more ids; `appendWidgets` resolves them every tick and publishes
+  `wg_<name>_click_x/_y`, `_state`, `_resolved_by`, the rect and the sprite.
+  A widget id is durable across RESOLUTIONS and fragile across CLIENT
+  VERSIONS, so the suite falls back to its literals per lookup and logs it.
+- **ACCEPT THE SPELLING THE SOURCE TOOL PRINTS.** The setting documented
+  `160:38`; RuneLite's Widget Inspector, the only place these ids can be
+  read, shows `160.38`. `split(":")` dropped the dotted form silently and
+  the log read `parsed 0 widget(s): []` **on every startup from 2026-08-10 to
+  2026-08-26** — configured, publishing nothing, never saying why. 2.80 takes
+  `[:.]` and NAMES every rejected token, including duplicate labels. A count
+  alone cannot tell "24 of 50 parsed" from "24 were written".
+- **THE S / D PREFIX DOES NOT MATTER, THE BRACKET DOES.** Two numbers is
+  `getWidget(group, child)`; three is that widget's child at the index, with
+  `getDynamicChildren()` first and `getChild()` as fallback, so a 3-part id
+  works either way. `S 160.25` is `160.25`, `D 15.3[0]` is `15.3.0`.
+- **THE SAME ELEMENT LIVES IN A DIFFERENT WIDGET DEPENDING ON WHAT IS OPEN**,
+  so one label takes a CHAIN separated by `|`, first with a real rectangle
+  wins (2.82). Inventory slot 1 is `149.0.N` normally, `15.3.N` with the bank
+  open, `467.0.N` at the GE — and **only the bank one has a rectangle for an
+  EMPTY slot**. `_resolved_by` says which link answered, which is the only
+  thing separating "the bank is open" from "the id has moved".
+- **`not_found` IS NOT A DIAGNOSIS THIS PLUGIN CAN MAKE.** A widget whose
+  interface is not loaded returns null from `getWidget()` exactly as a wrong
+  id does. 2.81's `/widgets` said "the id has moved" and sent Josh checking
+  four correct ids. 2.84 says "not loaded - its interface is closed, OR the id
+  is wrong" and names the action that separates them. **Only `hidden` proves
+  an id is right**, because the interface had to load for it to be there.
+- **`@N` IS A CLICK INSET** — keep N% of the rectangle about its CENTRE
+  (2.81). It shrinks the target and never moves it, for a glyph whose outer
+  pixels are border (`164.34@80`) or a line of text with dead space either
+  side (`182.8@50`). `click_x/click_y` is the post-inset point;
+  `screen_x/screen_y` stays the raw centre so existing readers do not change
+  meaning underneath them.
+- **THE CAP IS A RUNAWAY STOP, NOT A BUDGET.** It was 24, which the first real
+  list (50) blew straight past — silently, keeping the first 24 while the rest
+  read as "not found", which is the wrong diagnosis entirely. 128 now, and it
+  says so in the log when it bites. The real cost is ~16 lines of state feed
+  each, so a long list is a choice, not an accident.
+- **WIDGETS ARE THE SIXTH FIELD ON THE TEN ENTITY SETS** (2.83), not a
+  parallel system: `set<N>Widgets` beside `set<N>Scenery`, merged the same
+  way — the always-on box plus every enabled set. So `/filter?entityset=`
+  already switches them, `/filter` reports and writes them by the existing
+  `set<N><field>` pattern, and the tracker's settings tab picks the keys up
+  by reflection with no work at all.
+- **`/widgets` IS THE HUMAN VIEW** (2.81), one line per widget with the click
+  point first. `/state` has the same data as 16 lines each, which at 50
+  widgets is 800 lines nobody can test against. Every way of having nothing to
+  show names WHICH way it is — off, logged out, list empty, nothing parsed,
+  none resolving are five different repairs and an identical blank page.
+- **NO WIDGET GEOMETRY IS PUBLISHED WHILE LOGGED OUT** — `appendWidgets` is
+  behind `if (online && wantWidgets)`. There is no client interface to
+  measure, so login-screen coordinates can never be widgets.
+
 ## Versioning and deploy
 
 - Filename stays `GEVisualAidPlugin.java` — Java requires it to match the class.
