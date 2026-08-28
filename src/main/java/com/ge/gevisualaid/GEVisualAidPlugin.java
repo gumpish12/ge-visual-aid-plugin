@@ -1792,7 +1792,68 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.84";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.85";   // package-visible: the panel shows it
+
+    // ---- THE GAME CLOCK (2.85) -------------------------------------------
+    // This plugin has called client.getTickCount() since 2.27, for ground-item
+    // despawn timing, and has never once said the number out loud. Meanwhile
+    // Emergency_Screenshot.ahk was reading game ticks off the COLOUR OF ONE
+    // PIXEL, because that was the only tick it could see.
+    //
+    // Three facts are published, and the third is the one that matters:
+    //
+    //     game_tick               the counter itself
+    //     game_tick_ms            wall clock when THAT tick was stamped
+    //     game_tick_interval_ms   the gap from the tick before it
+    //
+    // game_tick_ms is what a pixel can never offer. A colour change carries no
+    // timestamp, so a consumer that notices it 18ms late has no way of knowing
+    // it was 18ms late. A consumer reading game_tick_ms knows exactly how long
+    // ago the tick truly began, and can act at a fixed offset from the TICK
+    // rather than from the moment it happened to look.
+    //
+    // The stamp is the FIRST statement in onGameTick, before the scene work,
+    // because everything after that point is latency this plugin added.
+    //
+    // NO CONFIG TOGGLE, deliberately, against the master-toggle rule every
+    // entity family follows. That rule exists because a filter with its family
+    // switched off reads exactly like a filter matching nothing. There is no
+    // filter here and nothing to gate: two field writes a tick, and no client
+    // read beyond getTickCount(). A switch whose only power is to make a free
+    // field absent is a way to break this silently - and with no toggle, an
+    // absent game_tick has exactly one meaning: a plugin older than 2.85.
+    private static final class TickStamp
+    {
+        final int  tick;
+        final long ms;
+        final long intervalMs;
+
+        TickStamp(int tick, long ms, long intervalMs)
+        {
+            this.tick       = tick;
+            this.ms         = ms;
+            this.intervalMs = intervalMs;
+        }
+    }
+
+    // ONE volatile write publishes all three together. Three separate volatile
+    // fields would let a reader pick up the new timestamp beside the old tick
+    // number - a wrong answer rather than a stale one, and the wrong kind of
+    // wrong for a field whose whole job is saying WHEN.
+    private volatile TickStamp lastTick = null;
+
+    // The last 64 intervals. The point of keeping them is to separate the
+    // jitter of the SERVER tick, which no consumer can do anything about, from
+    // the jitter a consumer's own polling adds, which it can. Without the first
+    // number the second cannot be judged, and the pixel-versus-plugin question
+    // cannot be settled by measurement at all. Written once per tick on the
+    // client thread and copied under the same lock by /tick, its only reader.
+    private static final int  TICK_HIST     = 64;
+    private static final long TICK_STALE_MS = 1800;   // three ticks
+    private final long[] tickIntervals = new long[TICK_HIST];
+    private int tickIntervalPos   = 0;
+    private int tickIntervalCount = 0;
+    private final Object tickLock = new Object();
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -2640,6 +2701,13 @@ public class GEVisualAidPlugin extends Plugin
     @Subscribe
     public void onGameTick(GameTick tick)
     {
+        // 2.85: BEFORE the scene work, and before the copilot gate below,
+        // which can return early. This is the moment the client processed a
+        // server tick; every line after it is latency this plugin has added,
+        // and a tick stamp taken after updateSceneState() would carry that
+        // latency silently into every consumer's timing.
+        stampGameTick();
+
         // V2.21: FIRST, and outside the copilot gate — the scene/camera block
         // must keep refreshing even when Flipping Copilot is not linked, and
         // it must be computed here because this is the client thread.
@@ -2696,6 +2764,57 @@ public class GEVisualAidPlugin extends Plugin
 
         try { writeRaw(ui + slotStr + invStr + idleFields() + "resolve_error=" + msg + "\n"); }
         catch (Exception ignored) { }
+    }
+
+    // 2.85 - stamp the game clock. Called first thing in onGameTick.
+    //
+    // getTickCount() is wrapped because a throw here would be the worst
+    // possible one: it happens before updateSceneState(), so it would take the
+    // whole scene block down with it and freeze the .txt - the exact failure
+    // 2.19 exists to prevent.
+    private void stampGameTick()
+    {
+        long      now  = System.currentTimeMillis();
+        TickStamp prev = lastTick;
+        long      gap  = (prev == null) ? -1 : (now - prev.ms);
+
+        int t = -1;
+        try { t = client.getTickCount(); } catch (Throwable ignored) { }
+
+        lastTick = new TickStamp(t, now, gap);
+
+        // The first tick after a login has no meaningful gap - the one before
+        // it was however long ago the last session ended - so it is not
+        // recorded. An interval history with a 40-minute entry in it would
+        // ruin every statistic taken from it.
+        if (gap > 0 && gap < 60_000)
+        {
+            synchronized (tickLock)
+            {
+                tickIntervals[tickIntervalPos] = gap;
+                tickIntervalPos = (tickIntervalPos + 1) % TICK_HIST;
+                if (tickIntervalCount < TICK_HIST) tickIntervalCount++;
+            }
+        }
+    }
+
+    // 2.85 - the tick fields carried by /state and the .txt.
+    //
+    // Deliberately NO age field here. This string is built once per tick and
+    // then cached and handed to every /state read and every .txt write, so an
+    // age baked into it would freeze at whatever it was when the string was
+    // made and read as fresh forever. An age is only honest if it is computed
+    // at the moment it is asked for, which is what /tick does. game_tick_ms is
+    // an absolute fact and has no such problem - a reader can subtract it from
+    // its own clock and get the right answer at any distance.
+    private String buildGameTickState()
+    {
+        TickStamp s = lastTick;
+        if (s == null)
+            return "game_tick=-1\ngame_tick_ms=0\ngame_tick_interval_ms=-1\n";
+        return "game_tick=" + s.tick + "\n"
+                + "game_tick_ms=" + s.ms + "\n"
+                + "game_tick_interval_ms=" + s.intervalMs + "\n";
     }
 
     private void checkStuckOffers()
@@ -3517,6 +3636,7 @@ public class GEVisualAidPlugin extends Plugin
                 + "login_notice_visible=" + isLoginNoticeVisible() + "\n"
                 + "current_world=" + safeWorld() + "\n"
                 + "client_revision=" + safeRevision() + "\n"
+                + buildGameTickState()                        // 2.85
                 + "welcome_screen_visible=" + isWelcomeScreenVisible() + "\n"
                 + "world_select_open=" + isWorldSelectVisible() + "\n"
                 + "connection_lost=" + (lastGameState == GameState.CONNECTION_LOST) + "\n"
@@ -3636,6 +3756,13 @@ public class GEVisualAidPlugin extends Plugin
                 + "login_notice_visible=" + isLoginNoticeVisible() + "\n"
                 + "current_world=" + safeWorld() + "\n"
                 + "client_revision=" + safeRevision() + "\n"
+                // 2.85: published here TOO. RuneLite only fires GameTick while
+                // LOGGED_IN (2.3/2.4 established that empirically), so on this
+                // path the numbers are the LAST tick of the previous session -
+                // which is the honest answer, and game_tick_ms is what makes it
+                // readable as one. A reader gating on freshness sees an age of
+                // minutes; /tick names it outright as tick_state=offline.
+                + buildGameTickState()
                 + "welcome_screen_visible=" + isWelcomeScreenVisible() + "\n"
                 + "world_select_open=" + isWorldSelectVisible() + "\n"
                 + "connection_lost=" + (lastGameState == GameState.CONNECTION_LOST) + "\n"
@@ -11329,6 +11456,7 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/filter", this::handleFilterRequest);
             httpServer.createContext("/config", this::handleConfigRequest);   // 2.79
             httpServer.createContext("/widgets", this::handleWidgetsRequest); // 2.81
+            httpServer.createContext("/tick",   this::handleTickRequest);     // 2.85
             httpServer.createContext("/hop",    this::handleHopRequest);
             httpServer.createContext("/agility", this::handleAgilityRequest);
             httpServer.createContext("/plugin",  this::handlePluginRequest);
@@ -11399,6 +11527,113 @@ public class GEVisualAidPlugin extends Plugin
         catch (Throwable t)
         {
             log.warn("GEVisualAid HTTP request error: {}", t.getMessage());
+        }
+        finally
+        {
+            ex.close();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 2.85 - /tick : the game clock, and nothing else.
+    //
+    // /state carries the same tick numbers, and /state is tens of kilobytes.
+    // A prayer flick reads this every 20ms, so it gets its own door: ~300
+    // bytes, two volatile reads and one short lock, no client-thread work at
+    // all. The same reason /widgets exists - the data was already in /state
+    // and unusable at the rate its consumer needed it.
+    //
+    // tick_age_ms is computed HERE, at request time. That is the only place it
+    // can be honest: /state is a string built once a tick and cached, so any
+    // age baked into it reads as fresh forever.
+    //
+    // EVERY WAY OF HAVING NO USABLE TICK NAMES WHICH WAY IT IS, because they
+    // need different repairs and they all look identical as a missing number:
+    //
+    //   no_tick_yet  the plugin has not seen a tick since it started - it was
+    //                enabled at the login screen, or has just been restarted
+    //   offline      the client is not LOGGED_IN, so GameTick has stopped
+    //                firing (2.3/2.4). Nothing is wrong. Log in.
+    //   stale        logged in and the ticks are NOT arriving: lag, a loading
+    //                screen, or a hung client. Nothing this plugin can fix,
+    //                but the consumer must stop trusting the number.
+    //   live         a tick arrived within the last three ticks.
+    //
+    // tick_intervals is the raw history, deliberately, not just the summary.
+    // It is what lets a consumer measure the SERVER's own jitter - the floor
+    // nothing can beat - separately from the jitter its own polling adds. Min,
+    // max and mean are for a person reading this in a browser.
+    // -----------------------------------------------------------------------
+    private void handleTickRequest(HttpExchange ex)
+    {
+        try
+        {
+            TickStamp s   = lastTick;
+            long      now = System.currentTimeMillis();
+            boolean   online;
+            try { online = client.getGameState() == GameState.LOGGED_IN; }
+            catch (Throwable t) { online = false; }
+
+            long age = (s == null || s.ms == 0) ? -1 : (now - s.ms);
+            String state;
+            if (s == null || s.ms == 0)   state = "no_tick_yet";
+            else if (!online)             state = "offline";
+            else if (age > TICK_STALE_MS) state = "stale";
+            else                          state = "live";
+
+            long[] hist;
+            synchronized (tickLock)
+            {
+                hist = new long[tickIntervalCount];
+                // Oldest first, so the list reads left to right in time. With
+                // fewer than TICK_HIST samples the ring has not wrapped and
+                // position 0 is already the oldest.
+                int start = (tickIntervalCount < TICK_HIST) ? 0 : tickIntervalPos;
+                for (int i = 0; i < tickIntervalCount; i++)
+                    hist[i] = tickIntervals[(start + i) % TICK_HIST];
+            }
+
+            long min = -1, max = -1, sum = 0;
+            StringBuilder list = new StringBuilder();
+            for (int i = 0; i < hist.length; i++)
+            {
+                if (i > 0) list.append(",");
+                list.append(hist[i]);
+                if (min < 0 || hist[i] < min) min = hist[i];
+                if (max < 0 || hist[i] > max) max = hist[i];
+                sum += hist[i];
+            }
+            String mean = hist.length == 0 ? "-1"
+                    : String.format(java.util.Locale.ROOT, "%.1f", (double) sum / hist.length);
+
+            StringBuilder r = new StringBuilder(512);
+            r.append("plugin_output_version=").append(PLUGIN_OUTPUT_VERSION).append("\n");
+            r.append("tick_state=").append(state).append("\n");
+            r.append("tick_online=").append(online).append("\n");
+            r.append("game_tick=").append(s == null ? -1 : s.tick).append("\n");
+            r.append("game_tick_ms=").append(s == null ? 0 : s.ms).append("\n");
+            r.append("tick_age_ms=").append(age).append("\n");
+            r.append("tick_interval_ms=").append(s == null ? -1 : s.intervalMs).append("\n");
+            r.append("tick_stale_after_ms=").append(TICK_STALE_MS).append("\n");
+            r.append("tick_intervals_n=").append(hist.length).append("\n");
+            r.append("tick_interval_min_ms=").append(min).append("\n");
+            r.append("tick_interval_max_ms=").append(max).append("\n");
+            r.append("tick_interval_mean_ms=").append(mean).append("\n");
+            r.append("tick_intervals=").append(list).append("\n");
+
+            byte[] out = r.toString().getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+            ex.getResponseHeaders().set("Cache-Control", "no-cache, no-store, must-revalidate");
+            ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+            ex.sendResponseHeaders(200, out.length);
+            try (OutputStream os = ex.getResponseBody())
+            {
+                os.write(out);
+            }
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid /tick error: {}", t.getMessage());
         }
         finally
         {

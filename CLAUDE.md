@@ -226,6 +226,46 @@ non-trivial change.
   behind `if (online && wantWidgets)`. There is no client interface to
   measure, so login-screen coordinates can never be widgets.
 
+- **THE GAME CLOCK IS PUBLISHED AT LAST** (2.85). `client.getTickCount()` had
+  been called since 2.27 for despawn timing and never emitted, while
+  `Emergency_Screenshot.ahk` read game ticks off the colour of one pixel.
+  `game_tick`, `game_tick_ms` and `game_tick_interval_ms` are stamped as the
+  FIRST statement in `onGameTick`, before `updateSceneState` — everything
+  after that point is latency this plugin added.
+- **`game_tick_ms` IS THE FIELD THAT MATTERS, NOT `game_tick`.** A colour
+  change carries no timestamp, so a consumer that notices it 18ms late cannot
+  know it was late. A consumer reading `game_tick_ms` knows exactly when the
+  tick began and can act at a fixed offset from the TICK rather than from the
+  moment it looked.
+- **NO TOGGLE ON THE TICK, DELIBERATELY**, against the master-toggle rule
+  every entity family follows. That rule exists because a filter with its
+  family off reads like a filter matching nothing; there is no filter here and
+  nothing to gate — two field writes a tick. A switch whose only power is to
+  make a free field absent is a way to break this silently, and with no toggle
+  an absent `game_tick` has exactly one meaning: a plugin older than 2.85.
+- **AN AGE BAKED INTO A CACHED STRING IS NOT AN AGE.** `/state` is built once
+  per tick, cached, and handed to every reader, so `game_tick_age_ms` in it
+  would freeze at build time and read as fresh for ever. `/state` therefore
+  carries only absolute facts (`game_tick_ms`); the age exists ONLY on
+  `/tick`, computed when the request is handled. Same trap as `scene_age_ms`,
+  which is honest at write time and frozen thereafter.
+- **`/tick` IS A SEPARATE DOOR FOR A REASON** (2.85). `/state` has the same
+  numbers and is tens of kilobytes; a prayer flick reads this every 20ms, so
+  it gets ~300 bytes, two volatile reads and one short lock. Same reasoning as
+  `/widgets`: the data was already in `/state` and unusable at the rate its
+  consumer needed it.
+- **`tick_state` NAMES WHICH KIND OF NOTHING IT IS**, because they need
+  different repairs and all look identical as a missing number: `no_tick_yet`
+  (the plugin has not seen one since it started), `offline` (not LOGGED_IN, so
+  GameTick has stopped firing — established in 2.3/2.4, nothing is wrong),
+  `stale` (logged in and ticks are NOT arriving — lag or loading), `live`.
+- **THE RAW INTERVAL HISTORY IS PUBLISHED, not just min/max/mean.** The last
+  64 gaps are what let a consumer measure the SERVER's own jitter — the floor
+  nothing can beat — separately from the jitter its own polling adds. Without
+  the first number the second cannot be judged, and the pixel-versus-plugin
+  question cannot be settled by measurement at all. The first tick after a
+  login is skipped: its "gap" is however long the last session ended ago.
+
 ## Versioning and deploy
 
 - Filename stays `GEVisualAidPlugin.java` — Java requires it to match the class.
