@@ -266,6 +266,210 @@ non-trivial change.
   question cannot be settled by measurement at all. The first tick after a
   login is skipped: its "gap" is however long the last session ended ago.
 
+- **THE MOTHERLODE SACK IS A VARBIT, NOT A TIMER AND NOT AN ITEM COUNT**
+  (2.86). 5558 is the sack's contents, 5556 says whether the bigger sack was
+  bought, and RuneLite's own Motherlode plugin reads exactly those two, so
+  `mlm_sack_space` needs no other plugin and cannot drift from the game. The
+  pay-dirt is in NO item container while it is inside the machine, so there
+  was nothing to count; a timer would have been a guess, and a broken strut
+  makes every such guess wrong in the one situation that matters.
+- **THE SACK COUNT KEEPS RISING FOR SEVERAL TICKS AFTER A DEPOSIT**, because
+  the machine delivers over time. That lag is not noise to smooth away - it IS
+  the answer to "has my deposit landed yet". `mlm_sack_still_ticks` says how
+  long it has been steady and `mlm_sack_state` turns that into
+  `settling` / `settled`. **`mlm_sack_witnessed` says whether this session has
+  ever seen the number move at all** - never watch a number you have not
+  observed changing, and now the feed says which kind you are looking at.
+- **IT IS THE WATER WHEEL, NOT THE STRUT, THAT ONLY AN ID CAN READ.** 2.86
+  claimed a broken strut was indistinguishable by name; Josh read a real one
+  and it is not. Live, 2026-08-28, stood at the wheel:
+
+  | id | name | actions |
+  |---|---|---|
+  | 26669 | `Strut` | none |
+  | 26670 | `Broken strut` | `Hammer` |
+  | 26671 | `Water wheel` | none |
+  | 26672 | `Water wheel` | none |
+
+  A strut changes its NAME and gains an ACTION when it breaks, so `#Hammer`
+  finds one. **The wheel does neither** - same name, no actions on either,
+  and 26672 is the stopped one. For the wheel the object id is the only
+  thing in the client that separates turning from stopped.
+- **`mlm_flow_state` IS READ OFF THE WHEELS, WITH THE STRUT COUNTS BESIDE IT.**
+  The wheel is the thing that TURNS: a strut is the cause and the thing you
+  would hammer, a stopped wheel is the effect, and the effect is what decides
+  whether pay-dirt reaches the sack. Josh: one broken strut and its wheel
+  stopped while the other kept going.
+- **IDS ARE STILL USED FOR THE STRUTS, AND COUNTING IS THE REASON.** A
+  `#Hammer` filter can only ever find BROKEN ones, and 0 from a filter is the
+  ambiguous zero this suite keeps getting bitten by - it cannot separate "none
+  broken" from "the filter is dead". `3 ok beside 1 broken` is a reading no
+  dead filter can fake. Every id is a SYMBOL from `ObjectID`, so a rename in a
+  future runelite-api fails the BUILD rather than matching nothing for ever -
+  proved by renaming one and watching it fail.
+- **`mlm_flow_state` HAS FOUR VALUES BECAUSE A WHEEL NOBODY CAN SEE IS NOT A
+  TURNING WHEEL.** `unknown` (none tracked - not in the mine, or the scene has
+  not been walked) is a different repair from `flowing`. `degraded` is some
+  wheels stopped, `stopped` is all of them.
+- **A STOPPED WHEEL IS NOT A REASON TO STOP DEPOSITING** (2.91, and 2.86-2.90
+  had this backwards). Josh, watching one break rather than describing one:
+  *"it can still deposit, and carry on mining, its just it sits in the hopper
+  until its repaired then moves down to the sack."* **NOTHING IS LOST.** The
+  hopper holds it and the machine works through it once the struts are fixed.
+  `mlm_flow_state` says WHY the sack is not growing; it is not permission to
+  put things in it.
+- **`queued` WAS CALLED `flight_lost`, AND THE WORD WAS THE WHOLE BEHAVIOUR.**
+  Neither number changed when it was renamed in 2.91. "Lost" reads as a reason
+  to stop depositing and the skiller did exactly that, sitting on a full
+  inventory in front of a hopper that would have taken it. "Queued" reads as a
+  reason to carry on. **A field name is an instruction to every consumer that
+  ever reads it** - this is the mislabel-rather-than-fail-loudly trap wearing a
+  different hat, and it was self-inflicted.
+- **AN EARLIER DESCRIPTION LOSES TO A LIVE OBSERVATION, EVERY TIME.** Josh
+  described the broken-strut behaviour twice and the two accounts disagreed;
+  the second came from watching it and is the one in the code. Ask what was
+  SEEN, not what is believed - and when a correction arrives, change the field
+  NAME as well as the logic, or the old belief keeps giving orders.
+- **`127.0.0.1:8081/motherlode` IS THE HUMAN VIEW** (2.87). Josh, having
+  ticked the setting: *"how do i watch the mlm sack count or flow state etc.
+  its not in the skilling state"*. It never was - the skilling panel renders
+  the families it was written for, and a new plugin family does not appear
+  there by itself. The numbers are in `/state` as sixty-odd `mlm_` lines
+  inside tens of kilobytes, which is not a thing anyone can watch a sack fill
+  in. Same reasoning as `/widgets` and `/tick`. Switched off, Scene & Tiles
+  off, logged out, no reading yet and not-in-the-mine are five different
+  repairs and it names which one.
+- **THERE IS NO VEIN COUNTDOWN AND THERE CANNOT BE ONE.** How much pay-dirt a
+  vein has left is server-side: no varbit, no widget, no timer, and RuneLite's
+  own Motherlode plugin publishes none either - it only highlights the veins
+  that are active now. Anything printed as one would be invented, and an
+  invented number mislabels rather than failing loudly. `mlm_vein_life_source`
+  = `none` says it in the feed so a consumer never infers it from silence.
+- **WHAT IS KNOWABLE IS MEASURED INSTEAD.** A depleting vein is replaced by a
+  depleted object (26665-26668) on the same tile and replaced back on respawn,
+  and both swaps arrive as spawn events. The OBSERVED gap gives a real eta for
+  every depleted vein. `mlm_eta_source` says whether enough samples exist for
+  it to mean anything; below three it is -1, not a plausible-looking guess.
+  A tile that was ALREADY depleted when the scene was seeded is timed from
+  first sight, not from depletion, so it is never sampled and its eta is
+  withheld - `mlm_dep_N_timed_from` says which kind of number you have.
+- **THE MOTHERLODE SCENE TRACKING IS EVENT DRIVEN, NOT A TILE WALK.** The
+  struts sit ~25 tiles from the ore faces, so a radius that saw them from the
+  veins would scan most of the scene every tick. Spawn events cost nothing
+  when nothing changes. The price: a scene already loaded when the toggle went
+  on has fired no events, so ONE full-scene walk seeds the maps on enable and
+  on any change of `getMapRegions()` - which covers login, hop and teleport
+  with no region table.
+- **`mlm_sack_delta` IS THE LAST CHANGE, NOT THE DEPOSIT.** Josh, live:
+  `+3` then `+5`. From one number there is no telling "5 went in and landed
+  at once" from "27 went in and 5 have arrived". `MLM_SETTLE_TICKS` rests on
+  exactly that difference, so 2.88 publishes `mlm_sack_history` - the last 16
+  changes as `tick:+delta`, newest first, RAW. **No mean**: the 207-tick gap
+  between two test deposits is not an arrival interval, and averaging it in
+  produces a confident number describing nothing. Same call as the game
+  clock publishing its intervals rather than a summary of them.
+- **`MLM_SETTLE_TICKS = 4` IS STILL A GUESS AND THE FEED SAYS SO.** It is
+  published as `mlm_sack_settle_ticks` and labelled UNMEASURED on
+  `/motherlode`. A settle that fires in a GAP BETWEEN ARRIVALS reports room
+  in the sack that is about to be taken - so the threshold has to clear the
+  biggest gap in a real full-inventory deposit, and that number comes from
+  `mlm_sack_history`, not from me.
+- **`motherlode_log.txt` LOGS CHANGES, NEVER STATE** (2.89, toggle
+  `motherlodeLog`, read it at `/motherlode?log`, wipe with
+  `/motherlode?log=clear`). A tick-by-tick dump buries the handful of
+  transitions that answer anything. **The INVENTORY half is why it exists**:
+  a line reading `Pay-dirt 27 -> 0` immediately before the SACK lines says
+  how much went in, which no sack reading alone can. Item names come from
+  `ItemComposition`, so there is no item table to rot - whatever is carried
+  names itself.
+- **THE LOG RESOLVES ITS FILE BEFORE DRAINING ITS BUFFER.** Draining first
+  and then finding nowhere to write throws the lines away silently, which
+  looks exactly like a logger that is switched on and recording nothing. The
+  no-folder case warns once and says which it is.
+- **AN OFF-TEST THAT RUNS ON THE FIRST FILL CANNOT FAIL.** `mlmLogMachinery`
+  is silent on its first fill by design, so asserting "switched off writes
+  nothing" there passes with the on/off gate deleted. It did, for one round.
+  A checker must exercise the guard in the state where the guard is the only
+  thing stopping output - and the same goes for the flush: draining the
+  buffer looks identical whether the lines reached disk or were binned, so
+  the assertion had to become "the FILE contains the line", driven through a
+  `Proxy` over `GEVisualAidConfig` into a temp folder.
+- **A DEPOSIT REACHES THE SACK TWELVE TICKS LATER, AS ONE CHANGE.** Measured
+  twice in Josh's run log, 2026-08-28:
+
+  | | trip 1 | trip 2 |
+  |---|---|---|
+  | `Pay-dirt 27 -> 0` | t=386 | t=665 |
+  | `SACK +27` | t=398 | t=677 |
+
+  No trickle, no partial arrivals. **Which made 2.89's `mlm_sack_state` wrong
+  in the dangerous direction**: for those twelve ticks the count had not moved
+  for ages, so it read `settled` while 27 pay-dirt was in the air, and a
+  consumer asking "is there room for another load" was told there were 27 more
+  spaces than there were. **No steadiness threshold can fix that** - the gap it
+  measures starts BEFORE the deposit. The deposit itself has to be the trigger.
+- **THE DEPOSIT IS VISIBLE IN THE INVENTORY, AND NOWHERE ELSE.** 2.90 watches
+  pay-dirt leaving (`mlm_paydirt_inv`), carries the amount as
+  `mlm_flight_amount`, and publishes **`mlm_sack_space_settled`** = space minus
+  what is already on its way. That is the number to act on; plain
+  `mlm_sack_space` is a trap for twelve ticks after every deposit.
+- **`flight_lost` IS A REAL STATE AND IT MEANS THE MACHINE IS STOPPED.** Josh:
+  with the struts broken *"the pay-dirt sits in the water and doesnt go to the
+  bag"*. A deposit that has not arrived within `mlm_flight_max_ticks` (30,
+  against a measured 12) says so in its own word rather than being rounded
+  down to `settled`. `mlm_flight_last_ticks` republishes the real delivery time
+  every trip, so the constant stays checkable against reality.
+- **COLLECTING IS INSTANT AND SYNCHRONOUS; DEPOSITING IS NOT.** The sack and
+  the inventory move on the SAME tick when you Search it - 62 -> 34 -> 6 -> 0.
+  That asymmetry is the whole reason the deposit needed its own tracker and
+  the collect needs none.
+- **THE SACK FILLS YOUR FREE SLOTS. IT IS NOT "28 A TIME"** (Josh's
+  correction, 2026-08-28). Two things bend it, and both were visible in the
+  same run:
+  - **Gems stay behind.** An uncut gem from mining cannot go in the hopper, so
+    it occupies a slot from the moment it is mined until the next bank. At
+    t=681 one Uncut emerald was already carried, so only 27 slots were free.
+    Over several trips gems accumulate and every trip carries less pay-dirt.
+  - **Golden nuggets stack.** That first collect put 28 UNITS into 27 SLOTS -
+    the nuggets took one slot for two. So units removed from the sack can
+    EXCEED the free slots, and neither number predicts the other.
+
+  So a module must never compute an expected collect. **Search, bank, re-read
+  `mlm_sack_count`, repeat while it is above zero** - the same confirm-rather
+  -than-predict rule as everywhere else here. `inv_free_slots` already exists
+  in the feed; nothing new was needed for this.
+- **"INVENTORY FULL" IS ZERO FREE SLOTS, NOT 27 PAY-DIRT.** The gems riding
+  along are why. `Pay-dirt 27 -> 0` in the run log looked like a clean 27 only
+  because the 28th slot held the emerald.
+- **A SCENE REBUILD FIRES A TRANSITION FOR EVERY VEIN IN THE MINE.** Tick 402
+  of Josh's run: ~190 `active -> depleted` followed by ~190 `depleted ->
+  active`, against one or two a tick while actually mining. Reported
+  individually they buried the run in 380 lines, and **any non-zero gap among
+  them would have entered the respawn statistics as a real observation** - only
+  the `gap <= 0` guard stopped it. 2.90 queues vein transitions and reports
+  them at the TICK BOUNDARY: over `MLM_RESYNC_TRANSITIONS` (12) in one tick is
+  a resync, logged as one line and sampled not at all.
+- **THE VEIN RESPAWN IS TOO WIDE TO PLAN A CLICK ON.** The three genuine
+  samples were 34t, 102t and 175t - a five-fold spread. `mlm_respawn_history`
+  and `mlm_respawn_spread_ticks` publish it raw beside the mean, `/motherlode`
+  warns when the spread exceeds 2x, and `MLM_ETA_MIN_SAMPLES` went 3 -> 8. **A
+  module should find another active vein, not wait for this one.**
+- **`./gradlew mlmCheck` IS A REAL CHECKER, NOT A SMOKE TEST.** It reflects
+  into the compiled helpers rather than re-implementing them, and it was
+  proved red thirteen times before being believed: 13-bit tile packing, a
+  missing vein id, an unbumped version string, the wrong sack capacity, an
+  unseen wheel counted as flowing, the two wheel ids swapped, the settle
+  threshold off by one, the arrival ring walked oldest-first, an off-by-one
+  in that walk, the logger recording while switched off, the logger spamming
+  its first fill, the flush binning its lines, and the log file opened
+  without append, the flight state losing to the steadiness threshold (the
+  2.89 bug, now a regression test), a lost delivery rounded down to settled,
+  a resync threshold that let a scene rebuild through, a flight window
+  shorter than the measured delivery, and the 2.91 rename (it asserts the
+  string `flight_lost` appears nowhere, so the old word cannot creep back).
+  **Two of them passed the first time they were asked** - see the off-test
+  rule above.
+
 ## Versioning and deploy
 
 - Filename stays `GEVisualAidPlugin.java` — Java requires it to match the class.

@@ -22,6 +22,8 @@ import net.runelite.api.Prayer;
 import net.runelite.api.Projectile;
 import net.runelite.api.events.ProjectileMoved;
 import net.runelite.api.gameval.InventoryID;
+import net.runelite.api.gameval.ObjectID;
+import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.Skill;
 import net.runelite.api.DecorativeObject;
 import net.runelite.api.DynamicObject;
@@ -42,6 +44,10 @@ import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.GameObjectSpawned;
+import net.runelite.api.events.GameObjectDespawned;
+import net.runelite.api.events.WallObjectSpawned;
+import net.runelite.api.events.WallObjectDespawned;
 import java.time.LocalDate;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.config.ConfigManager;
@@ -1792,7 +1798,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.85";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.91";   // package-visible: the panel shows it
 
     // ---- THE GAME CLOCK (2.85) -------------------------------------------
     // This plugin has called client.getTickCount() since 2.27, for ground-item
@@ -1854,6 +1860,255 @@ public class GEVisualAidPlugin extends Plugin
     private int tickIntervalPos   = 0;
     private int tickIntervalCount = 0;
     private final Object tickLock = new Object();
+
+    // ---- MOTHERLODE MINE (2.86) -------------------------------------------
+    // Three questions the mine asks that nothing already in this plugin could
+    // answer, and the honest answer to each.
+    //
+    // 1. HOW MUCH ROOM IS LEFT? A VARBIT. Not a timer, not an item count, not
+    //    a widget read. 5558 is the sack's own contents and 5556 says whether
+    //    the bigger sack has been bought; RuneLite's own Motherlode plugin
+    //    reads exactly those two, so this needs no other plugin and cannot
+    //    drift from what the game shows. A timer would be a guess, and a
+    //    broken strut makes every such guess wrong in the one situation that
+    //    matters. The pay-dirt is in no item container while it is inside the
+    //    machine, so there is nothing to count. A widget would mean the sack
+    //    overlay, which RuneLite draws itself, and a widget id is fragile
+    //    across client versions where a varbit is not.
+    //
+    //    THE COUNT KEEPS RISING FOR SEVERAL TICKS AFTER A DEPOSIT, because the
+    //    machine delivers over time. That lag is not noise to be smoothed
+    //    away - it IS the answer to "has my deposit landed yet". So the tick
+    //    and wall clock of the last CHANGE are published, and
+    //    mlm_sack_still_ticks says how long it has been steady.
+    //    mlm_sack_witnessed says whether this session has ever seen the number
+    //    move at all, because a number nobody has observed changing is not a
+    //    number to build a stop on.
+    //
+    // 2. IS THE MACHINE RUNNING? THE GAME SWAPS THE OBJECT, and 2.86 got the
+    //    reason half wrong, so here is what Josh's live read of a broken one
+    //    actually says (2026-08-28, standing at the wheel):
+    //
+    //        Strut          26669  no actions
+    //        Broken strut   26670  Hammer
+    //        Water wheel    26671  no actions
+    //        Water wheel    26672  no actions
+    //
+    //    So a strut DOES change its name and DOES gain an action when it
+    //    breaks - `#Hammer` would find one. THE WATER WHEEL DOES NOT. Both
+    //    wheels are called "Water wheel", neither has a single action, and
+    //    26672 is the stopped one. For the wheel, the object id is the only
+    //    thing in the client that can tell running from stopped.
+    //
+    //    That matters because THE WHEEL IS THE THING THAT TURNS. A strut is
+    //    the cause and the thing you would hammer; a stopped wheel is the
+    //    effect, and the effect is what decides whether pay-dirt reaches the
+    //    sack. mlm_flow_state is therefore read off the WHEELS, with the strut
+    //    counts published beside it as the diagnosis.
+    //
+    //    2.91: A STOPPED WHEEL IS NOT A REASON TO STOP DEPOSITING. It delays
+    //    the pay-dirt, it does not destroy it - the hopper holds it and the
+    //    machine works through it once repaired. mlm_flow_state says why the
+    //    sack is not growing; it is not permission to put things in it.
+    //
+    //    Ids are still used for the struts too, and counting is the reason: a
+    //    `#Hammer` filter can only ever find BROKEN ones, and 0 from a filter
+    //    is the ambiguous zero this suite has been bitten by repeatedly - it
+    //    cannot separate "none broken" from "the filter is dead". Counting
+    //    three ok beside one broken is a reading no dead filter can fake.
+    //    Every id is a SYMBOL from ObjectID rather than a typed number, so a
+    //    rename in a future runelite-api fails the build instead of matching
+    //    nothing for ever.
+    //
+    //    mlm_flow_state has FOUR values, because a wheel nobody can see is not
+    //    a turning wheel. `unknown` - none tracked, so not in the mine, or the
+    //    scene has not been walked yet - is a different repair from `flowing`,
+    //    and reading it as "fine" is how a module deposits into a machine that
+    //    is not running.
+    //
+    // 3. WHEN WILL THE VEIN I AM MINING RUN OUT? IT CANNOT BE KNOWN, and
+    //    saying so plainly is the useful part. How much pay-dirt a vein has
+    //    left is server-side: no varbit, no widget, no countdown. RuneLite's
+    //    own Motherlode plugin publishes none either - it only highlights the
+    //    veins that are active right now. Anything printed here as a vein
+    //    countdown would be invented, and an invented number mislabels rather
+    //    than failing loudly. mlm_vein_life_source=none says it in the feed so
+    //    a consumer never has to infer it from silence.
+    //
+    //    What IS knowable is measured instead. A vein that depletes is
+    //    replaced by a depleted one (26665-26668) on the same tile, and
+    //    replaced back when it respawns; both swaps arrive as spawn events.
+    //    The OBSERVED gap between them gives a real countdown for every
+    //    depleted vein in view. mlm_eta_source says whether enough of the mine
+    //    has been watched for that number to mean anything; until it has, the
+    //    eta is -1 rather than a plausible-looking guess.
+    //
+    // The tracking is EVENT DRIVEN, not a per-tick tile walk: the struts sit
+    // about twenty-five tiles from the ore faces, so a radius that saw them
+    // from the veins would cost a scan of most of the scene every tick. Spawn
+    // events cost nothing when nothing changes. The price is that a scene
+    // already loaded when the toggle went on has never fired an event, so one
+    // full-scene walk seeds the maps on enable, and on any change of the map
+    // regions - which covers login, hop and teleport without a region table.
+    //
+    // mlm_strut_N and mlm_dep_N are DISTANCE RANKS re-dealt every tick, like
+    // every other indexed family here. The world coordinates are the identity;
+    // never store the index.
+
+    // RuneLite's own MotherlodePlugin.SACK_SIZE / SACK_LARGE_SIZE, read out of
+    // the resolved client jar with javap rather than off the wiki. They are
+    // the only two numbers here that are not measured, so mlm_sack_max_seen
+    // publishes the largest count actually observed - if the game ever changes
+    // them, the disagreement is visible instead of silent.
+    private static final int MLM_SACK_SIZE       = 108;
+    private static final int MLM_SACK_LARGE_SIZE = 189;
+
+    // "The number stopped moving" is a convenience threshold over
+    // mlm_sack_still_ticks, which is the fact. It is NOT how a deposit is
+    // detected - see MLM_FLIGHT below for why it cannot be.
+    private static final int MLM_SETTLE_TICKS = 4;
+
+    // 2.90, MEASURED. Josh deposited a full inventory twice on 2026-08-28:
+    //     t=386 Pay-dirt 27 -> 0      t=665 Pay-dirt 27 -> 0
+    //     t=398 SACK count=35 +27     t=677 SACK count=62 +27
+    // TWELVE TICKS both times, arriving as ONE change, no trickle. Which
+    // means 2.89's mlm_sack_state was wrong in the dangerous direction: for
+    // those twelve ticks the sack count had not moved for ages, so it read
+    // "settled" while 27 pay-dirt was in the air. A consumer checking "is
+    // there room for another load" in that window is told there are 27 more
+    // spaces than there really are, and overflows.
+    //
+    // A steadiness threshold cannot fix that, however it is tuned: the gap
+    // being measured starts BEFORE the deposit, not after it. The deposit
+    // itself has to be the trigger, and the inventory is where it is visible.
+    // 30 ticks is the outstanding-delivery timeout: comfortably past the
+    // measured 12, and mlm_flight_last_ticks republishes the real figure
+    // every trip so this constant is checkable against reality.
+    private static final int MLM_FLIGHT_MAX_TICKS = 30;
+
+    // The item the hopper takes, confirmed from Josh's own run log rather
+    // than from a wiki: "INV Pay-dirt 27 -> 0 (-27)" at the hopper. ONE name,
+    // not a table, and it is checked against reality every tick -
+    // mlm_paydirt_name says what is being watched and mlm_paydirt_seen says
+    // whether it has ever matched anything. A wrong name reads as
+    // seen=false for ever, which is loud, rather than as an empty inventory,
+    // which is silent.
+    private static final String MLM_PAYDIRT = "Pay-dirt";
+
+    // 2.90. A scene rebuild fires spawn events for the WHOLE mine at once:
+    // Josh's log has ~190 vein transitions in tick 402, against one or two a
+    // tick while actually mining. Reported individually they buried the run
+    // in 380 lines, and any non-zero gap among them would have gone straight
+    // into the respawn statistics as a real observation. Over this many in
+    // one tick is a resync, not the mine changing.
+    private static final int MLM_RESYNC_TRANSITIONS = 12;
+
+    // Raised from 3 by the same log. The three genuine samples were 34t,
+    // 102t and 175t - a mean over that spread is a number nobody should plan
+    // a click on, so the raw list and the spread are published beside it and
+    // the eta stays -1 for longer.
+    private static final int MLM_ETA_MIN_SAMPLES = 8;
+    // A gap longer than this is not a respawn - it is a tile that left the
+    // scene and came back, or a session boundary. Same reasoning as the game
+    // clock's 60s interval reject in stampGameTick().
+    private static final int MLM_RESPAWN_MAX_TICKS = 600;
+    private static final int MLM_RESPAWN_HIST      = 32;
+    private static final int MLM_LIST_CAP          = 10;
+    private static final int MLM_TICK_MS           = 600;   // nominal - the real one is game_tick_interval_ms
+
+    // tile -> {state, sinceTick, eventTick, seeded}. state 1 = active vein,
+    // 2 = depleted, and NEGATIVE means that state with the object currently
+    // absent. A morph despawns before it spawns, so dropping the entry on the
+    // despawn would throw away the depletion time the whole respawn
+    // measurement is built on. seeded=1 marks an entry created by the scene
+    // walk rather than witnessed depleting, and its first respawn is not
+    // sampled - that gap would be measured from the walk, not the depletion.
+    private final Map<Long, int[]>   mlmVeins  = new HashMap<>();
+    private final Map<Long, Integer> mlmStruts = new HashMap<>();
+    private final Map<Long, Integer> mlmWheels = new HashMap<>();
+
+    private int[]   mlmRegions     = null;
+    private boolean mlmSeedPending = true;
+    private int     mlmSeededTick  = -1;
+    // Read by the four scene subscribers, which fire tens of thousands of
+    // times on a scene load. Refreshed once a tick so they cost an int test
+    // rather than a config proxy call each.
+    private volatile boolean mlmWasEnabled = false;
+
+    private int     mlmSackLast        = -1;
+    private int     mlmSackMaxSeen     = -1;
+    private int     mlmSackDelta       = 0;
+    private int     mlmSackChangedTick = -1;
+    private long    mlmSackChangedMs   = -1;
+    private boolean mlmSackWitnessed   = false;
+
+    // 2.88 - the last 16 CHANGES to the sack count, as {tick, delta}. Josh
+    // deposited twice and got +3 then +5, which is the whole reason this
+    // exists: mlm_sack_delta is the last change alone, and from one number
+    // there is no telling a deposit that arrived in one lump from a delivery
+    // still in progress. MLM_SETTLE_TICKS is a GUESS until this list has
+    // watched a full inventory go in, and a settle that fires between two
+    // arrivals is the failure mode - it would report room that is about to
+    // be taken.
+    private static final int MLM_SACK_HIST = 16;
+    private final int[] mlmSackHistTick  = new int[MLM_SACK_HIST];
+    private final int[] mlmSackHistDelta = new int[MLM_SACK_HIST];
+    private int mlmSackHistPos = 0, mlmSackHistCount = 0;
+
+    // 2.90 - pay-dirt in the air. A deposit leaves the inventory instantly
+    // and reaches the sack twelve ticks later, and NOTHING in the sack
+    // reading marks the difference between "not arrived yet" and "settled".
+    private int     mlmPaydirtId     = -1;
+    private int     mlmPaydirtLast   = -1;
+    private boolean mlmPaydirtSeen   = false;
+    private int     mlmFlight        = 0;
+    private int     mlmFlightSince   = -1;
+    private int     mlmFlightLast    = -1;   // measured delay of the last completed delivery
+
+    // Vein transitions seen this tick, reported at the tick boundary so a
+    // whole-scene resync can be recognised as one event rather than as two
+    // hundred separate observations. {key, prev, st, gap}.
+    private final List<long[]> mlmVeinPending = new ArrayList<>();
+
+    private final int[] mlmRespawn = new int[MLM_RESPAWN_HIST];
+    private int mlmRespawnPos = 0, mlmRespawnCount = 0, mlmRespawnLast = -1;
+
+    // ---- 2.89, THE RUN LOGGER --------------------------------------------
+    // Changes only, never state. A tick-by-tick dump of the same numbers
+    // buries the handful of transitions that answer anything, and this file
+    // has to stay readable by a person as well as parseable by a machine.
+    //
+    // The INVENTORY half is why it exists. Two sack readings cannot separate
+    // "5 were deposited and landed at once" from "27 were deposited and 5
+    // have arrived so far", and MLM_SETTLE_TICKS rests on that difference. A
+    // line reading "Pay-dirt 27 -> 0" immediately before the SACK lines
+    // settles it with nothing counted by hand. Names come from
+    // ItemComposition, so there is no item table to rot - whatever is in the
+    // inventory names itself.
+    //
+    // The cap is a RUNAWAY STOP, not a budget, and it says so in the file
+    // when it bites. A log that silently stopped hours ago is worse than no
+    // log, because it reads as "nothing happened".
+    private static final long MLM_LOG_MAX_BYTES = 4_000_000L;
+    private static final int  MLM_LOG_TAIL_LINES = 4000;
+    private static final java.time.format.DateTimeFormatter MLM_LOG_TS =
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+    private final StringBuilder mlmLogPending = new StringBuilder();
+    private boolean mlmLogOn      = false;
+    private boolean mlmLogCapHit  = false;
+    private boolean mlmLogWarned  = false;
+    private String  mlmLogPath    = "";
+    private long    mlmLogBytes   = -1;
+    private boolean mlmInvSeeded  = false;
+    private final Map<Integer, Integer> mlmInvPrev   = new HashMap<>();
+    private final Map<Long, Integer>    mlmStrutPrev = new HashMap<>();
+    private final Map<Long, Integer>    mlmWheelPrev = new HashMap<>();
+
+    // 2.87: the human page behind /motherlode, built on the CLIENT THREAD in
+    // appendMotherlode and only read by the HTTP thread - same rule as
+    // wgReportBlock. /state carries the same numbers as sixty-odd separate
+    // lines, which is not a thing anyone can watch a sack fill in.
+    private volatile String mlmReportBlock = "";
 
     // Refreshed by every GameStateChanged event — lets the .txt report the
     // precise client state (LOGIN_SCREEN, LOGGING_IN, LOADING, LOGGED_IN,
@@ -2419,6 +2674,9 @@ public class GEVisualAidPlugin extends Plugin
             // payload never carries screen pixels from before the logout.
             // Aggression anchors are unknowable after a login, so clear them.
             aggroReset();
+            // 2.86: the motherlode tile maps describe a scene that is gone.
+            // Left in place they would keep reporting struts as unbroken.
+            mlmReset();
             try
             {
                 sceneStateBlock = config.sceneTrackingEnabled()
@@ -3956,6 +4214,7 @@ public class GEVisualAidPlugin extends Plugin
             }
             if (online) applyPendingPath();
             if (online) updateAggroTimer(); else aggroReset();
+            if (online) updateMotherlode(); else mlmReset();
             sceneStateBlock = buildSceneBlock(online);
         }
         catch (Throwable t)
@@ -4419,6 +4678,20 @@ public class GEVisualAidPlugin extends Plugin
         else
         {
             sb.append("bf_step_count=0\n");
+        }
+
+        // ---- Motherlode Mine (2.86) -----------------------------------------
+        boolean wantMlm = false;
+        try { wantMlm = config.motherlodeEnabled(); } catch (Throwable ignored) { }
+        sb.append("mlm_enabled=").append(wantMlm).append("\n");
+        if (online && wantMlm) appendMotherlode(sb, playerLoc);
+        else
+        {
+            // No mlm_flow_state here, deliberately. "unknown" beside
+            // mlm_enabled=false would read as "switched on and unable to see
+            // the struts", which is a different repair. Its absence beside
+            // mlm_enabled=false has exactly one meaning.
+            sb.append("mlm_strut_count=0\nmlm_dep_count=0\n");
         }
 
         // ---- Agility (V2.40) ------------------------------------------------
@@ -6248,6 +6521,1021 @@ public class GEVisualAidPlugin extends Plugin
             return e.getIntValue(typeIdx);
         }
         catch (Throwable t) { return -1; }
+    }
+
+    // -----------------------------------------------------------------------
+    // Motherlode Mine (2.86). See the notes beside the mlm* fields for why the
+    // scene half is event driven and what each output field means. Everything
+    // here runs on the CLIENT THREAD: the four subscribers, the seed walk and
+    // the per-tick update are all client-thread callbacks, and the maps are
+    // touched from nowhere else.
+    // -----------------------------------------------------------------------
+    @Subscribe
+    public void onWallObjectSpawned(WallObjectSpawned event)
+    {
+        if (!mlmWasEnabled) return;
+        try { mlmVeinSpawn(event.getWallObject(), false); } catch (Throwable ignored) { }
+    }
+
+    @Subscribe
+    public void onWallObjectDespawned(WallObjectDespawned event)
+    {
+        if (!mlmWasEnabled) return;
+        try { mlmVeinDespawn(event.getWallObject()); } catch (Throwable ignored) { }
+    }
+
+    @Subscribe
+    public void onGameObjectSpawned(GameObjectSpawned event)
+    {
+        if (!mlmWasEnabled) return;
+        try { mlmMachinerySpawn(event.getGameObject()); } catch (Throwable ignored) { }
+    }
+
+    @Subscribe
+    public void onGameObjectDespawned(GameObjectDespawned event)
+    {
+        if (!mlmWasEnabled) return;
+        try { mlmMachineryDespawn(event.getGameObject()); } catch (Throwable ignored) { }
+    }
+
+    // A world tile packed into one long, so the maps key on the THING rather
+    // than on a list position. OSRS coordinates fit in 14 bits each.
+    private static long mlmKey(int x, int y, int plane)
+    {
+        return ((long) (plane & 3) << 28) | ((long) (x & 0x3FFF) << 14) | (y & 0x3FFF);
+    }
+    private static int mlmKeyX(long k)     { return (int) ((k >>> 14) & 0x3FFF); }
+    private static int mlmKeyY(long k)     { return (int) (k & 0x3FFF); }
+    private static int mlmKeyPlane(long k) { return (int) ((k >>> 28) & 3); }
+
+    // 1 = a vein that can be mined, 2 = the depleted object that replaces it,
+    // 0 = not a motherlode vein at all.
+    private static int mlmVeinState(int id)
+    {
+        if (id == ObjectID.MOTHERLODE_ORE_SINGLE
+                || id == ObjectID.MOTHERLODE_ORE_LEFT
+                || id == ObjectID.MOTHERLODE_ORE_MIDDLE
+                || id == ObjectID.MOTHERLODE_ORE_RIGHT) return 1;
+        if (id == ObjectID.MOTHERLODE_DEPLETED_SINGLE
+                || id == ObjectID.MOTHERLODE_DEPLETED_LEFT
+                || id == ObjectID.MOTHERLODE_DEPLETED_MIDDLE
+                || id == ObjectID.MOTHERLODE_DEPLETED_RIGHT) return 2;
+        return 0;
+    }
+
+    private int mlmTick()
+    {
+        try { return client.getTickCount(); } catch (Throwable ignored) { return -1; }
+    }
+
+    private void mlmVeinSpawn(WallObject o, boolean seeding)
+    {
+        if (o == null) return;
+        int st = mlmVeinState(o.getId());
+        if (st == 0) return;
+
+        WorldPoint wp = o.getWorldLocation();
+        if (wp == null) return;
+
+        long  key = mlmKey(wp.getX(), wp.getY(), wp.getPlane());
+        int   now = mlmTick();
+        int[] cur = mlmVeins.get(key);
+
+        if (cur == null)
+        {
+            mlmVeins.put(key, new int[]{ st, now, now, seeding ? 1 : 0 });
+            return;
+        }
+
+        int prev = cur[0] < 0 ? -cur[0] : cur[0];
+        if (prev != st)
+        {
+            // 2 -> 1 is a respawn, and the only transition this plugin can
+            // time, because the depletion instant was witnessed on this same
+            // tile. A SEEDED entry is skipped: its "since" is when the scene
+            // was walked, not when the vein died, so sampling it would drag
+            // the mean down for ever and the eta with it.
+            boolean timed = prev == 2 && st == 1 && cur[3] == 0 && now >= 0 && cur[1] >= 0;
+            // QUEUED, not reported. A scene rebuild produces a couple of
+            // hundred of these in one tick and none of them is the mine
+            // changing; the tick boundary is the only place that can tell.
+            // Not while seeding either - the walk would name every vein in
+            // the mine as a change.
+            if (!seeding)
+                mlmVeinPending.add(new long[]{ key, prev, st, timed ? (now - cur[1]) : -1 });
+            cur[1] = now;
+            cur[3] = 0;
+        }
+        cur[0] = st;
+        cur[2] = now;
+    }
+
+    private void mlmVeinDespawn(WallObject o)
+    {
+        if (o == null) return;
+        if (mlmVeinState(o.getId()) == 0) return;
+        WorldPoint wp = o.getWorldLocation();
+        if (wp == null) return;
+        int[] cur = mlmVeins.get(mlmKey(wp.getX(), wp.getY(), wp.getPlane()));
+        if (cur == null) return;
+        if (cur[0] > 0) cur[0] = -cur[0];
+        cur[2] = mlmTick();
+    }
+
+    // 1 strut ok, 2 strut broken, 3 wheel turning, 4 wheel stopped, 0 none of
+    // them. ONE list, used by the spawn path and by the emit path, so the two
+    // can never disagree about what a 26672 is - the fault that had
+    // AG_Resolve accepting an obstacle CBT_ResolvePoint then called
+    // unclickable, eleven times a run.
+    static int mlmMachineryKind(int id)
+    {
+        if (id == ObjectID.MOTHERLODE_WHEEL_STRUT_FIXED)  return 1;
+        if (id == ObjectID.MOTHERLODE_WHEEL_STRUT_BROKEN) return 2;
+        if (id == ObjectID.MOTHERLODE_WHEEL_FIXED)        return 3;
+        if (id == ObjectID.MOTHERLODE_WHEEL_BROKEN)       return 4;
+        return 0;
+    }
+
+    // The wheel is what turns, so the wheel is what "is it flowing" asks
+    // about. unknown is NOT flowing: a wheel nobody can see is not a wheel
+    // that is going round, and treating it as one is how a module deposits
+    // into a stopped machine.
+    static String mlmFlowState(int wheelsTotal, int wheelsBroken)
+    {
+        if (wheelsTotal <= 0)            return "unknown";
+        if (wheelsBroken <= 0)           return "flowing";
+        if (wheelsBroken >= wheelsTotal) return "stopped";
+        return "degraded";
+    }
+
+    private void mlmMachinerySpawn(GameObject o)
+    {
+        if (o == null) return;
+        int id   = o.getId();
+        int kind = mlmMachineryKind(id);
+        if (kind == 0) return;
+        boolean strut = kind <= 2;
+
+        WorldPoint wp = o.getWorldLocation();
+        if (wp == null) return;
+        // A multi-tile GameObject is handed back by every tile it covers, and
+        // the seed walk sees all of them. Keying on its OWN world location
+        // collapses those into the one entry it deserves.
+        long key = mlmKey(wp.getX(), wp.getY(), wp.getPlane());
+        if (strut) mlmStruts.put(key, id);
+        else       mlmWheels.put(key, id);
+    }
+
+    private void mlmMachineryDespawn(GameObject o)
+    {
+        if (o == null) return;
+        int id = o.getId();
+        WorldPoint wp = o.getWorldLocation();
+        if (wp == null) return;
+        long key = mlmKey(wp.getX(), wp.getY(), wp.getPlane());
+        // Remove only when the id that left is the one on record. A break or a
+        // repair arrives as a despawn of the old id followed by a spawn of the
+        // new one in the same tick; removing blindly would be undone anyway,
+        // but removing the wrong entry would not be.
+        Integer s = mlmStruts.get(key);
+        if (s != null && s == id) { mlmStruts.remove(key); return; }
+        Integer w = mlmWheels.get(key);
+        if (w != null && w == id) mlmWheels.remove(key);
+    }
+
+    private void mlmRespawnSample(int gap)
+    {
+        if (gap <= 0 || gap > MLM_RESPAWN_MAX_TICKS) return;
+        mlmRespawn[mlmRespawnPos] = gap;
+        mlmRespawnPos = (mlmRespawnPos + 1) % MLM_RESPAWN_HIST;
+        if (mlmRespawnCount < MLM_RESPAWN_HIST) mlmRespawnCount++;
+        mlmRespawnLast = gap;
+    }
+
+    // Called when the toggle goes off and when the client leaves the world.
+    // The tile maps describe a scene that no longer exists, so they go. The
+    // respawn samples and mlm_sack_max_seen are what this session has LEARNED
+    // about the mine, and a logout does not unlearn it. The sack baseline is
+    // dropped so the first read after coming back re-baselines instead of
+    // reporting the whole absence as one delta.
+    private void mlmReset()
+    {
+        mlmVeins.clear();
+        mlmStruts.clear();
+        mlmWheels.clear();
+        mlmRegions         = null;
+        mlmSeedPending     = true;
+        mlmSeededTick      = -1;
+        mlmSackLast        = -1;
+        mlmSackDelta       = 0;
+        mlmSackChangedTick = -1;
+        mlmSackChangedMs   = -1;
+        // The diff snapshots describe a scene and an inventory that are gone.
+        // Kept, they would log the whole world changing on the next login.
+        mlmPaydirtLast = -1;
+        mlmFlight      = 0;
+        mlmFlightSince = -1;
+        mlmVeinPending.clear();
+        mlmInvSeeded = false;
+        mlmInvPrev.clear();
+        mlmStrutPrev.clear();
+        mlmWheelPrev.clear();
+    }
+
+    private static boolean mlmSameRegions(int[] a, int[] b)
+    {
+        if (a == null || b == null) return a == b;
+        if (a.length != b.length)   return false;
+        for (int i = 0; i < a.length; i++) if (a[i] != b[i]) return false;
+        return true;
+    }
+
+    // One full walk of the loaded scene. Costs the same as a single radius-52
+    // scenery scan and happens on enable and on a region change only - never
+    // per tick.
+    private boolean mlmSeedScene(WorldView wv)
+    {
+        try
+        {
+            Tile[][][] tiles = wv.getScene().getTiles();
+            if (tiles == null) return false;
+            for (int p = 0; p < tiles.length; p++)
+                for (int sx = 0; sx < tiles[p].length; sx++)
+                    for (int sy = 0; sy < tiles[p][sx].length; sy++)
+                    {
+                        Tile t = tiles[p][sx][sy];
+                        if (t == null) continue;
+                        mlmVeinSpawn(t.getWallObject(), true);
+                        GameObject[] gos = t.getGameObjects();
+                        if (gos != null)
+                            for (GameObject g : gos) mlmMachinerySpawn(g);
+                    }
+            mlmSeededTick = mlmTick();
+            log.debug("GEVisualAid motherlode seed: {} vein tiles, {} struts, {} wheels",
+                    mlmVeins.size(), mlmStruts.size(), mlmWheels.size());
+            return true;
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid motherlode seed error: {}", t.getMessage());
+            return false;
+        }
+    }
+
+    private void updateMotherlode()
+    {
+        boolean on = false;
+        try { on = config.motherlodeEnabled(); } catch (Throwable ignored) { }
+
+        if (!on)
+        {
+            if (mlmWasEnabled) mlmReset();
+            mlmWasEnabled = false;
+            return;
+        }
+        if (!mlmWasEnabled)
+        {
+            // Turned on mid-session. Every spawn event so far was ignored, so
+            // the maps describe nothing at all until the scene is walked - and
+            // an empty map reads as "no struts", which is the wrong answer
+            // rather than a missing one.
+            mlmWasEnabled  = true;
+            mlmSeedPending = true;
+        }
+
+        WorldView wv = null;
+        try { wv = client.getTopLevelWorldView(); } catch (Throwable ignored) { }
+
+        int[] regions = null;
+        try { if (wv != null) regions = wv.getMapRegions(); } catch (Throwable ignored) { }
+        if (!mlmSameRegions(regions, mlmRegions))
+        {
+            // A new scene. The old entries name tiles that no longer exist and
+            // would go on being counted as struts and veins for ever.
+            mlmVeins.clear();
+            mlmStruts.clear();
+            mlmWheels.clear();
+            mlmRegions     = (regions == null) ? null : regions.clone();
+            mlmSeedPending = true;
+        }
+
+        // 2.89 - the log switch, read here so the event subscribers never
+        // touch config. Turning it on resets the diffs: a snapshot from
+        // before the log existed would emit a page of phantom changes.
+        boolean logWant = false;
+        try { logWant = config.motherlodeLog(); } catch (Throwable ignored) { }
+        if (logWant && !mlmLogOn)
+        {
+            mlmLogOn     = true;
+            mlmLogCapHit = false;
+            mlmInvSeeded = false;
+            mlmInvPrev.clear();
+            mlmStrutPrev.clear();
+            mlmWheelPrev.clear();
+            mlmLog("RUN", "logging started, plugin " + PLUGIN_OUTPUT_VERSION);
+        }
+        else if (!logWant && mlmLogOn)
+        {
+            mlmLog("RUN", "logging stopped");
+            mlmLogOn = false;
+            mlmLogFlush();
+        }
+
+        if (mlmSeedPending && wv != null)
+        {
+            boolean seeded = mlmSeedScene(wv);
+            mlmSeedPending = !seeded;
+            if (seeded)
+                mlmLog("RUN", "scene seeded: vein tiles=" + mlmVeins.size()
+                        + " struts=" + mlmStruts.size() + " wheels=" + mlmWheels.size());
+        }
+
+        int now = mlmTick();
+
+        // Drop tiles whose object went away and never came back. A morph
+        // despawns and respawns inside one tick, so anything still absent two
+        // ticks later has genuinely left the scene.
+        if (now >= 0)
+        {
+            java.util.Iterator<Map.Entry<Long, int[]>> it = mlmVeins.entrySet().iterator();
+            while (it.hasNext())
+            {
+                int[] v = it.next().getValue();
+                if (v[0] < 0 && v[2] >= 0 && now - v[2] > 2) it.remove();
+            }
+        }
+
+        // Order matters: the deposit has to be seen BEFORE the sack is read,
+        // so a delivery that lands on the same tick it was noticed is
+        // cancelled out rather than left showing as outstanding.
+        mlmPaydirtPoll(now);
+        mlmSackPoll(now);
+        mlmReportVeins(now);
+
+        if (mlmLogOn)
+        {
+            mlmLogMachinery("STRUT", mlmStruts, mlmStrutPrev, 2);
+            mlmLogMachinery("WHEEL", mlmWheels, mlmWheelPrev, 4);
+            mlmLogInventory();
+        }
+        mlmLogFlush();
+    }
+
+    // A whole-scene resync is ONE event, not two hundred observations.
+    private void mlmReportVeins(int now)
+    {
+        if (mlmVeinPending.isEmpty()) return;
+        if (mlmVeinPending.size() > MLM_RESYNC_TRANSITIONS)
+        {
+            // Named, not swallowed. Silently dropping them would look
+            // identical to the tracker having missed a scene load.
+            mlmLog("SCENE", mlmVeinPending.size()
+                    + " vein tiles changed in one tick - a scene rebuild, not"
+                    + " mining. Not logged individually and NOT sampled.");
+            mlmVeinPending.clear();
+            return;
+        }
+        for (long[] p : mlmVeinPending)
+        {
+            int prev = (int) p[1], st = (int) p[2], gap = (int) p[3];
+            if (gap > 0) mlmRespawnSample(gap);
+            mlmLog("VEIN", mlmTileText(p[0]) + "  "
+                    + (prev == 1 ? "active" : prev == 2 ? "depleted" : "new")
+                    + " -> " + (st == 1 ? "active" : "depleted")
+                    + (gap > 0 ? ("  after " + gap + "t") : ""));
+        }
+        mlmVeinPending.clear();
+    }
+
+    // Pay-dirt leaving the inventory is the ONLY witness to a deposit that
+    // arrives before the sack moves. Everything downstream of "is there room
+    // for another load" depends on it.
+    private void mlmPaydirtPoll(int now)
+    {
+        int count = 0;
+        try
+        {
+            ItemContainer c = client.getItemContainer(InventoryID.INV);
+            if (c == null) return;                 // unreadable is not empty
+            Item[] items = c.getItems();
+            if (items == null) return;
+            for (Item it : items)
+            {
+                if (it == null) continue;
+                int id = it.getId();
+                if (id <= 0) continue;
+                if (mlmPaydirtId < 0)
+                {
+                    // Resolve the name to an id ONCE, then compare ids. The
+                    // name is the thing that could be wrong, so it is worth
+                    // checking every slot until it matches something.
+                    if (MLM_PAYDIRT.equalsIgnoreCase(mlmItemName(id))) mlmPaydirtId = id;
+                }
+                if (id == mlmPaydirtId) count += it.getQuantity();
+            }
+        }
+        catch (Throwable ignored) { return; }
+
+        if (count > 0) mlmPaydirtSeen = true;
+
+        if (mlmPaydirtLast < 0) { mlmPaydirtLast = count; return; }
+        if (count < mlmPaydirtLast)
+        {
+            // Something left the inventory. At the hopper that is a deposit;
+            // anywhere else it is a drop, and the log shows which.
+            mlmFlight     += mlmPaydirtLast - count;
+            mlmFlightSince = now;
+            mlmLog("DEPOSIT", (mlmPaydirtLast - count) + " pay-dirt left the inventory,"
+                    + " " + mlmFlight + " now in flight");
+        }
+        mlmPaydirtLast = count;
+    }
+
+    private void mlmSackPoll(int now)
+    {
+        int count = -1;
+        try { count = client.getVarbitValue(VarbitID.MOTHERLODE_SACK_TRANSMIT); }
+        catch (Throwable ignored) { }
+        if (count < 0) return;
+
+        if (count > mlmSackMaxSeen) mlmSackMaxSeen = count;
+
+        if (mlmSackLast < 0)
+        {
+            // Baseline only. Nothing has been observed changing yet, and
+            // saying so is the entire point of mlm_sack_witnessed.
+            mlmSackLast        = count;
+            mlmSackDelta       = 0;
+            mlmSackChangedTick = now;
+            mlmSackChangedMs   = System.currentTimeMillis();
+            return;
+        }
+        if (count != mlmSackLast)
+        {
+            mlmSackDelta       = count - mlmSackLast;
+            mlmSackLast        = count;
+            mlmSackChangedTick = now;
+            mlmSackChangedMs   = System.currentTimeMillis();
+            mlmSackWitnessed   = true;
+
+            mlmSackHistTick[mlmSackHistPos]  = now;
+            mlmSackHistDelta[mlmSackHistPos] = mlmSackDelta;
+            mlmSackHistPos = (mlmSackHistPos + 1) % MLM_SACK_HIST;
+            if (mlmSackHistCount < MLM_SACK_HIST) mlmSackHistCount++;
+
+            mlmLog("SACK", "count=" + count + "  " + mlmSigned(mlmSackDelta));
+
+            if (mlmSackDelta > 0 && mlmFlight > 0)
+            {
+                if (mlmFlightSince >= 0 && now >= 0) mlmFlightLast = now - mlmFlightSince;
+                mlmFlight = Math.max(0, mlmFlight - mlmSackDelta);
+                mlmLog("DEPOSIT", "arrived after " + mlmFlightLast + "t, "
+                        + mlmFlight + " still in flight");
+            }
+        }
+    }
+
+    // Chebyshev distance, matching how the scenery block ranks its own
+    // results, so "dist_tiles" means the same thing in both places.
+    private static int mlmDist(WorldPoint from, long key)
+    {
+        if (from == null) return 9999;
+        int dx = Math.abs(from.getX() - mlmKeyX(key));
+        int dy = Math.abs(from.getY() - mlmKeyY(key));
+        return Math.max(dx, dy);
+    }
+
+    // Emits one indexed family of machinery, nearest first, and returns how
+    // many it wrote. brokenKind is the mlmMachineryKind value that means
+    // broken for this family. The index is a DISTANCE RANK re-dealt every
+    // tick; world_x/world_y are the identity.
+    private int mlmAppendMachinery(StringBuilder sb, String prefix,
+                                   Map<Long, Integer> src, WorldPoint playerLoc,
+                                   int brokenKind, StringBuilder human)
+    {
+        List<Object[]> rows = new ArrayList<>();
+        for (Map.Entry<Long, Integer> e : src.entrySet())
+            rows.add(new Object[]{ mlmDist(playerLoc, e.getKey()), e.getKey(), e.getValue() });
+        rows.sort((a, b) -> Integer.compare((Integer) a[0], (Integer) b[0]));
+
+        int n = Math.min(rows.size(), MLM_LIST_CAP);
+        sb.append(prefix).append("count=").append(n).append("\n");
+        for (int i = 0; i < n; i++)
+        {
+            Object[] r   = rows.get(i);
+            long     key = (Long) r[1];
+            int      id  = (Integer) r[2];
+            String   k   = prefix + i + "_";
+            sb.append(k).append("world_x=").append(mlmKeyX(key)).append("\n");
+            sb.append(k).append("world_y=").append(mlmKeyY(key)).append("\n");
+            sb.append(k).append("plane=").append(mlmKeyPlane(key)).append("\n");
+            sb.append(k).append("dist_tiles=").append(r[0]).append("\n");
+            sb.append(k).append("id=").append(id).append("\n");
+            boolean broke = mlmMachineryKind(id) == brokenKind;
+            sb.append(k).append("state=").append(broke ? "broken" : "ok").append("\n");
+            human.append(String.format("          %4s  %-7s %d,%d,%d%n",
+                    String.valueOf(r[0]), broke ? "BROKEN" : "ok",
+                    mlmKeyX(key), mlmKeyY(key), mlmKeyPlane(key)));
+        }
+        return n;
+    }
+
+    private void appendMotherlode(StringBuilder sb, WorldPoint playerLoc)
+    {
+        int now = mlmTick();
+
+        // ---- the sack: the whole answer to "how much room is left" ---------
+        boolean big = false;
+        try { big = client.getVarbitValue(VarbitID.MOTHERLODE_BIGGERSACK) > 0; }
+        catch (Throwable ignored) { }
+
+        int cap   = big ? MLM_SACK_LARGE_SIZE : MLM_SACK_SIZE;
+        int count = mlmSackLast;
+        int space = count < 0 ? -1 : Math.max(0, cap - count);
+        int still = (mlmSackChangedTick < 0 || now < 0)
+                ? -1 : Math.max(0, now - mlmSackChangedTick);
+        int flightTicks = (mlmFlightSince < 0 || now < 0)
+                ? -1 : Math.max(0, now - mlmFlightSince);
+
+        sb.append("mlm_sack_count=").append(count).append("\n");
+        sb.append("mlm_sack_capacity=").append(cap).append("\n");
+        sb.append("mlm_sack_space=").append(space).append("\n");
+        sb.append("mlm_sack_full=").append(count >= 0 && space == 0).append("\n");
+        sb.append("mlm_sack_upgraded=").append(big).append("\n");
+        sb.append("mlm_sack_max_seen=").append(mlmSackMaxSeen).append("\n");
+        sb.append("mlm_sack_delta=").append(mlmSackDelta).append("\n");
+        sb.append("mlm_sack_witnessed=").append(mlmSackWitnessed).append("\n");
+        sb.append("mlm_sack_changed_tick=").append(mlmSackChangedTick).append("\n");
+        sb.append("mlm_sack_changed_ms=").append(mlmSackChangedMs).append("\n");
+        sb.append("mlm_sack_still_ticks=").append(still).append("\n");
+        sb.append("mlm_sack_state=").append(
+                mlmSackStateName(count, still, mlmFlight, flightTicks)).append("\n");
+        // The deposit half. mlm_sack_space on its own is a trap for the
+        // twelve ticks after a deposit; space minus flight is the number a
+        // consumer can actually act on.
+        sb.append("mlm_paydirt_inv=").append(mlmPaydirtLast).append("\n");
+        sb.append("mlm_paydirt_name=").append(MLM_PAYDIRT).append("\n");
+        sb.append("mlm_paydirt_seen=").append(mlmPaydirtSeen).append("\n");
+        sb.append("mlm_flight_amount=").append(mlmFlight).append("\n");
+        sb.append("mlm_flight_ticks=").append(flightTicks).append("\n");
+        sb.append("mlm_flight_last_ticks=").append(mlmFlightLast).append("\n");
+        sb.append("mlm_flight_max_ticks=").append(MLM_FLIGHT_MAX_TICKS).append("\n");
+        sb.append("mlm_sack_space_settled=")
+          .append(space < 0 ? -1 : Math.max(0, space - mlmFlight)).append("\n");
+        sb.append("mlm_sack_settle_ticks=").append(MLM_SETTLE_TICKS).append("\n");
+        sb.append("mlm_sack_changes=").append(mlmSackHistCount).append("\n");
+        // RAW, newest first, no mean. The gap between two test deposits
+        // minutes apart is not an arrival interval, and averaging it in would
+        // produce a confident number describing nothing - the same reason the
+        // game clock publishes its intervals rather than a summary of them.
+        sb.append("mlm_sack_history=")
+          .append(mlmSackHistory(mlmSackHistTick, mlmSackHistDelta,
+                                 mlmSackHistPos, mlmSackHistCount)).append("\n");
+
+        // ---- the machine: the whole answer to "is it flowing" --------------
+        int sTotal = mlmStruts.size(), sBroken = 0;
+        for (Integer id : mlmStruts.values())
+            if (id != null && mlmMachineryKind(id) == 2) sBroken++;
+        int wTotal = mlmWheels.size(), wBroken = 0;
+        for (Integer id : mlmWheels.values())
+            if (id != null && mlmMachineryKind(id) == 4) wBroken++;
+
+        // Off the WHEELS, not the struts. A strut is the cause and the thing
+        // you would hammer; a stopped wheel is the effect, and the effect is
+        // what decides whether pay-dirt reaches the sack.
+        String flow = mlmFlowState(wTotal, wBroken);
+
+        sb.append("mlm_strut_total=").append(sTotal).append("\n");
+        sb.append("mlm_strut_broken=").append(sBroken).append("\n");
+        sb.append("mlm_strut_ok=").append(sTotal - sBroken).append("\n");
+        sb.append("mlm_wheel_total=").append(wTotal).append("\n");
+        sb.append("mlm_wheel_broken=").append(wBroken).append("\n");
+        sb.append("mlm_wheel_ok=").append(wTotal - wBroken).append("\n");
+        sb.append("mlm_flow_state=").append(flow).append("\n");
+
+        StringBuilder hStruts = new StringBuilder();
+        StringBuilder hWheels = new StringBuilder();
+        int sn = mlmAppendMachinery(sb, "mlm_strut_", mlmStruts, playerLoc, 2, hStruts);
+        int wn = mlmAppendMachinery(sb, "mlm_wheel_", mlmWheels, playerLoc, 4, hWheels);
+
+        // ---- veins ---------------------------------------------------------
+        int active = 0, depleted = 0, absent = 0;
+        List<Object[]> deps = new ArrayList<>();
+        for (Map.Entry<Long, int[]> e : mlmVeins.entrySet())
+        {
+            int[] v = e.getValue();
+            if      (v[0] == 1) active++;
+            else if (v[0] == 2)
+            {
+                depleted++;
+                deps.add(new Object[]{ mlmDist(playerLoc, e.getKey()), e.getKey(), v[1], v[3] });
+            }
+            else absent++;
+        }
+
+        boolean up = false;
+        try { up = client.getVarbitValue(VarbitID.MOTHERLODE_IN_RESTRICTED_AREA) > 0; }
+        catch (Throwable ignored) { }
+
+        sb.append("mlm_vein_count=").append(active).append("\n");
+        sb.append("mlm_vein_depleted=").append(depleted).append("\n");
+        sb.append("mlm_vein_absent=").append(absent).append("\n");
+        sb.append("mlm_tracked_tiles=").append(mlmVeins.size()).append("\n");
+        sb.append("mlm_seeded_tick=").append(mlmSeededTick).append("\n");
+        sb.append("mlm_in_mine=").append(sTotal > 0 || wTotal > 0 || !mlmVeins.isEmpty()).append("\n");
+        sb.append("mlm_upstairs=").append(up).append("\n");
+
+        // The one thing the game does not expose, said out loud rather than
+        // left to be inferred from a key that is not there.
+        sb.append("mlm_vein_life_source=none\n");
+
+        // ---- the observed respawn gap, which IS a real countdown -----------
+        int  samples = mlmRespawnCount;
+        long sum = 0;
+        int  mn = -1, mx = -1;
+        for (int i = 0; i < samples; i++)
+        {
+            int v = mlmRespawn[i];
+            sum += v;
+            if (mn < 0 || v < mn) mn = v;
+            if (v > mx) mx = v;
+        }
+        int     mean  = samples == 0 ? -1 : (int) (sum / samples);
+        boolean etaOk = samples >= MLM_ETA_MIN_SAMPLES && mean > 0;
+
+        sb.append("mlm_respawn_samples=").append(samples).append("\n");
+        sb.append("mlm_respawn_mean_ticks=").append(mean).append("\n");
+        sb.append("mlm_respawn_min_ticks=").append(mn).append("\n");
+        sb.append("mlm_respawn_max_ticks=").append(mx).append("\n");
+        sb.append("mlm_respawn_last_ticks=").append(mlmRespawnLast).append("\n");
+        sb.append("mlm_eta_source=").append(etaOk ? "observed" : "too_few_samples").append("\n");
+        sb.append("mlm_respawn_spread_ticks=")
+          .append(mn < 0 || mx < 0 ? -1 : (mx - mn)).append("\n");
+        // RAW, newest first. The first three real samples were 34t, 102t and
+        // 175t - a five-fold spread, which a mean hides completely. The list
+        // is what tells a consumer the eta is not worth planning on.
+        sb.append("mlm_respawn_history=")
+          .append(mlmIntList(mlmRespawn, mlmRespawnPos, samples)).append("\n");
+
+        deps.sort((a, b) -> Integer.compare((Integer) a[0], (Integer) b[0]));
+        StringBuilder hDeps = new StringBuilder();
+        int dn = Math.min(deps.size(), MLM_LIST_CAP);
+        sb.append("mlm_dep_count=").append(dn).append("\n");
+        for (int i = 0; i < dn; i++)
+        {
+            Object[] d      = deps.get(i);
+            long     key    = (Long) d[1];
+            int      sinceT = (Integer) d[2];
+            boolean  seed   = ((Integer) d[3]) != 0;
+            int      since  = (now < 0 || sinceT < 0) ? -1 : now - sinceT;
+            int      eta    = (!etaOk || since < 0 || seed) ? -1 : Math.max(0, mean - since);
+            String   k      = "mlm_dep_" + i + "_";
+            sb.append(k).append("world_x=").append(mlmKeyX(key)).append("\n");
+            sb.append(k).append("world_y=").append(mlmKeyY(key)).append("\n");
+            sb.append(k).append("plane=").append(mlmKeyPlane(key)).append("\n");
+            sb.append(k).append("dist_tiles=").append(d[0]).append("\n");
+            sb.append(k).append("since_ticks=").append(since).append("\n");
+            sb.append(k).append("eta_ticks=").append(eta).append("\n");
+            sb.append(k).append("eta_ms=").append(eta < 0 ? -1 : eta * MLM_TICK_MS).append("\n");
+            // A seeded tile was ALREADY depleted when the scene was walked, so
+            // "since" is when we started looking, not when it died. Its eta
+            // would read as confidently as any other and be wrong, so it is
+            // withheld and this field says which kind of number it is.
+            sb.append(k).append("timed_from=").append(seed ? "first_sight" : "depletion").append("\n");
+            hDeps.append(String.format("          %4s  %5s  %5s   %d,%d,%d%s%n",
+                    String.valueOf(d[0]),
+                    since < 0 ? "-" : (since + "t"),
+                    eta   < 0 ? "-" : (eta   + "t"),
+                    mlmKeyX(key), mlmKeyY(key), mlmKeyPlane(key),
+                    seed ? "   (first sight - not timed)" : ""));
+        }
+
+        // ---- the human page, from the same numbers the feed just used ------
+        // Built here rather than in the HTTP handler for the reason every
+        // other geometry block is: the HTTP thread must never read the client.
+        StringBuilder r = new StringBuilder(1024);
+        r.append("GEVisualAid ").append(PLUGIN_OUTPUT_VERSION)
+         .append("  Motherlode Mine        game tick ").append(now).append("\n\n");
+
+        if (sTotal == 0 && wTotal == 0 && mlmVeins.isEmpty())
+        {
+            // Naming which kind of nothing this is. "Not in the mine" and
+            // "the scene was never walked" look identical as an empty page
+            // and are different repairs.
+            r.append("Nothing from the mine is in the loaded scene.\n\n")
+             .append("Either you are not at the Motherlode Mine, or the scene has not\n")
+             .append("been walked yet. The walk happens on enable and on any change of\n")
+             .append("map region.\n\n")
+             .append("  seeded at tick ").append(mlmSeededTick)
+             .append(mlmSeededTick < 0 ? "  (never - this is the fault)" : "").append("\n")
+             .append("  sack varbit still readable from anywhere: ").append(count).append("\n");
+        }
+        else
+        {
+            r.append(String.format("SACK      %d / %d      space %d       %s (steady %s)%n",
+                    count, cap, space,
+                    mlmSackStateName(count, still, mlmFlight, flightTicks),
+                    still < 0 ? "unknown" : (still + " ticks")));
+            r.append(String.format("DEPOSIT   %s,  %d in flight%s%n",
+                    mlmPaydirtSeen ? (mlmPaydirtLast + " " + MLM_PAYDIRT + " carried")
+                                   : ("no " + MLM_PAYDIRT + " seen this session"),
+                    mlmFlight,
+                    mlmFlight > 0 ? ("  for " + flightTicks + "t") : ""));
+            r.append(String.format("          room to deposit into RIGHT NOW: %d"
+                            + "  (space minus what is already on its way)%n",
+                    space < 0 ? -1 : Math.max(0, space - mlmFlight)));
+            if (mlmFlightLast >= 0)
+                r.append(String.format("          last delivery took %dt%n", mlmFlightLast));
+            r.append(String.format("          last change %+d at tick %d      most seen this session %d%n",
+                    mlmSackDelta, mlmSackChangedTick, mlmSackMaxSeen));
+            r.append("          seen changing this session: ")
+             .append(mlmSackWitnessed ? "YES" : "NO - nothing has been observed moving yet")
+             .append("\n");
+            if (mlmSackHistCount > 0)
+            {
+                r.append("ARRIVALS  newest first, tick:amount   (settled = ")
+                 .append(MLM_SETTLE_TICKS).append(" steady ticks, UNMEASURED)\n          ")
+                 .append(mlmSackHistory(mlmSackHistTick, mlmSackHistDelta,
+                                        mlmSackHistPos, mlmSackHistCount))
+                 .append("\n          Deposit a FULL inventory and read this line: one entry\n")
+                 .append("          means it lands in a lump, several mean it trickles and the\n")
+                 .append("          settle threshold has to clear the biggest gap between them.\n");
+            }
+            r.append("\n");
+
+            r.append(String.format("FLOW      %s  -  %d of %d water wheel(s) stopped%n",
+                    flow, wBroken, wTotal));
+            if (wBroken > 0)
+                r.append("          Pay-dirt still goes IN. A stopped wheel delays it in\n")
+                 .append("          the hopper, it does not lose it - the sack fills again\n")
+                 .append("          once the struts are repaired.\n");
+            if (wn > 0) r.append("WHEELS    dist  state   tile\n").append(hWheels);
+            r.append(String.format("STRUTS    %d ok, %d broken%n", sTotal - sBroken, sBroken));
+            if (sn > 0) r.append("          dist  state   tile\n").append(hStruts);
+            r.append("\n");
+
+            r.append(String.format("VEINS     %d active, %d depleted, %d tiles tracked, seeded at tick %d%n",
+                    active, depleted, mlmVeins.size(), mlmSeededTick));
+            r.append("          There is NO countdown for the vein you are MINING. The game\n")
+             .append("          does not publish one, and neither does RuneLite's own\n")
+             .append("          Motherlode plugin. The eta below is for a DEPLETED vein\n")
+             .append("          coming back, and it is measured here, not looked up.\n\n");
+
+            r.append(String.format("RESPAWN   %d sample(s)   mean %s   min %s   max %s   last %s%n",
+                    samples,
+                    mean < 0 ? "-" : (mean + "t"), mn < 0 ? "-" : (mn + "t"),
+                    mx   < 0 ? "-" : (mx   + "t"),
+                    mlmRespawnLast < 0 ? "-" : (mlmRespawnLast + "t")));
+            if (samples > 0)
+                r.append("          raw, newest first: ")
+                 .append(mlmIntList(mlmRespawn, mlmRespawnPos, samples)).append("\n");
+            if (!etaOk)
+                r.append("          Not enough samples for an eta yet (need ")
+                 .append(MLM_ETA_MIN_SAMPLES).append("). Shown as - below.\n");
+            if (mn >= 0 && mx > mn * 2)
+                r.append("          NOTE: the spread is wider than 2x. An eta off this\n")
+                 .append("          mean is not worth planning a click on - find another\n")
+                 .append("          active vein rather than waiting for this one.\n");
+            if (dn > 0) r.append("DEPLETED  dist  since    eta   tile\n").append(hDeps);
+
+            r.append("\nLOG       ").append(mlmLogOn ? "recording" : "off")
+             .append(mlmLogCapHit ? " - STOPPED, 4MB cap hit" : "")
+             .append(mlmLogPath.isEmpty() ? "  (no output folder set)" : ("  " + mlmLogPath))
+             .append(mlmLogBytes < 0 ? "" : ("  " + mlmLogBytes + " bytes"))
+             .append("\n          read it at /motherlode?log   wipe it with /motherlode?log=clear\n");
+        }
+        mlmReportBlock = r.toString();
+    }
+
+    private static String mlmTileText(long key)
+    {
+        return mlmKeyX(key) + "," + mlmKeyY(key) + "," + mlmKeyPlane(key);
+    }
+
+    private static String mlmSigned(int n) { return (n > 0 ? "+" : "") + n; }
+
+    // The client names its own items. No table, and an item this plugin has
+    // never heard of still logs correctly.
+    private String mlmItemName(int id)
+    {
+        try
+        {
+            String n = itemManager.getItemComposition(id).getName();
+            if (n != null && !n.isEmpty()) return n;
+        }
+        catch (Throwable ignored) { }
+        return "item " + id;
+    }
+
+    // Buffered, then written once per tick. Called from the client thread
+    // only - the same rule as everything else that reads the scene.
+    private void mlmLog(String kind, String text)
+    {
+        if (!mlmLogOn || mlmLogCapHit) return;
+        mlmLogPending.append(java.time.LocalDateTime.now().format(MLM_LOG_TS))
+                     .append(" t=").append(mlmTick())
+                     .append(String.format(" %-5s ", kind))
+                     .append(text).append("\n");
+    }
+
+    private void mlmLogFlush()
+    {
+        if (mlmLogPending.length() == 0) return;
+        try
+        {
+            // The file is resolved BEFORE the buffer is drained. Draining
+            // first and then finding nowhere to write would throw the lines
+            // away silently, which is the same shape as a logger that is on
+            // and recording nothing - the exact failure this whole feature
+            // exists to avoid.
+            java.io.File f = mlmLogFile();
+            if (f == null)
+            {
+                if (!mlmLogWarned)
+                {
+                    mlmLogWarned = true;
+                    log.warn("GEVisualAid motherlode log: no output folder set, "
+                            + "nothing is being written");
+                }
+                mlmLogPending.setLength(0);
+                return;
+            }
+            mlmLogWarned = false;
+            String text = mlmLogPending.toString();
+            mlmLogPending.setLength(0);
+            if (f.length() > MLM_LOG_MAX_BYTES)
+            {
+                mlmLogCapHit = true;
+                text += "-- LOG STOPPED: " + MLM_LOG_MAX_BYTES
+                     + " byte cap reached. Clear it with /motherlode?log=clear --\n";
+            }
+            try (java.io.FileWriter w = new java.io.FileWriter(f, true)) { w.write(text); }
+            mlmLogBytes = f.length();
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid motherlode log write failed: {}", t.getMessage());
+        }
+    }
+
+    // Deliberately NOT gated on fileOutputEnabled: this is its own feature
+    // with its own switch, and a log that silently does nothing because an
+    // unrelated setting is off is the trap this file keeps recording.
+    private java.io.File mlmLogFile()
+    {
+        try
+        {
+            String folder = config.outputFolder();
+            if (folder == null || folder.trim().isEmpty()) { mlmLogPath = ""; return null; }
+            if (!folder.endsWith("\\") && !folder.endsWith("/")) folder += "\\";
+            java.io.File dir = new java.io.File(folder);
+            if (!dir.exists()) dir.mkdirs();
+            java.io.File f = new java.io.File(dir, "motherlode_log.txt");
+            mlmLogPath = f.getAbsolutePath();
+            return f;
+        }
+        catch (Throwable t) { mlmLogPath = ""; return null; }
+    }
+
+    // One family of machinery, diffed against last tick. The first fill after
+    // a seed is adopted SILENTLY: the RUN line already said how many there
+    // are, and forty lines saying "everything is fine" is how a log stops
+    // being read.
+    private void mlmLogMachinery(String kind, Map<Long, Integer> cur,
+                                 Map<Long, Integer> prev, int brokenKind)
+    {
+        if (!prev.isEmpty())
+        {
+            for (Map.Entry<Long, Integer> e : cur.entrySet())
+            {
+                Integer was = prev.get(e.getKey());
+                if (was != null && was.intValue() == e.getValue().intValue()) continue;
+                String to   = mlmMachineryKind(e.getValue()) == brokenKind ? "BROKEN" : "ok";
+                String from = was == null ? "appeared"
+                        : (mlmMachineryKind(was) == brokenKind ? "BROKEN" : "ok");
+                mlmLog(kind, mlmTileText(e.getKey()) + "  " + from + " -> " + to
+                        + "  (id " + e.getValue() + ")");
+            }
+            for (Long key : prev.keySet())
+                if (!cur.containsKey(key)) mlmLog(kind, mlmTileText(key) + "  left the scene");
+        }
+        prev.clear();
+        prev.putAll(cur);
+    }
+
+    // Every item whose count moved, by name. Noisy while mining on purpose -
+    // that noise is the pay-dirt arriving, and it is the timeline the sack
+    // lines have to be read against.
+    private void mlmLogInventory()
+    {
+        Map<Integer, Integer> now = new HashMap<>();
+        try
+        {
+            ItemContainer c = client.getItemContainer(InventoryID.INV);
+            // No container is NOT an empty inventory. Treating it as one
+            // would log every carried item vanishing and coming back.
+            if (c == null) return;
+            Item[] items = c.getItems();
+            if (items == null) return;
+            for (Item it : items)
+            {
+                if (it == null) continue;
+                int id = it.getId();
+                if (id <= 0) continue;
+                int q = it.getQuantity();
+                Integer had = now.get(id);
+                now.put(id, had == null ? q : had + q);
+            }
+        }
+        catch (Throwable ignored) { return; }
+
+        if (!mlmInvSeeded)
+        {
+            mlmInvPrev.clear();
+            mlmInvPrev.putAll(now);
+            mlmInvSeeded = true;
+            return;
+        }
+
+        HashSet<Integer> ids = new HashSet<>(now.keySet());
+        ids.addAll(mlmInvPrev.keySet());
+        for (Integer id : ids)
+        {
+            Integer pa = mlmInvPrev.get(id), pb = now.get(id);
+            int a = pa == null ? 0 : pa, b = pb == null ? 0 : pb;
+            if (a == b) continue;
+            mlmLog("INV", mlmItemName(id) + "  " + a + " -> " + b
+                    + "  (" + mlmSigned(b - a) + ")");
+        }
+        mlmInvPrev.clear();
+        mlmInvPrev.putAll(now);
+    }
+
+    // Newest first, comma separated. Same ring arithmetic as the sack history
+    // and the same reason for existing: a summary of a five-fold spread is a
+    // confident number describing nothing.
+    static String mlmIntList(int[] arr, int pos, int count)
+    {
+        if (arr == null || count <= 0 || arr.length <= 0) return "";
+        int cap = arr.length;
+        int n   = Math.min(count, cap);
+        StringBuilder out = new StringBuilder();
+        for (int i = 1; i <= n; i++)
+        {
+            int idx = ((pos - i) % cap + cap) % cap;
+            if (out.length() > 0) out.append(",");
+            out.append(arr[idx]);
+        }
+        return out.toString();
+    }
+
+    // Newest first, as "tick:+delta" pairs. Pulled out of the emit path so a
+    // checker can drive the ring-buffer arithmetic directly - an off-by-one
+    // here would drop the most recent arrival, which is the one that decides
+    // whether a deposit has finished landing.
+    static String mlmSackHistory(int[] ticks, int[] deltas, int pos, int count)
+    {
+        if (ticks == null || deltas == null || count <= 0) return "";
+        int cap = Math.min(ticks.length, deltas.length);
+        if (cap <= 0) return "";
+        int n = Math.min(count, cap);
+        StringBuilder out = new StringBuilder();
+        for (int i = 1; i <= n; i++)
+        {
+            int idx = ((pos - i) % cap + cap) % cap;
+            if (out.length() > 0) out.append(",");
+            out.append(ticks[idx]).append(":")
+               .append(deltas[idx] > 0 ? "+" : "").append(deltas[idx]);
+        }
+        return out.toString();
+    }
+
+    // The one place the sack state name is decided, so the feed line and the
+    // page can never disagree about whether a deposit has landed.
+    // in_flight and queued OUTRANK settled, because they are the two answers
+    // a steadiness threshold can never give. For the twelve ticks after a
+    // deposit the count has not moved for ages - "settled" is exactly what it
+    // looks like, and exactly what it is not.
+    //
+    // `queued` WAS `flight_lost` UNTIL 2.91, AND THAT NAME WAS WRONG. Josh,
+    // watching a broken machine rather than describing one: "it can still
+    // deposit, and carry on mining, its just it sits in the hopper until its
+    // repaired then moves down to the sack." NOTHING IS LOST. The pay-dirt is
+    // in the hopper and lands the moment the struts are fixed.
+    //
+    // The distinction matters because a consumer acts on it: "lost" reads as
+    // a reason to stop depositing, and the skiller did exactly that and sat
+    // on a full inventory. "queued" reads as a reason to carry on. Neither
+    // number changed - only the word - and the word was the whole behaviour.
+    static String mlmSackStateName(int count, int stillTicks, int flight, int flightTicks)
+    {
+        if (count < 0)                        return "unreadable";
+        if (flight > 0 && flightTicks >= 0 && flightTicks <= MLM_FLIGHT_MAX_TICKS)
+                                              return "in_flight";
+        if (flight > 0)                       return "queued";
+        if (stillTicks < 0)                   return "unknown";
+        if (stillTicks < MLM_SETTLE_TICKS)    return "settling";
+        return "settled";
     }
 
     // -----------------------------------------------------------------------
@@ -8918,6 +10206,156 @@ public class GEVisualAidPlugin extends Plugin
         finally { ex.close(); }
     }
 
+    // ------------------------------------------------------------------
+    // 2.87 - /motherlode : the mine on one page.
+    // ------------------------------------------------------------------
+    // Josh, having ticked the setting: "how do i watch the mlm sack count or
+    // flow state etc. its not in the skilling state".
+    //
+    // It never was. The skilling panel renders the families it was written
+    // for - scenery, carried items, widgets - and a new plugin family does
+    // not appear there by itself. The numbers ARE in /state, as sixty-odd
+    // separate mlm_ lines inside tens of kilobytes, which is not a thing
+    // anyone can watch a sack fill in. Same reasoning as /widgets and /tick:
+    // the data existed and was unusable at the rate its reader needed it.
+    //
+    // It renders mlmReportBlock, built on the client thread in
+    // appendMotherlode. The HTTP thread reads no client state - the rule
+    // every geometry block here follows.
+    //
+    // Every way of having nothing to show says WHICH way it is. Switched
+    // off, logged out, no reading yet, and not-in-the-mine are four
+    // different repairs and an identical blank page.
+    // Reads the log back over HTTP so a run can be copied out of a browser
+    // rather than hunted for on disk. Tail-capped: a long run is megabytes,
+    // and a browser tab that hangs is the same as no answer.
+    private void handleMotherlodeLog(HttpExchange ex, boolean clear)
+    {
+        StringBuilder reply = new StringBuilder();
+        try
+        {
+            java.io.File f = mlmLogFile();
+            if (f == null)
+            {
+                reply.append("No output folder is set, so there is nowhere to write the\n")
+                     .append("log. Set one in the GEVisualAid panel under File Output.\n");
+            }
+            else if (clear)
+            {
+                boolean gone = !f.exists() || f.delete();
+                mlmLogCapHit = false;
+                mlmLogBytes  = 0;
+                reply.append(gone ? "Log cleared: " : "COULD NOT CLEAR (file in use?): ")
+                     .append(f.getAbsolutePath()).append("\n");
+            }
+            else if (!f.exists())
+            {
+                // Four different repairs, one blank page otherwise.
+                boolean want = false;
+                try { want = config.motherlodeLog(); } catch (Throwable ignored) { }
+                reply.append("No log file yet at ").append(f.getAbsolutePath()).append("\n\n")
+                     .append(want
+                        ? "The run log IS switched on, so either nothing has changed at\n"
+                        + "the mine yet, or Motherlode Mine above it is unticked - the\n"
+                        + "log only runs inside that block.\n"
+                        : "The run log is switched OFF. Tick \"Motherlode run log\" under\n"
+                        + "Skilling in the GEVisualAid panel, or:\n\n"
+                        + "  /config?motherlodeLog=true\n");
+            }
+            else
+            {
+                java.util.List<String> lines =
+                        java.nio.file.Files.readAllLines(f.toPath(), StandardCharsets.UTF_8);
+                int from = Math.max(0, lines.size() - MLM_LOG_TAIL_LINES);
+                if (from > 0)
+                    reply.append("-- showing the last ").append(MLM_LOG_TAIL_LINES)
+                         .append(" of ").append(lines.size())
+                         .append(" lines; the whole file is at ")
+                         .append(f.getAbsolutePath()).append(" --\n");
+                for (int i = from; i < lines.size(); i++)
+                    reply.append(lines.get(i)).append("\n");
+            }
+        }
+        catch (Throwable t) { reply.append("err ").append(t.getMessage()).append("\n"); }
+
+        try
+        {
+            byte[] outBytes = reply.toString().getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "text/plain; charset=utf-8");
+            ex.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+            ex.sendResponseHeaders(200, outBytes.length);
+            ex.getResponseBody().write(outBytes);
+        }
+        catch (Throwable ignored) { }
+        finally { ex.close(); }
+    }
+
+    private void handleMotherlodeRequest(HttpExchange ex)
+    {
+        StringBuilder reply = new StringBuilder();
+        try
+        {
+            // /motherlode?log and ?log=clear are served from the FILE, not
+            // from the client, so they answer while logged out and while the
+            // feature is switched off - which is exactly when you want to
+            // read back a run that has already finished.
+            String q = ex.getRequestURI().getRawQuery();
+            if (q != null && (q.equals("log") || q.startsWith("log=")))
+            {
+                handleMotherlodeLog(ex, q.equals("log=clear"));
+                return;
+            }
+
+            boolean on = false;
+            try { on = config.motherlodeEnabled(); } catch (Throwable ignored) { }
+            boolean scene = false;
+            try { scene = config.sceneTrackingEnabled(); } catch (Throwable ignored) { }
+            boolean online = client.getGameState() == GameState.LOGGED_IN;
+
+            if (!scene)
+            {
+                // The master gate above it. With Scene & Tiles off, nothing in
+                // the scene block runs at all and the Motherlode tick box is
+                // ticked and inert - which reads exactly like a broken feature.
+                reply.append("Scene & Tiles is switched OFF in the plugin, so the Motherlode\n")
+                     .append("block never runs - the tick box above it is ticked and inert.\n\n")
+                     .append("  /config?sceneTrackingEnabled=true\n");
+            }
+            else if (!on)
+            {
+                reply.append("Motherlode Mine is switched OFF in the plugin.\n\n")
+                     .append("Tick \"Motherlode Mine\" under Skilling in the GEVisualAid\n")
+                     .append("panel, or:\n\n  /config?motherlodeEnabled=true\n");
+            }
+            else if (!online)
+            {
+                reply.append("Not logged in.\n\n")
+                     .append("There is no scene to read, so no veins, struts or wheels. The\n")
+                     .append("sack varbit is not published while logged out either.\n");
+            }
+            else
+            {
+                String block = mlmReportBlock;
+                reply.append(block == null || block.isEmpty()
+                        ? "Logged in and switched on, but no reading has been taken yet.\n"
+                        + "Give it a game tick and reload.\n"
+                        : block);
+            }
+        }
+        catch (Throwable t) { reply.append("err ").append(t.getMessage()).append("\n"); }
+
+        try
+        {
+            byte[] outBytes = reply.toString().getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "text/plain; charset=utf-8");
+            ex.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+            ex.sendResponseHeaders(200, outBytes.length);
+            ex.getResponseBody().write(outBytes);
+        }
+        catch (Throwable ignored) { }
+        finally { ex.close(); }
+    }
+
     // 2.79 — /config : the WHOLE settings panel, read and write.
     // ------------------------------------------------------------------
     // Josh: "i want two tabs, the skiller settings we have and the plugin
@@ -11457,6 +12895,7 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/config", this::handleConfigRequest);   // 2.79
             httpServer.createContext("/widgets", this::handleWidgetsRequest); // 2.81
             httpServer.createContext("/tick",   this::handleTickRequest);     // 2.85
+            httpServer.createContext("/motherlode", this::handleMotherlodeRequest); // 2.87
             httpServer.createContext("/hop",    this::handleHopRequest);
             httpServer.createContext("/agility", this::handleAgilityRequest);
             httpServer.createContext("/plugin",  this::handlePluginRequest);

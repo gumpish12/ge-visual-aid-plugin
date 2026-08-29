@@ -48,6 +48,16 @@ tasks.register('run', JavaExec) {
 	}
 }
 
+// Item J (2.86): runs src/test/.../MlmCheck.java, which exercises the REAL
+// compiled motherlode helpers by reflection rather than a copy of them - a
+// checker that re-implements what it checks passes for the same reason the
+// code fails. Proved red by deliberately breaking the tile key packing, the
+// vein id list and the version string, one at a time.
+tasks.register('mlmCheck', JavaExec) {
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'com.ge.gevisualaid.MlmCheck'
+}
+
 tasks.register('shadowJar', Jar) {
 	dependsOn configurations.testRuntimeClasspath
 	manifest {

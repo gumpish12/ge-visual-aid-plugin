@@ -307,8 +307,8 @@ public interface GEVisualAidConfig extends Config
     String moveSection = "movement";
 
     @ConfigSection(name = "Skilling",
-            description = "Per-skill trackers: agility courses, Blast Furnace, runite rocks "
-                    + "and sailing. Requires Scene & Tiles enabled.",
+            description = "Per-skill trackers: agility courses, Blast Furnace, runite rocks, "
+                    + "sailing and the Motherlode Mine. Requires Scene & Tiles enabled.",
             position = 10, closedByDefault = true)
     String skillSection = "skilling";
 
@@ -464,6 +464,35 @@ public interface GEVisualAidConfig extends Config
                     + "object ID when they change state.",
             section = skillSection, position = 4)
     default boolean sailingEnabled() { return false; }
+
+    @ConfigItem(keyName = "motherlodeEnabled", name = "Motherlode Mine",
+            description = "Emit the Motherlode Mine state the scenery filters cannot reach. "
+                    + "mlm_sack_space is how much room is left in the sack, read from the "
+                    + "game's own varbit rather than timed - and because a deposit takes "
+                    + "several ticks to arrive, mlm_sack_still_ticks and mlm_sack_state say "
+                    + "whether it has finished landing. mlm_flow_state says whether the "
+                    + "struts are broken: a fixed strut and a broken one are BOTH named "
+                    + "'Strut', so no name filter can tell them apart and only the object "
+                    + "id can. There is no countdown for how much pay-dirt a vein has left "
+                    + "- the game does not expose one and mlm_vein_life_source says so - "
+                    + "but depleted veins carry a measured respawn eta. Needs no other "
+                    + "plugin. Cheap: it tracks scene events rather than scanning tiles.",
+            section = skillSection, position = 5)
+    default boolean motherlodeEnabled() { return false; }
+
+    @ConfigItem(keyName = "motherlodeLog", name = "Motherlode run log",
+            description = "Append every CHANGE at the mine to motherlode_log.txt in the "
+                    + "output folder, so a whole run can be read back afterwards: sack "
+                    + "arrivals with their amounts, veins depleting and respawning, "
+                    + "struts and wheels breaking, and every inventory item whose count "
+                    + "moved. The inventory half is what makes the sack lines readable - "
+                    + "'Pay-dirt 27 -> 0' just before them says how much went in, which "
+                    + "one sack reading can never tell you. Changes only, never a "
+                    + "tick-by-tick dump. Read it at /motherlode?log and wipe it with "
+                    + "/motherlode?log=clear. Stops at 4MB and says so in the file. "
+                    + "Needs Motherlode Mine above; independent of file output.",
+            section = skillSection, position = 6)
+    default boolean motherlodeLog() { return false; }
 
     @ConfigItem(keyName = "bankTrackingEnabled", name = "Bank quantities",
             description = "Report bank quantities for a watch list of items. The whole bank "
