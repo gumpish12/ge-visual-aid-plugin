@@ -128,6 +128,14 @@ public class GEVisualAidPlugin extends Plugin
     private Object           suggestionManager            = null;
     private Object           accountStatusManager         = null;
     private Object           suggestionPreferencesManager = null;
+    // 2.92: linkToCopilot() only ever ran again when suggestionManager was
+    // null, so a preferences manager that was absent at link time stayed
+    // absent for the whole session. These four make it re-resolvable.
+    private Plugin           copilotPlugin                = null;
+    private Field            copilotPrefsField            = null;
+    private String           copilotPrefsRoute            = "not_linked";
+    private int              copilotPrefsRetryTicks       = 0;
+    private boolean          copilotPrefsWarned           = false;
     private Plugin           apmPlugin                    = null;
     private Object           profitCalculator             = null;  // com.flippingcopilot.util.ProfitCalculator
     private NavigationButton navButton;
@@ -1798,7 +1806,44 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.91";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.92";   // package-visible: the panel shows it
+
+    // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
+    // Every copilot_* preference had been publishing BLANK on all three VMs,
+    // all day, for as long as anyone had looked. Nothing said so: the fields
+    // were present and empty, which reads as "no value set" rather than "never
+    // read". The suite's flip-timer guard depends on copilot_timeframe_minutes
+    // and so could never check anything - it fired one "flip timer
+    // unverifiable" push about ten minutes into each morning and then went
+    // quiet, which is precisely what a guard looks like when it is dead.
+    //
+    // CAUSE: onGameTick re-ran linkToCopilot() only `if (suggestionManager ==
+    // null)`, and linkToCopilot() resolves all four Copilot handles in one go.
+    // Copilot has a suggestionManager from its own startUp, but its
+    // preferences manager is per-account and does not exist until login. At
+    // RuneLite start we therefore captured a good suggestionManager - closing
+    // the gate for the rest of the session - beside a null preferences
+    // manager, and never looked again.
+    //
+    // THIS IS THE 2.75 ROOFTOP TRAP IN A SECOND PLACE. That one was a
+    // sub-object REPLACED under us; this one was a sub-object that had not
+    // been BUILT yet. Both are the same rule: re-read reflected sub-objects,
+    // never cache them, and never gate the re-read on a DIFFERENT handle's
+    // liveness. A link check that asks about the wrong object is not a link
+    // check.
+    //
+    // FOUR CONSEQUENCES OF A BLANK THAT NEVER SAID WHY. The null branch and
+    // the exception branch of buildCopilotPreferencesState() emitted the same
+    // ten empty fields and needed opposite repairs. copilot_prefs_link now
+    // carries the cause into the feed - field:<name>, typescan:<name>,
+    // field_null:<name>, no_field_found, no_copilot, read_error - because a
+    // warning in client.log is not something an AHK script can read, and the
+    // AHK script is the only thing that was ever going to notice.
+    //
+    // The cheap path re-reads the SAME Field every tick (one get()); the
+    // name-then-type scan runs only while there is nothing, and then only
+    // every ~30s. Any throw leaves the existing link untouched - a failed
+    // refresh must never be worse than not refreshing.
 
     // ---- THE GAME CLOCK (2.85) -------------------------------------------
     // This plugin has called client.getTickCount() since 2.27, for ground-item
@@ -2646,6 +2691,11 @@ public class GEVisualAidPlugin extends Plugin
         suggestionManager            = null;
         accountStatusManager         = null;
         suggestionPreferencesManager = null;
+        copilotPlugin                = null;
+        copilotPrefsField            = null;
+        copilotPrefsRoute            = "not_linked";
+        copilotPrefsRetryTicks       = 0;
+        copilotPrefsWarned           = false;
         apmPlugin                    = null;
         profitCalculator             = null;
     }
@@ -2982,6 +3032,12 @@ public class GEVisualAidPlugin extends Plugin
                 return;
             }
         }
+
+        // 2.92: AFTER the gate above, deliberately. That gate only re-links when
+        // suggestionManager is null, and the preferences manager has its own
+        // lifetime — it arrives at login, long after suggestionManager exists.
+        // See refreshCopilotPreferences().
+        refreshCopilotPreferences();
 
         checkStuckOffers();
 
@@ -4086,9 +4142,18 @@ public class GEVisualAidPlugin extends Plugin
 
     private String buildCopilotPreferencesState()
     {
+        // 2.92: copilot_prefs_link says WHY these are blank, in the feed itself.
+        // For a year these ten fields could be empty for two completely
+        // different reasons — no manager, or a manager that threw — and both
+        // looked identical to every reader. A blank with no cause attached sent
+        // the AHK timeframe guard into "unverifiable" with nothing to act on.
+        // Values: linked / field:<name> / typescan:<name> / field_null:<name> /
+        // no_field_found / no_copilot / read_error.
         if (suggestionPreferencesManager == null)
         {
-            return "copilot_sell_only=false\n"
+            String why = (copilotPlugin == null) ? "no_copilot" : copilotPrefsRoute;
+            return "copilot_prefs_link=" + why + "\n"
+                    + "copilot_sell_only=false\n"
                     + "copilot_risk_level=\n"
                     + "copilot_timeframe_minutes=\n"
                     + "copilot_reserved_slots=\n"
@@ -4127,7 +4192,8 @@ public class GEVisualAidPlugin extends Plugin
                 catch (Exception ex) { riskStr = riskLevel.getClass().getMethod("name").invoke(riskLevel).toString().toLowerCase(); }
             }
 
-            return "copilot_sell_only=" + sellOnly + "\n"
+            return "copilot_prefs_link=" + copilotPrefsRoute + "\n"
+                    + "copilot_sell_only=" + sellOnly + "\n"
                     + "copilot_risk_level=" + riskStr + "\n"
                     + "copilot_timeframe_minutes=" + timeframe + "\n"
                     + "copilot_reserved_slots=" + (reservedSlots != null ? reservedSlots : "auto") + "\n"
@@ -4141,7 +4207,8 @@ public class GEVisualAidPlugin extends Plugin
         catch (Exception e)
         {
             log.warn("GEVisualAid: copilot prefs read error: {}", e.getMessage());
-            return "copilot_sell_only=\n"
+            return "copilot_prefs_link=read_error\n"
+                    + "copilot_sell_only=\n"
                     + "copilot_risk_level=\n"
                     + "copilot_timeframe_minutes=\n"
                     + "copilot_reserved_slots=\n"
@@ -9758,6 +9825,17 @@ public class GEVisualAidPlugin extends Plugin
             rtGetMarks = null; rtIsStopping = null; rtLinkTried = false;
             log.info("GEVisualAid: dropped the Rooftop link ahead of a restart");
         }
+        // 2.92: same rule, and Copilot is the one plugin here whose innards we
+        // reflect into all day. A restart rebuilds them; onGameTick's gate only
+        // notices if suggestionManager itself went null, which it may not.
+        if (n.contains("copilot"))
+        {
+            copilotPlugin = null; suggestionManager = null; accountStatusManager = null;
+            suggestionPreferencesManager = null; profitCalculator = null;
+            copilotPrefsField = null; copilotPrefsRoute = "not_linked";
+            copilotPrefsRetryTicks = 0; copilotPrefsWarned = false;
+            log.info("GEVisualAid: dropped the Copilot links ahead of a restart");
+        }
     }
 
     // 2.73: the outcome, not the intention. "restarted X active" and
@@ -13162,6 +13240,10 @@ public class GEVisualAidPlugin extends Plugin
                     "com.flippingcopilot.controller.FlippingCopilotPlugin")) continue;
 
             log.info("GEVisualAid: found FlippingCopilotPlugin, linking...");
+            // 2.92: keep the Plugin itself. Everything below is reflected OUT
+            // of it and any of it can be rebuilt underneath us; without the
+            // instance there is nothing to re-read from.
+            copilotPlugin                = p;
             suggestionManager            = getField(p, "suggestionManager");
             accountStatusManager         = getField(p, "accountStatusManager");
             // V2.18: was two hardcoded field-name lookups; both returned null
@@ -13260,6 +13342,12 @@ public class GEVisualAidPlugin extends Plugin
                     Object v = f.get(plugin);
                     if (v != null)
                     {
+                        // 2.92: remember the Field, not just the value. Re-reading
+                        // THIS field every tick is exact and costs one get(); the
+                        // scan below is what we must not repeat every tick.
+                        copilotPrefsField  = f;
+                        copilotPrefsRoute  = "field:" + name;
+                        copilotPrefsWarned = false;
                         log.info("GEVisualAid: preferences manager linked via field '{}' (type {})",
                                 name, v.getClass().getSimpleName());
                         return v;
@@ -13282,6 +13370,9 @@ public class GEVisualAidPlugin extends Plugin
                     Object v = f.get(plugin);
                     if (v != null)
                     {
+                        copilotPrefsField  = f;
+                        copilotPrefsRoute  = "typescan:" + f.getName();
+                        copilotPrefsWarned = false;
                         log.info("GEVisualAid: preferences manager found by TYPE scan: field='{}' type='{}'",
                                 f.getName(), f.getType().getSimpleName());
                         return v;
@@ -13292,9 +13383,85 @@ public class GEVisualAidPlugin extends Plugin
             cls = cls.getSuperclass();
         }
 
-        log.warn("GEVisualAid: NO preferences manager field found on FlippingCopilotPlugin "
-                + "\u2014 all copilot_* preference fields will be blank");
+        // 2.92: this is now retried every ~30s rather than once per session, so
+        // the warning is emitted once per dry spell instead of once per retry.
+        // The important half is that copilot_prefs_link says so in the FEED \u2014
+        // a warning in client.log is not something the AHK side can read.
+        copilotPrefsRoute = "no_field_found";
+        if (!copilotPrefsWarned)
+        {
+            copilotPrefsWarned = true;
+            log.warn("GEVisualAid: NO preferences manager field found on FlippingCopilotPlugin "
+                    + "\u2014 all copilot_* preference fields will be blank");
+        }
         return null;
+    }
+
+    // -----------------------------------------------------------------------
+    // 2.92: THE PREFERENCES MANAGER HAS TO BE RE-READ, NOT CACHED ONCE
+    // -----------------------------------------------------------------------
+    // Josh, 2026-09-09: "Flip timer unverifiable" fired on all three VMs about
+    // ten minutes after launch and never again. `/tfguard` said "no reading
+    // yet" on all three, permanently \u2014 the AHK guard had NEVER once managed to
+    // read copilot_timeframe_minutes, because the plugin was publishing it
+    // EMPTY all day.
+    //
+    // Cause: onGameTick re-runs linkToCopilot() only when suggestionManager is
+    // null, and linkToCopilot() resolves all four handles together. Copilot
+    // builds its suggestionManager at startUp but its preferences manager is
+    // per-account and does not exist until login \u2014 so at RuneLite start we
+    // captured suggestionManager (non-null, gate now closed for ever) and a
+    // null preferences manager, and never looked again for the rest of the
+    // session. This is exactly the 2.75 Rooftop coursesManager trap in a
+    // second place: RE-READ REFLECTED SUB-OBJECTS, NEVER CACHE THEM.
+    //
+    // Cheap path first: re-read the SAME Field every tick, which is one get().
+    // The expensive path \u2014 the full name-then-type scan \u2014 runs only while we
+    // have nothing, and then only every COPILOT_PREFS_RETRY_TICKS.
+    //
+    // A failed refresh is never allowed to be worse than not refreshing: any
+    // throw leaves the existing link exactly as it was.
+    private static final int COPILOT_PREFS_RETRY_TICKS = 50;   // ~30s at 600ms
+
+    private void refreshCopilotPreferences()
+    {
+        if (copilotPlugin == null) return;
+
+        if (copilotPrefsField != null)
+        {
+            try
+            {
+                Object live = copilotPrefsField.get(copilotPlugin);
+                if (live != null)
+                {
+                    if (live != suggestionPreferencesManager)
+                    {
+                        suggestionPreferencesManager = live;
+                        log.info("GEVisualAid: Copilot preferences manager appeared/was replaced - relinked via '{}'",
+                                copilotPrefsField.getName());
+                    }
+                    return;
+                }
+                // The field we know about has gone back to null \u2014 Copilot has
+                // torn it down (logout, profile switch). Drop the value but KEEP
+                // the field: it is still the right place to look next tick.
+                if (suggestionPreferencesManager != null)
+                    log.info("GEVisualAid: Copilot preferences manager went null on field '{}'",
+                            copilotPrefsField.getName());
+                suggestionPreferencesManager = null;
+                copilotPrefsRoute = "field_null:" + copilotPrefsField.getName();
+                return;
+            }
+            catch (Throwable ignored) { return; }
+        }
+
+        if (copilotPrefsRetryTicks > 0)
+        {
+            copilotPrefsRetryTicks--;
+            return;
+        }
+        copilotPrefsRetryTicks = COPILOT_PREFS_RETRY_TICKS;
+        suggestionPreferencesManager = findPreferencesManager(copilotPlugin);
     }
 
     private Object getField(Object obj, String name)
