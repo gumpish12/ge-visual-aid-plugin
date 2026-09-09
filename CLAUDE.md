@@ -121,6 +121,26 @@ non-trivial change.
   **re-read reflected sub-objects every tick** (2.75) rather than caching them,
   and drop a plugin’s links before cycling it. Josh’s manual off-and-on had
   been silently orphaning the link the same way for weeks.
+- **NEVER GATE A RE-LINK ON A DIFFERENT HANDLE'S LIVENESS** (2.92). Same rule
+  as above, missed in a second place for a year. `onGameTick` re-ran
+  `linkToCopilot()` only `if (suggestionManager == null)`, and that function
+  resolves all four Copilot handles together. Copilot has a `suggestionManager`
+  from its own `startUp`, but its **preferences manager is per-account and does
+  not exist until login** — so at RuneLite start we captured a good
+  `suggestionManager`, closing the gate for the session, beside a null
+  preferences manager, and never looked again. Every `copilot_*` preference
+  published BLANK on all three VMs, all day. 2.75 was a sub-object REPLACED
+  under us; this was one not yet BUILT. A link check that asks about the wrong
+  object is not a link check.
+- **THE BLANK HAS TO SAY WHY** (2.92). `buildCopilotPreferencesState()`'s null
+  branch and exception branch emitted the same ten empty fields and needed
+  opposite repairs, and an empty field reads as "no value set" rather than
+  "never read". `copilot_prefs_link` now carries the cause on **every** return
+  — `field:<name>` / `typescan:<name>` / `field_null:<name>` / `no_field_found`
+  / `no_copilot` / `read_error`. A `log.warn` is not a diagnosis: the AHK side
+  cannot read client.log, and the AHK side was the only thing that was ever
+  going to notice. It noticed as "flip timer unverifiable" once a morning for
+  months, which nobody could act on.
 - **Restarting a plugin STEALS THE KEYBOARD.** `startPlugin` rebuilds RuneLite’s
   config panel on the Swing thread and the search field takes focus, so the next
   keys sent land in that box — Josh got `agi,2` and `6,2,2226` typed into it.
