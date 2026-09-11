@@ -1806,7 +1806,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.93";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.94";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -4543,11 +4543,17 @@ public class GEVisualAidPlugin extends Plugin
         // fields below rather than per waypoint.
         WorldPoint playerLoc = null;
         int        playerYaw = 0;
-        boolean needPlayer = wantWaypoints;
-        try { needPlayer = needPlayer || config.loadingLinesEnabled()
-                                     || config.movementFlagsEnabled(); }
-        catch (Throwable ignored) { }
-        if (online && needPlayer)
+        // 2.94: ALWAYS resolved while online, and PUBLISHED. It was read here
+        // for years and never emitted — every distance in this feed is measured
+        // FROM the player, so the one tile the whole file is relative to was the
+        // one tile a consumer could not have. Anything wanting "is that spot
+        // near me" had to borrow a waypoint's dist_tiles and inherit a waypoint.
+        //
+        // No toggle, for the same reason the game tick has none (2.85): this is
+        // two ints a tick, and a switch whose only power is to make a free field
+        // absent is a way to break a consumer silently. The old `needPlayer`
+        // gate stays only in spirit — the read is cheap and now unconditional.
+        if (online)
         {
             try
             {
@@ -4557,6 +4563,13 @@ public class GEVisualAidPlugin extends Plugin
             }
             catch (Throwable ignored) { }
         }
+        // Name which kind of nothing it is: offline and "logged in but the
+        // client would not say" are different repairs and identical as -1.
+        sb.append("player_world_x=").append(playerLoc != null ? playerLoc.getX() : -1).append("\n");
+        sb.append("player_world_y=").append(playerLoc != null ? playerLoc.getY() : -1).append("\n");
+        sb.append("player_world_plane=").append(playerLoc != null ? playerLoc.getPlane() : -1).append("\n");
+        sb.append("player_pos_state=").append(
+                playerLoc != null ? "ok" : (online ? "unavailable" : "offline")).append("\n");
 
         StringBuilder names = new StringBuilder();
         for (int i = 0; i < wpNames.size(); i++)
