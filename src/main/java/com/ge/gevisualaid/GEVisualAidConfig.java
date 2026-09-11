@@ -878,9 +878,11 @@ public interface GEVisualAidConfig extends Config
 
     @ConfigItem(keyName = "objectMaxResults", name = "Max results each",
             description = "Cap on how many ground items and how many NPCs are emitted. "
-                    + "Nearest first, so the cap drops the furthest matches. Labelled entries are always emitted and do not count towards this cap.",
+                    + "Nearest first, so the cap drops the furthest matches. Labelled entries are always emitted and do not count towards this cap. "
+                    + "STANDING IN A CROWD: the nine tiles within one step hold up to nine NPCs, so a cap of ten shows you the pile you are stood in and nothing beyond it. "
+                    + "Raise it to about 24 if a consumer needs to choose between near and far targets - the ring at two tiles is another twelve.",
             section = objectSection, position = 5)
-    @Range(min = 1, max = 12)
+    @Range(min = 1, max = 32)
     default int objectMaxResults() { return 6; }
 
     // -----------------------------------------------------------------------

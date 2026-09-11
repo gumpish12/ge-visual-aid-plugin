@@ -1806,7 +1806,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.92";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.93";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -11521,8 +11521,8 @@ public class GEVisualAidPlugin extends Plugin
             log.warn("GEVisualAid ground item scan error: {}", t.getMessage());
         }
 
-        int giMax = 12;
-        try { giMax = clampInt(config.objectMaxResults(), 1, 12); } catch (Throwable ignored) { }
+        int giMax = 32;
+        try { giMax = clampInt(config.objectMaxResults(), 1, 32); } catch (Throwable ignored) { }
         List<Object[]> sel = selectResults(giFilters, found, 8, giMax);
 
         sb.append("gi_count=").append(sel.size()).append("\n");
@@ -11628,8 +11628,8 @@ public class GEVisualAidPlugin extends Plugin
             log.warn("GEVisualAid npc scan error: {}", t.getMessage());
         }
 
-        int npcMax = 12;
-        try { npcMax = clampInt(config.objectMaxResults(), 1, 12); } catch (Throwable ignored) { }
+        int npcMax = 32;
+        try { npcMax = clampInt(config.objectMaxResults(), 1, 32); } catch (Throwable ignored) { }
         List<Object[]> sel = selectResults(npcFilters, found, 2, npcMax);
 
         sb.append("npc_count=").append(sel.size()).append("\n");
