@@ -1807,7 +1807,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.95";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.96";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2721,6 +2721,11 @@ public class GEVisualAidPlugin extends Plugin
         if (gs != GameState.LOGGED_IN && gs != GameState.LOADING)
         {
             overlay.clearHighlight();
+            // 2.96: re-arm the loadout seed and stop serving the old one. A
+            // cached inventory outlives the session that produced it, and a
+            // gear list from the last character is worse than none.
+            loadoutSeeded = false;
+            loadoutBlock  = "loadout_online=false\nloadout_state=offline\n";
             // V2.21: drop the cached scene geometry before writing, so the
             // payload never carries screen pixels from before the logout.
             // Aggression anchors are unknowable after a login, so clear them.
@@ -2782,6 +2787,10 @@ public class GEVisualAidPlugin extends Plugin
             case 95: updateBank(event.getItemContainer());      break;
             case 94: updateEquipment(event.getItemContainer()); break;
         }
+        // 2.96: the gear-swap picker reads the inventory and the worn slots,
+        // and this is the client thread — the only place either is legible.
+        if (event.getContainerId() == 93 || event.getContainerId() == 94)
+            rebuildLoadout();
     }
 
     private void updateInventory(ItemContainer container)
@@ -3039,6 +3048,16 @@ public class GEVisualAidPlugin extends Plugin
         // lifetime — it arrives at login, long after suggestionManager exists.
         // See refreshCopilotPreferences().
         refreshCopilotPreferences();
+
+        // 2.96: one-shot seed per login. ItemContainerChanged covers every
+        // moment the inventory or worn slots DIFFER, but a plugin enabled
+        // mid-session sees no change until something moves, and until then
+        // /loadout would answer "no reading yet" beside a full inventory.
+        if (!loadoutSeeded)
+        {
+            loadoutSeeded = true;
+            rebuildLoadout();
+        }
 
         checkStuckOffers();
 
@@ -13130,12 +13149,25 @@ public class GEVisualAidPlugin extends Plugin
         return (slot >= 0 && slot < EQUIP_SLOT_NAMES.length) ? EQUIP_SLOT_NAMES[slot] : "SLOT" + slot;
     }
 
-    private void handleLoadoutRequest(HttpExchange ex)
+    // 2.96: BUILT ON THE CLIENT THREAD, SERVED FROM A CACHE.
+    // 2.95 read the item containers inside the HTTP handler and got
+    // loadout_state=no_containers every time, on a client that was logged in
+    // with a full inventory. getItemContainer answers null off the client
+    // thread — the rule is in this repo's own CLAUDE.md, and /state has worked
+    // this way since 2.4. The endpoint now serves a string built where the
+    // containers are legible, exactly as sceneStateBlock and mlmReportBlock do.
+    //
+    // Rebuilt on ItemContainerChanged for the inventory and the worn slots,
+    // which is every moment either can differ, plus a one-shot seed per login
+    // for the case where the plugin starts mid-session and nothing moves.
+    private volatile String loadoutBlock = "loadout_state=no_reading_yet\n";
+    private boolean loadoutSeeded = false;
+
+    private void rebuildLoadout()
     {
         StringBuilder r = new StringBuilder(2048);
         try
         {
-            r.append("plugin_output_version=").append(PLUGIN_OUTPUT_VERSION).append("\n");
             boolean online;
             try { online = client.getGameState() == GameState.LOGGED_IN; }
             catch (Throwable t) { online = false; }
@@ -13145,7 +13177,7 @@ public class GEVisualAidPlugin extends Plugin
                 // Named, not blank: "logged out" and "logged in with nothing
                 // readable" are different repairs and identical as an empty list.
                 r.append("loadout_state=offline\n");
-                sendPlain(ex, r.toString());
+                loadoutBlock = r.toString();
                 return;
             }
 
@@ -13155,7 +13187,7 @@ public class GEVisualAidPlugin extends Plugin
             if (worn == null && inv == null)
             {
                 r.append("loadout_state=no_containers\n");
-                sendPlain(ex, r.toString());
+                loadoutBlock = r.toString();
                 return;
             }
             r.append("loadout_state=ok\n");
@@ -13227,16 +13259,27 @@ public class GEVisualAidPlugin extends Plugin
             for (java.util.Map.Entry<String, Integer> e : perSlot.entrySet())
                 r.append("slot_").append(e.getKey()).append("_count=").append(e.getValue()).append("\n");
 
-            sendPlain(ex, r.toString());
+            loadoutBlock = r.toString();
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid loadout rebuild error: {}", t.getMessage());
+            loadoutBlock = "loadout_state=error\n";
+        }
+    }
+
+    private void handleLoadoutRequest(HttpExchange ex)
+    {
+        try
+        {
+            sendPlain(ex, "plugin_output_version=" + PLUGIN_OUTPUT_VERSION + "\n" + loadoutBlock);
         }
         catch (Throwable t)
         {
             log.warn("GEVisualAid /loadout error: {}", t.getMessage());
-            try { sendPlain(ex, r.append("loadout_state=error\n").toString()); } catch (Throwable ignored) { }
         }
     }
 
-    // Shared response writer for the small plain-text endpoints.
     private void sendPlain(HttpExchange ex, String body) throws java.io.IOException
     {
         byte[] out = body.getBytes(StandardCharsets.UTF_8);
