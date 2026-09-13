@@ -57,6 +57,7 @@ import net.runelite.http.api.worlds.World;
 import net.runelite.http.api.worlds.WorldResult;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.ItemStats;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.PluginManager;
@@ -1806,7 +1807,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.94";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.95";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -12987,6 +12988,7 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/widgets", this::handleWidgetsRequest); // 2.81
             httpServer.createContext("/tick",   this::handleTickRequest);     // 2.85
             httpServer.createContext("/motherlode", this::handleMotherlodeRequest); // 2.87
+            httpServer.createContext("/loadout", this::handleLoadoutRequest);   // 2.95
             httpServer.createContext("/hop",    this::handleHopRequest);
             httpServer.createContext("/agility", this::handleAgilityRequest);
             httpServer.createContext("/plugin",  this::handlePluginRequest);
@@ -13093,6 +13095,157 @@ public class GEVisualAidPlugin extends Plugin
     // It is what lets a consumer measure the SERVER's own jitter - the floor
     // nothing can beat - separately from the jitter its own polling adds. Min,
     // max and mean are for a person reading this in a browser.
+
+    // -----------------------------------------------------------------------
+    // 2.95: GET /loadout — what you are wearing, and what you are carrying
+    // that COULD be worn, grouped by the slot it would occupy.
+    //
+    // Josh, 2026-09-13: "currently i fill out manually the ini for the gear
+    // swaps ... is there a more efficiant way ... so that it can identify that
+    // i have say three head items in my setup".
+    //
+    // The gear-swap INI is hand-typed item names. Everything needed to offer a
+    // pick-list instead was already in the client and published nowhere: the
+    // WORN side exists in the ticker's equipmentMap, but the inventory side has
+    // no slot information at all, so "which of these is a helmet" could not be
+    // answered and the list could not be grouped.
+    //
+    // NO LOOKUP TABLE, and that is why this lives here rather than in the
+    // ticker. ItemManager.getItemStats(id) gives isEquipable(), the slot and
+    // isTwoHanded() straight from the game's own item data, so a new item works
+    // the day it is released. The ticker resolves names from a HARDCODED_NAMES
+    // map its own comment says "kept having to grow by hand" - 145 entries and
+    // counting. ItemComposition never needs feeding.
+    //
+    // TWO-HANDED IS PUBLISHED because a loadout that swaps to a 2h weapon
+    // empties the shield slot, and a swap list built without knowing that
+    // produces a set which cannot be worn together.
+    private static final String[] EQUIP_SLOT_NAMES = {
+        "HEAD", "CAPE", "AMULET", "WEAPON", "BODY", "SHIELD", "UNKNOWN",
+        "LEGS", "HAIR", "GLOVES", "BOOTS", "JAW", "RING", "AMMO"
+    };
+
+    private String equipSlotName(int slot)
+    {
+        return (slot >= 0 && slot < EQUIP_SLOT_NAMES.length) ? EQUIP_SLOT_NAMES[slot] : "SLOT" + slot;
+    }
+
+    private void handleLoadoutRequest(HttpExchange ex)
+    {
+        StringBuilder r = new StringBuilder(2048);
+        try
+        {
+            r.append("plugin_output_version=").append(PLUGIN_OUTPUT_VERSION).append("\n");
+            boolean online;
+            try { online = client.getGameState() == GameState.LOGGED_IN; }
+            catch (Throwable t) { online = false; }
+            r.append("loadout_online=").append(online).append("\n");
+            if (!online)
+            {
+                // Named, not blank: "logged out" and "logged in with nothing
+                // readable" are different repairs and identical as an empty list.
+                r.append("loadout_state=offline\n");
+                sendPlain(ex, r.toString());
+                return;
+            }
+
+            ItemContainer worn = null, inv = null;
+            try { worn = client.getItemContainer(InventoryID.WORN); } catch (Throwable ignored) { }
+            try { inv  = client.getItemContainer(InventoryID.INV); } catch (Throwable ignored) { }
+            if (worn == null && inv == null)
+            {
+                r.append("loadout_state=no_containers\n");
+                sendPlain(ex, r.toString());
+                return;
+            }
+            r.append("loadout_state=ok\n");
+
+            int wornN = 0;
+            if (worn != null)
+            {
+                Item[] items = worn.getItems();
+                for (int i = 0; i < items.length; i++)
+                {
+                    Item it = items[i];
+                    if (it == null || it.getId() <= 0) continue;
+                    String nm = "";
+                    try { nm = itemManager.getItemComposition(it.getId()).getName(); }
+                    catch (Throwable ignored) { }
+                    String k = "worn_" + equipSlotName(i) + "_";
+                    r.append(k).append("id=").append(it.getId()).append("\n");
+                    r.append(k).append("name=").append(nm).append("\n");
+                    wornN++;
+                }
+            }
+            r.append("worn_count=").append(wornN).append("\n");
+
+            // Inventory in its own order, each row carrying the slot it WOULD
+            // occupy. The swap clicks a position, so the index is the useful
+            // identity; grouping is the reader's job and it now has a key.
+            int invN = 0, equipN = 0;
+            java.util.Map<String, Integer> perSlot = new java.util.LinkedHashMap<>();
+            if (inv != null)
+            {
+                Item[] items = inv.getItems();
+                for (int i = 0; i < items.length; i++)
+                {
+                    Item it = items[i];
+                    if (it == null || it.getId() <= 0) continue;
+                    invN++;
+                    String nm = "";
+                    try { nm = itemManager.getItemComposition(it.getId()).getName(); }
+                    catch (Throwable ignored) { }
+                    String slotName = "-";
+                    boolean twoH = false;
+                    try
+                    {
+                        ItemStats st = itemManager.getItemStats(it.getId());
+                        if (st != null && st.isEquipable() && st.getEquipment() != null)
+                        {
+                            slotName = equipSlotName(st.getEquipment().getSlot());
+                            twoH     = st.getEquipment().isTwoHanded();
+                        }
+                    }
+                    catch (Throwable ignored) { }
+                    String k = "inv_" + (i + 1) + "_";
+                    r.append(k).append("id=").append(it.getId()).append("\n");
+                    r.append(k).append("name=").append(nm).append("\n");
+                    r.append(k).append("qty=").append(it.getQuantity()).append("\n");
+                    r.append(k).append("equip=").append(slotName).append("\n");
+                    r.append(k).append("two_handed=").append(twoH).append("\n");
+                    if (!"-".equals(slotName))
+                    {
+                        equipN++;
+                        perSlot.merge(slotName, 1, Integer::sum);
+                    }
+                }
+            }
+            r.append("inv_count=").append(invN).append("\n");
+            r.append("inv_equippable=").append(equipN).append("\n");
+            // The per-slot count up front, so a reader knows how many there are
+            // before walking the rows - same contract as npc_<label>_count.
+            for (java.util.Map.Entry<String, Integer> e : perSlot.entrySet())
+                r.append("slot_").append(e.getKey()).append("_count=").append(e.getValue()).append("\n");
+
+            sendPlain(ex, r.toString());
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid /loadout error: {}", t.getMessage());
+            try { sendPlain(ex, r.append("loadout_state=error\n").toString()); } catch (Throwable ignored) { }
+        }
+    }
+
+    // Shared response writer for the small plain-text endpoints.
+    private void sendPlain(HttpExchange ex, String body) throws java.io.IOException
+    {
+        byte[] out = body.getBytes(StandardCharsets.UTF_8);
+        ex.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+        ex.getResponseHeaders().set("Cache-Control", "no-cache, no-store, must-revalidate");
+        ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        ex.sendResponseHeaders(200, out.length);
+        try (OutputStream os = ex.getResponseBody()) { os.write(out); }
+    }
     // -----------------------------------------------------------------------
     private void handleTickRequest(HttpExchange ex)
     {
