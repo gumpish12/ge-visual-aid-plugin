@@ -21,7 +21,8 @@ public class SessionTracker
     private ConfigManager configManager;
 
     // In-memory buy price tracking: itemId -> price paid per item
-    private final Map<Integer, Integer> buyPrices = new HashMap<>();
+    // Long values since RuneLite 1.13.0 widened GrandExchangeOffer.getPrice.
+    private final Map<Integer, Long> buyPrices = new HashMap<>();
 
     // Session totals (loaded from persistent config on startup)
     private long totalProfit = 0;
@@ -61,16 +62,16 @@ public class SessionTracker
         save();
     }
 
-    public void recordBuy(int itemId, int priceEach)
+    public void recordBuy(int itemId, long priceEach)
     {
         buyPrices.put(itemId, priceEach);
     }
 
-    public long recordSell(int itemId, int sellPriceEach, int quantity)
+    public long recordSell(int itemId, long sellPriceEach, int quantity)
     {
         if (!buyPrices.containsKey(itemId)) return 0;
-        int buyPrice = buyPrices.get(itemId);
-        long margin  = (long)(sellPriceEach - buyPrice) * quantity;
+        long buyPrice = buyPrices.get(itemId);
+        long margin   = (sellPriceEach - buyPrice) * quantity;
         totalProfit += margin;
         totalFlips++;
         if (margin > bestFlip) bestFlip = margin;

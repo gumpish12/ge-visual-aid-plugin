@@ -10,7 +10,11 @@ public class SlotState
     private String status          = "empty";
     private int    quantityDone    = 0;
     private int    quantityTotal   = 0;
-    private int    priceEach       = 0;
+    // RuneLite 1.13.0 widened GrandExchangeOffer.getPrice/getSpent to long.
+    // Kept as long the whole way through rather than narrowed at the door: a
+    // cast back to int overflows to a NEGATIVE price silently, and a negative
+    // price feeds straight into the profit maths.
+    private long   priceEach       = 0;
     private String offerType       = "";
     private long   lastChangedMs   = 0;
 

@@ -106,7 +106,7 @@ public class MlmCheck
 
         // ---- 6. the version string actually moved -----------------------
         f = c.getDeclaredField("PLUGIN_OUTPUT_VERSION"); f.setAccessible(true);
-        eq("PLUGIN_OUTPUT_VERSION", f.get(null), "2.91");
+        eq("PLUGIN_OUTPUT_VERSION", f.get(null), "2.97");
 
         // ---- 7. machinery classification (2.87) -------------------------
         // Josh stood at the wheel and read all four out of a live scene:

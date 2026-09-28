@@ -46,7 +46,7 @@ public class DiscordNotifier
     }
 
     public void sendOfferComplete(String itemName, String offerType,
-                                  int quantity, int priceEach, long profit)
+                                  int quantity, long priceEach, long profit)
     {
         if (!config.discordEnabled() || !config.discordNotifyOfferComplete()) return;
         String title = "✅ Offer Complete — " + itemName;

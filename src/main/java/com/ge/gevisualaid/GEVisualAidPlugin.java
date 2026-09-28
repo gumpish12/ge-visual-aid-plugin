@@ -1807,7 +1807,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.96";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.97";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2812,7 +2812,7 @@ public class GEVisualAidPlugin extends Plugin
             Item item  = items[i];
             int  id    = item.getId();
             int  qty   = item.getQuantity();
-            int  price = itemManager.getItemPrice(id);
+            long price = itemManager.getItemPrice(id);   // long since RuneLite 1.13.0
             String name;
             try { name = itemManager.getItemComposition(id).getName(); }
             catch (Exception e) { name = "Unknown"; }
@@ -2820,7 +2820,7 @@ public class GEVisualAidPlugin extends Plugin
             slot.setItemName(name);
             slot.setQuantity(qty);
             slot.setValueEach(price);
-            totalValue += (long) price * qty;
+            totalValue += price * qty;   // price is already long; qty promotes
         }
         inventoryValueGp = totalValue;
     }
