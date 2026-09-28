@@ -18,6 +18,37 @@ public class MlmCheck
         return n;
     }
 
+    // The last version whose behaviour this file was actually read against.
+    // Raise it when a change here is checked against a new plugin version -
+    // never as a chore to make a bump go green, because it does not go red.
+    private static final String VERSION_FLOOR = "2.97";
+
+    // N.NN: digits, one dot, digits. Spelled out rather than done with a
+    // regex because a backslash has to survive three layers of tooling to
+    // reach this file, and it did not on the first attempt.
+    private static boolean wellFormed(String v)
+    {
+        int dots = 0;
+        for (int i = 0; i < v.length(); i++)
+        {
+            char ch = v.charAt(i);
+            if (ch == 46) { dots++; if (i == 0 || i == v.length() - 1) return false; }
+            else if (ch < 48 || ch > 57) return false;
+        }
+        return dots == 1;
+    }
+
+    // "2.100" is a later version than "2.97", which a string compare gets
+    // backwards. Two-part numeric, nothing cleverer - wellFormed() has
+    // already established there is exactly one dot with digits either side.
+    private static long versionRank(String v)
+    {
+        int dot = v.indexOf(46);
+        long major = Long.parseLong(v.substring(0, dot));
+        long minor = Long.parseLong(v.substring(dot + 1));
+        return major * 1000000L + minor;
+    }
+
     private static void eq(String what, Object got, Object want)
     {
         boolean ok = (got == null) ? want == null : got.equals(want);
@@ -104,9 +135,33 @@ public class MlmCheck
         f = c.getDeclaredField("MLM_ETA_MIN_SAMPLES"); f.setAccessible(true);
         eq("MLM_ETA_MIN_SAMPLES", f.get(null), 8);
 
-        // ---- 6. the version string actually moved -----------------------
+        // ---- 6. the version string -------------------------------------
+        // THIS USED TO BE AN EQUALITY AGAINST A LITERAL, AND IT ROTTED.
+        // "the version actually moved" is not something a checker can know:
+        // only a person knows whether a change deserved a bump. What the
+        // equality actually did was go RED ON EVERY BUMP, so it sat failing
+        // from 2.92 through 2.96 - five versions - while nobody read it, and
+        // a checker that is always red is a checker nobody runs.
+        //
+        // A FLOOR fails on the two things that are genuinely wrong - a
+        // mangled string and a version going BACKWARDS - and is silent on an
+        // ordinary bump. It is raised deliberately, not as maintenance.
         f = c.getDeclaredField("PLUGIN_OUTPUT_VERSION"); f.setAccessible(true);
-        eq("PLUGIN_OUTPUT_VERSION", f.get(null), "2.97");
+        Object pv = f.get(null);
+        String vs = (pv == null) ? "" : pv.toString();
+        if (!wellFormed(vs))
+        {
+            fails++;
+            System.out.println("FAIL PLUGIN_OUTPUT_VERSION: \"" + vs
+                    + "\" is not N.NN - the panel and every consumer print it raw");
+        }
+        else if (versionRank(vs) < versionRank(VERSION_FLOOR))
+        {
+            fails++;
+            System.out.println("FAIL PLUGIN_OUTPUT_VERSION: " + vs
+                    + " is BELOW the floor " + VERSION_FLOOR
+                    + " - a version went backwards, or the floor is wrong");
+        }
 
         // ---- 7. machinery classification (2.87) -------------------------
         // Josh stood at the wheel and read all four out of a live scene:

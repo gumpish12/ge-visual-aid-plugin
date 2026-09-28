@@ -13,7 +13,19 @@ repositories {
 	mavenCentral()
 }
 
-def runeLiteVersion = 'latest.release'
+// THE RUNELITE VERSION IS DYNAMIC, AND THAT IS A STANDING HAZARD.
+// `latest.release` means every RuneLite release is picked up without anyone
+// choosing it, and `gradlew run` is what LAUNCHES the client - so a release
+// that changes an API signature does not degrade the plugin, it stops
+// RuneLite starting at all. 1.13.0 widened the Grand Exchange price types
+// from int to long and did exactly that on 2026-09-27.
+//
+// The override is the escape hatch, so a broken release costs one flag
+// rather than an edit to a tracked file on three machines:
+//     gradlew run -PruneliteVersion=1.12.39
+// Leave it unset for normal running.
+def runeLiteVersion = (project.findProperty('runeliteVersion') ?: 'latest.release').toString()
+println "RuneLite dependency: ${runeLiteVersion}"
 def pluginMainClass = 'com.ge.gevisualaid.GEVisualAidTest'
 
 dependencies {

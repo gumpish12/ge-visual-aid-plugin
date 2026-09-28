@@ -494,9 +494,38 @@ non-trivial change.
 
 - Filename stays `GEVisualAidPlugin.java` — Java requires it to match the class.
   Only the internal version string bumps.
-- The VMs pull from GitHub via `git pull --ff-only` in launch.bat at RuneLite
-  start. **Commit and push directly** — never hand Josh a file to paste in.
+- **Commit and push directly** — never hand Josh a file to paste in.
+- **THIS FILE SAID THE VMs PULLED THE PLUGIN AT LAUNCH, AND THEY DID NOT**
+  (2026-09-28). `shared/launch.bat` in `osrs-suite` held two lines — cd to
+  the plugin folder and `gradlew run` — with no `git pull` anywhere, and the
+  watchdog's own git update pulls `C:\osrs-suite` and copies nine NAMED files,
+  none of them the plugin and none of them launch.bat. The claim had been
+  repeated in both CLAUDE.md files for weeks and was load-bearing: every
+  "pushed, so the VMs get it in the morning" rested on it. **A deploy path
+  nobody has watched run is a belief, not a mechanism** — and this one could
+  not have been noticed, because a VM running month-old plugin source
+  publishes a perfectly healthy `/state`.
 - After pushing, restart RuneLite on s1 and confirm the change appears in
   `127.0.0.1:8081/state` before touching s2 or s3.
 - HTTP is the live source; `.txt` mtime lags badly. Freshness signal is
   `pluginLastUpdateTick <= 5s`.
+- **`latest.release` MEANS A RUNELITE RELEASE CAN TAKE EVERY VM OFF THE AIR.**
+  `gradlew run` is what LAUNCHES the client, so a release that changes an API
+  signature does not degrade the plugin — RuneLite never starts, on every
+  machine, within a day of the release and with nothing saying why. 1.13.0
+  widened the Grand Exchange price types int → long and did exactly this on
+  2026-09-27. Two things now stand between that and an outage:
+  - `gradlew run -PruneliteVersion=1.12.39` overrides the dependency without
+    editing a tracked file on three machines.
+  - launch.bat **compiles before it launches** and retries against that pin
+    if the compile fails, so a bad release costs the newest client rather
+    than the whole VM. It compiles SEPARATELY rather than retrying a failed
+    `run` because `run` blocks for the whole session and exits non-zero when
+    the watchdog kills the client, which it does routinely — retrying on
+    that would start a second client hours later.
+- **WIDEN, DO NOT CAST, WHEN AN API TYPE GROWS.** 2.97 carried `long` all the
+  way through `SlotState`, `SessionTracker`, `InventorySlot` and the Discord
+  notifier rather than casting back at the door: a cast overflows to a
+  NEGATIVE price in silence and that price feeds straight into the profit
+  maths. Widening also compiles against the OLD RuneLite — verified on both
+  1.12.39 and 1.13.0 — so there is no ordering problem in a rollout.
