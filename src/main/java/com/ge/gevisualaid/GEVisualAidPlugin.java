@@ -21,6 +21,7 @@ import net.runelite.api.Player;
 import net.runelite.api.Prayer;
 import net.runelite.api.Projectile;
 import net.runelite.api.events.ProjectileMoved;
+import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.ObjectID;
 import net.runelite.api.gameval.VarbitID;
@@ -1807,7 +1808,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.97";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.98";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -3919,7 +3920,40 @@ public class GEVisualAidPlugin extends Plugin
         boolean questOpen    = isVisible(399, 0);
         boolean friendsOpen  = isVisible(429, 0);
         boolean clanOpen     = isVisible(707, 0);
-        boolean logoutOpen   = isVisible(182, 0);
+        // 2.98 - logout_open WAS isVisible(182, 0), AND IT READ FALSE WITH THE
+        // PANEL OPEN. Measured on a live client, 2026-09-28 18:01:54, with the
+        // logout panel showing on screen:
+        //
+        //     logout_open=false
+        //     wg_Logout_Panel_Logout_Button_Click_Area_state=ok
+        //     ..._hidden=false   rect (3136,1710)-(3421,2026)
+        //
+        // 182.0 is InterfaceID.Logout.UNIVERSE, the interface ROOT. A root is
+        // not the panel: it can be loaded and hidden while its children draw,
+        // and here it is. It used to track the panel - the skiller logged
+        // logout_open=true off it as late as 2026-09-20 - so this is a
+        // game-side layout change, and it broke a READING rather than an id.
+        // The widget was still found and still answered, it just answered a
+        // different question. MISLABEL RATHER THAN FAIL LOUDLY, from a
+        // container standing in for its contents.
+        //
+        // It cost a full logout loop on a live account: the skiller opened the
+        // panel fifty times, asked this field, was told the panel was shut, and
+        // clicked the opener again - never once reaching the Logout button that
+        // was on screen the whole time.
+        //
+        // TEST THE THING THE CONSUMER IS ABOUT TO CLICK. Logout.LOGOUT is the
+        // big Logout button itself, so this reading cannot disagree with the
+        // click it authorises. As a SYMBOL, so a rename in a future
+        // runelite-api fails the build instead of matching nothing for ever.
+        boolean logoutOpen   = isVisible(InterfaceID.Logout.LOGOUT >>> 16,
+                                         InterfaceID.Logout.LOGOUT & 0xFFFF);
+        // Which component answered, so the next time this moves it is one
+        // reading rather than an investigation. A bare false cannot say
+        // whether it means shut, or asked the wrong thing again.
+        String logoutOpenSource = "Logout.LOGOUT "
+                + (InterfaceID.Logout.LOGOUT >>> 16) + "."
+                + (InterfaceID.Logout.LOGOUT & 0xFFFF);
         boolean settingsOpen = isVisible(116, 0);
 
         String geOfferType = "none";
@@ -4007,6 +4041,7 @@ public class GEVisualAidPlugin extends Plugin
                 + "friends_open=" + friendsOpen + "\n"
                 + "clan_open=" + clanOpen + "\n"
                 + "logout_open=" + logoutOpen + "\n"
+                + "logout_open_source=" + logoutOpenSource + "\n"
                 + "settings_open=" + settingsOpen + "\n"
                 + "inventory_value_gp=" + inventoryValueGp + "\n"
                 + "bank_value_gp=" + bankValueGp + "\n"
@@ -4114,7 +4149,8 @@ public class GEVisualAidPlugin extends Plugin
                 + "inventory_open=false\nequipment_open=false\nprayer_open=false\n"
                 + "magic_open=false\ncombat_options_open=false\nskills_open=false\n"
                 + "quest_list_open=false\nfriends_open=false\nclan_open=false\n"
-                + "logout_open=false\nsettings_open=false\n"
+                + "logout_open=false\nlogout_open_source=offline\n"
+                + "settings_open=false\n"
                 + "inventory_value_gp=0\nbank_value_gp=0\nequipment_value_gp=0\n"
                 + "ge_slots_value_gp=0\ntotal_wealth_gp=0\n"
                 + buildPortfolioState()

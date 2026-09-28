@@ -135,6 +135,50 @@ public class MlmCheck
         f = c.getDeclaredField("MLM_ETA_MIN_SAMPLES"); f.setAccessible(true);
         eq("MLM_ETA_MIN_SAMPLES", f.get(null), 8);
 
+        // ---- 5b. the logout gate (2.98) ---------------------------------
+        // logout_open WAS isVisible(182, 0) - InterfaceID.Logout.UNIVERSE,
+        // the interface ROOT - and on 2026-09-28 it read FALSE with the panel
+        // open on screen, measured beside the button widget reporting ok and a
+        // rectangle. A root is not the panel; it can be loaded and hidden while
+        // its children draw. The skiller opened the panel fifty times, asked
+        // this field, was told it was shut, and clicked the opener again.
+        //
+        // TEST THE THING THE CONSUMER IS ABOUT TO CLICK. Asserted three ways,
+        // because each fails on its own: the old expression is gone, the new
+        // one is a SYMBOL (so a rename fails the build rather than matching
+        // nothing for ever), and the reading names its own source.
+        String src = new String(java.nio.file.Files.readAllBytes(
+                java.nio.file.Paths.get("src/main/java/com/ge/gevisualaid",
+                        "GEVisualAidPlugin.java")),
+                java.nio.charset.StandardCharsets.UTF_8);
+        // COMMENTS STRIPPED FIRST. The first run of this went red against the
+        // comment three lines above the fix, which NAMES the old expression in
+        // order to explain why it is gone. An assertion that reads prose is
+        // asserting the documentation, and this repo has been bitten by that
+        // in the other direction often enough.
+        StringBuilder code = new StringBuilder();
+        for (String line : src.split("\\n"))
+            if (!line.trim().startsWith("//")) code.append(line).append("\\n");
+        String srcCode = code.toString();
+        eq("nothing reads the logout panel off the interface root 182.0",
+                srcCode.contains("isVisible(182, 0)"), false);
+        // SCOPED TO THE ASSIGNMENT. Asking whether the symbol appears ANYWHERE
+        // passed with the gate rewritten as a bare isVisible(182, 8) - because
+        // logoutOpenSource mentions the symbol two lines below. Proved by
+        // making exactly that mutation and watching it go green. Pin the
+        // guard, never the vocabulary around it.
+        int gateAt = srcCode.indexOf("boolean logoutOpen");
+        String gate = gateAt < 0 ? ""
+                : srcCode.substring(gateAt, Math.min(srcCode.length(), gateAt + 200));
+        // Positively, and with no regex: the call itself has to name the
+        // symbol. A backslash does not survive this repo's patch tooling, and
+        // an escape that arrives mangled is a worse bug than the six
+        // characters it saves.
+        eq("the gate calls isVisible on the SYMBOL, not on a bare number",
+                gate.contains("isVisible(InterfaceID.Logout.LOGOUT"), true);
+        eq("the reading says which component answered",
+                srcCode.contains("logout_open_source=" + "\" + logoutOpenSource"), true);
+
         // ---- 6. the version string -------------------------------------
         // THIS USED TO BE AN EQUALITY AGAINST A LITERAL, AND IT ROTTED.
         // "the version actually moved" is not something a checker can know:
