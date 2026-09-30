@@ -529,3 +529,38 @@ non-trivial change.
   NEGATIVE price in silence and that price feeds straight into the profit
   maths. Widening also compiles against the OLD RuneLite — verified on both
   1.12.39 and 1.13.0 — so there is no ordering problem in a rollout.
+- **THE PLUGIN HUB IS KEYED ON THE CLIENT VERSION, SO AN OLD RUNELITE GIVES
+  YOU OLD THIRD-PARTY PLUGINS — SILENTLY** (2.99). `repo.runelite.net` serves
+  `plugins/manifest/<version>_lite.js`, and the jar hash in it differs per
+  version. Read live from the hub on 2026-09-30:
+
+  | client | flipping-copilot build | built |
+  |---|---|---|
+  | 1.13.1 | `c8dbb515` | that day, 14:14 UTC |
+  | 1.13.0 | `7452e32c` | two days earlier |
+  | 1.12.39 | `755ec983` | sixteen days earlier |
+
+  Nothing errors. The plugin loads, logs in, and still suggests a price — only
+  the half the day's game update moved stops working. Josh's desktop on the
+  Jagex launcher (1.13.1) highlighted the price / quantity / confirm buttons;
+  all three VMs and the IntelliJ dev client did not, and no log anywhere named
+  a version. **This is not our bug and we still have to be able to see it.**
+- **`gradlew run` DRIFTS A RELEASE BEHIND BY DEFAULT.** `latest.release` is a
+  dynamic version and Gradle caches those for **24 hours**, so a dev client
+  keeps launching yesterday's RuneLite for a day after a release, and the hub
+  hands it yesterday's plugins to match. `build.gradle` now sets
+  `cacheDynamicVersionsFor 10, 'minutes'`. That is not determinism — for that,
+  `-PruneliteVersion=x.y.z`. Force one now with `--refresh-dependencies`.
+- **launch.bat's COMPILE FALLBACK IS THIS TRAP WITH A REASON.** Pinning
+  `1.12.39` keeps the client starting, which is right, and hands that VM a
+  sixteen-day-old plugin hub, which nobody was told. A VM on the pin is a VM
+  to fix, not a VM that is fine.
+- **THE CLIENT VERSION IS IN THE FEED NOW** (2.99): `runelite_version`,
+  `runelite_pluginhub_version` and `runelite_launcher_version` on both state
+  headers. **`runelite_pluginhub_version` is the field that picks the jar** —
+  it is the one to compare between machines, because it is the one the hub is
+  keyed on. `runelite_launcher_version` is `none` under `gradlew run` and a
+  number under the Jagex launcher, which separates a dev client from a real
+  one without leaving the feed. Not cached: three property reads and a concat
+  is not an expensive rebuild, and this repo has twice been bitten by a guard
+  over something that moved underneath it.

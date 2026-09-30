@@ -28,6 +28,22 @@ def runeLiteVersion = (project.findProperty('runeliteVersion') ?: 'latest.releas
 println "RuneLite dependency: ${runeLiteVersion}"
 def pluginMainClass = 'com.ge.gevisualaid.GEVisualAidTest'
 
+// GRADLE CACHES A DYNAMIC VERSION FOR 24 HOURS, SO `latest.release` MEANS
+// "yesterday's release" FOR MOST OF A DAY AFTER ONE SHIPS - and on 2026-09-30
+// that was the whole bug. The RuneLite plugin hub is keyed on the CLIENT
+// VERSION: repo.runelite.net serves a different manifest, and a different
+// jar, for 1.13.0 than for 1.13.1. A dev client still resolving 1.13.0 loaded
+// a two-day-old Flipping Copilot beside a game update that had moved the GE
+// interface, so it suggested prices and highlighted nothing, on three VMs,
+// with no error on any of them.
+//
+// Ten minutes is short enough that a restart picks a release up and long
+// enough that a build is not a network round trip. It does NOT make the
+// version deterministic - use -PruneliteVersion=x.y.z for that.
+configurations.all {
+	resolutionStrategy.cacheDynamicVersionsFor 10, 'minutes'
+}
+
 dependencies {
 	compileOnly group: 'net.runelite', name:'client', version: runeLiteVersion
 

@@ -51,6 +51,7 @@ import net.runelite.api.events.WallObjectSpawned;
 import net.runelite.api.events.WallObjectDespawned;
 import java.time.LocalDate;
 import net.runelite.api.widgets.Widget;
+import net.runelite.client.RuneLiteProperties;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.game.WorldService;
 import net.runelite.client.util.WorldUtil;
@@ -1808,7 +1809,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.98";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.99";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -3152,6 +3153,61 @@ public class GEVisualAidPlugin extends Plugin
                 + "game_tick_interval_ms=" + s.intervalMs + "\n";
     }
 
+    // 2.99 - WHICH RUNELITE THIS IS, AND THEREFORE WHICH PLUGIN-HUB JARS IT ATE.
+    //
+    // THE PLUGIN HUB IS KEYED ON THE CLIENT VERSION. repo.runelite.net serves
+    // manifest/<version>_lite.js, and the jar hash inside it DIFFERS per
+    // version - read live from the hub on 2026-09-30:
+    //     1.13.1  -> flipping-copilot c8dbb515   built that day, 14:14 UTC
+    //     1.13.0  -> flipping-copilot 7452e32c   built two days earlier
+    //     1.12.39 -> flipping-copilot 755ec983   built sixteen days earlier
+    // So a client one release behind quietly loads a DIFFERENT third-party
+    // plugin. Nothing errors: it loads, it logs in, it still suggests a price
+    // - and the half of it that the day's game update moved does not work.
+    // Josh's desktop on the Jagex launcher (1.13.1) had the blue price /
+    // quantity / confirm highlights; all three VMs and the IntelliJ dev client
+    // did not, and no log on any machine mentioned a version at all. This is
+    // the mislabel-rather-than-fail-loudly trap wearing somebody else's plugin.
+    //
+    // `gradlew run` picks the client with `latest.release`, and Gradle caches
+    // a dynamic version for 24 HOURS by default - so a dev client keeps
+    // launching yesterday's RuneLite for a day after a release. build.gradle
+    // now caches it for ten minutes. launch.bat's compile fallback can also
+    // put a VM on 1.12.39 on purpose, which is the same trap with a reason.
+    //
+    // runelite_pluginhub_version IS THE FIELD THAT PICKS THE JAR. It equals
+    // the client version on a release build, but it is the one to compare
+    // across machines, because it is the one the hub is keyed on.
+    // runelite_launcher_version is `none` under `gradlew run` and a number
+    // under the Jagex launcher - the cheapest way to tell a dev client from a
+    // real one without leaving the feed.
+    //
+    // NOT CACHED, deliberately. These are three property reads and a concat,
+    // which is not an expensive rebuild, and this repo has been bitten twice
+    // by a guard on something that turned out to change underneath it.
+    private String buildClientVersionState()
+    {
+        try
+        {
+            return "runelite_version=" + verOrElse(RuneLiteProperties.getVersion(), "unknown") + "\n"
+                    + "runelite_pluginhub_version=" + verOrElse(RuneLiteProperties.getPluginHubVersion(), "unknown") + "\n"
+                    + "runelite_launcher_version=" + verOrElse(RuneLiteProperties.getLauncherVersion(), "none") + "\n";
+        }
+        catch (Throwable t)
+        {
+            // A distinct word per way of having nothing, per the rule: absent
+            // is not the same as unreadable is not the same as not-launched.
+            return "runelite_version=read_error\n"
+                    + "runelite_pluginhub_version=read_error\n"
+                    + "runelite_launcher_version=read_error\n";
+        }
+    }
+
+    private static String verOrElse(String v, String fallback)
+    {
+        return (v == null || v.isEmpty()) ? fallback : v;
+    }
+
     private void checkStuckOffers()
     {
         if (!config.offerStuckEnabled()) return;
@@ -4004,6 +4060,7 @@ public class GEVisualAidPlugin extends Plugin
                 + "login_notice_visible=" + isLoginNoticeVisible() + "\n"
                 + "current_world=" + safeWorld() + "\n"
                 + "client_revision=" + safeRevision() + "\n"
+                + buildClientVersionState()                  // 2.99
                 + buildGameTickState()                        // 2.85
                 + "welcome_screen_visible=" + isWelcomeScreenVisible() + "\n"
                 + "world_select_open=" + isWorldSelectVisible() + "\n"
@@ -4125,6 +4182,7 @@ public class GEVisualAidPlugin extends Plugin
                 + "login_notice_visible=" + isLoginNoticeVisible() + "\n"
                 + "current_world=" + safeWorld() + "\n"
                 + "client_revision=" + safeRevision() + "\n"
+                + buildClientVersionState()                  // 2.99
                 // 2.85: published here TOO. RuneLite only fires GameTick while
                 // LOGGED_IN (2.3/2.4 established that empirically), so on this
                 // path the numbers are the LAST tick of the previous session -
