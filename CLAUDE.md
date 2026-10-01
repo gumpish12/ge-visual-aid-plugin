@@ -631,3 +631,33 @@ non-trivial change.
   answers today; the long attempt stays first so a future widening needs no
   change. runelite-api's own name for 1043 (`TRADEREMOVED_OTHER`) is a stale
   cache label and is not evidence either way.
+- **THE OFFER PRICE IS LONG VARP 5753, AND IT WAS MEASURED, NOT LOOKED UP**
+  (2.103). Three versions guessed: 2.100 read varbit 4398 (deleted — threw,
+  killed the resolve), 2.101 read varp 1043 from Copilot's TODO (returns 0,
+  so `set_price` never cleared and `confirm` never fired). 2.102 added
+  `/geoffer`, which **scans every varp for the price Copilot has suggested**,
+  because the operator types exactly that number in. Selling at 2,006:
+
+  ```
+  geoffer_scan_target=2006
+  geoffer_scan_varps=              <- nothing in the 32-bit table
+  geoffer_scan_varps_long=5753     <- one hit, in the 64-bit table
+  geoffer_child_41=2,006 coins     <- and the screen agrees
+  ```
+
+  **It is a LONG varp, which is why every 32-bit guess missed.** 5753 has no
+  name in runelite-api yet, but it sits immediately before
+  `GE_TAX_SLOT_LONG_0 = 5754` — a block of long GE varps present in 1.13.1
+  and absent in 1.13.0. The same update that deleted the varbit created it.
+- **WHEN THE ID IS UNKNOWN, SCAN FOR A VALUE YOU ALREADY KNOW.** The suggested
+  price is in the feed and the operator types it into the box, so one of the
+  varps must equal it. `getVarps()` / `getVarpsLong()` are plain arrays and
+  the scan is microseconds. This beats reading the wiki, guessing from
+  another plugin, or waiting for runelite-api to name the field — and it is
+  a DIAGNOSTIC, not a mechanism: matching on value is how you find the varp
+  once, never how you read it every tick.
+- **`/geoffer` STAYS.** Same reasoning as `/widgets`, `/tick` and
+  `/motherlode`: it answered in one reading what three deploys of guessing
+  could not, and the next time Jagex moves something on that screen it is
+  already there. It dumps the container's text children beside the scan, so
+  the price has a second witness that needs no varp at all.

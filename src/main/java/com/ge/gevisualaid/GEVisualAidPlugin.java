@@ -1811,7 +1811,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.102";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.103";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -3432,43 +3432,46 @@ public class GEVisualAidPlugin extends Plugin
     // compiles against the 1.12.39 fallback pin - launch.bat's PINNED must be
     // 1.13.0 or newer. That is not a loss: the live game has no varbit 4398
     // any more, so an older client could not read the price either.
-    private static final int GE_SETUP_PRICE_VARP = 1043;
-
-    // 2.101 - THE PRICE READ MUST NOT BE ABLE TO KILL THE RESOLVE, AND IT
-    // MUST SAY WHERE IT GOT THE NUMBER.
+    // 2.103 - THE OFFER PRICE IS LONG VARP 5753, AND THIS ONE IS MEASURED.
     //
-    // 2.100 swapped varbit 4398 for `getVarpLongValue(1043)` on the strength
-    // of Flipping Copilot's own source - which carries a TODO saying they had
-    // not confirmed it either. Live, it throws a DIFFERENT exception:
-    //     IllegalArgumentException: varp 1043 is an int
-    // and because the read sat bare on the first line of resolveOfferScreen()
-    // that throw killed the whole resolve all over again, exactly as 4398 had.
-    // Two different causes, one identical symptom: every box blank and a
-    // flipper clicking nothing useful in a loop.
+    // Three versions guessed and two of them were wrong. 2.100 read varbit
+    // 4398 (deleted by the update - threw, killed the resolve). 2.101 read
+    // varp 1043 on the strength of Flipping Copilot's source, whose own TODO
+    // said they had not confirmed it - it returns 0 and `set_price` never
+    // cleared. 2.102 stopped guessing and MEASURED it: `/geoffer` scans every
+    // varp for the price Copilot has suggested, because Josh types exactly
+    // that number in. Selling at 2,006 with the offer screen open:
     //
-    // **THE REAL LESSON IS NOT WHICH VARP IT IS.** A number that one game
-    // update moved can move again, and this one sits where a throw costs the
-    // entire offer screen. So the read is wrapped, can only ever return a
-    // number, and NAMES ITS SOURCE in the feed - `ge_offer_price_source` is
-    // `varp_long`, `varp_int` or `unreadable`, and `ge_offer_price` is the
-    // value beside it, published every tick whether Copilot is suggesting or
-    // not. That is what makes it checkable against the screen without a
-    // deploy: set a price by hand and see whether the feed agrees.
+    //     geoffer_scan_target=2006
+    //     geoffer_scan_varps=              <- nothing in the 32-bit table
+    //     geoffer_scan_varps_long=5753     <- one hit, in the 64-bit table
+    //     geoffer_child_41=2,006 coins     <- and the screen agrees
     //
-    // varp 1043 is the varp varbit 4398 was defined on, which is why Copilot
-    // reached for it; runelite-api's own name for it (`TRADEREMOVED_OTHER`)
-    // is a stale cache label and not evidence either way. `varp_int` is the
-    // branch that answers today. The long attempt stays FIRST because the
-    // price outgrew 32 bits once already - when Jagex widens the varp, this
-    // follows with no change.
+    // **IT IS A LONG VARP, WHICH IS WHY EVERY 32-BIT GUESS MISSED.** 5753 has
+    // no name in runelite-api yet, but it sits immediately before
+    // `GE_TAX_SLOT_LONG_0 = 5754` - a block of long GE varps that exists in
+    // 1.13.1 and NOT in 1.13.0. The same update that deleted the varbit
+    // created this. The price outgrew 32 bits and moved house; a varbit
+    // cannot hold it and neither can an int varp.
+    //
+    // THE READ STILL CANNOT THROW AND STILL NAMES ITS SOURCE. That part of
+    // 2.101 was right even though its varp was not: this sits on the first
+    // line of resolveOfferScreen(), where any exception costs the whole offer
+    // screen, and the field is what let a wrong number be spotted as wrong
+    // rather than as a flipper looping. `ge_offer_price_source` reads
+    // `varp_long_5753`, `varp_int_5753` (if it is ever narrowed),
+    // `unreadable`, or `offline`, and `ge_offer_price` is published every
+    // tick beside it. `/geoffer` stays - it found this in one reading and it
+    // is how the next move gets found too.
+    private static final int GE_SETUP_PRICE_VARP_LONG = 5753;   // 2.103, measured
     private volatile String offerPriceSource = "not_read";
 
     private long readOfferPrice()
     {
         try
         {
-            long v = client.getVarpLongValue(GE_SETUP_PRICE_VARP);
-            offerPriceSource = "varp_long";
+            long v = client.getVarpLongValue(GE_SETUP_PRICE_VARP_LONG);
+            offerPriceSource = "varp_long_5753";
             return v;
         }
         catch (IllegalArgumentException stillAnIntVarp) { /* fall through */ }
@@ -3476,8 +3479,8 @@ public class GEVisualAidPlugin extends Plugin
 
         try
         {
-            long v = client.getVarpValue(GE_SETUP_PRICE_VARP);
-            offerPriceSource = "varp_int";
+            long v = client.getVarpValue(GE_SETUP_PRICE_VARP_LONG);
+            offerPriceSource = "varp_int_5753";
             return v;
         }
         catch (Throwable t)
