@@ -564,3 +564,47 @@ non-trivial change.
   one without leaving the feed. Not cached: three property reads and a concat
   is not an expensive rebuild, and this repo has twice been bitten by a guard
   over something that moved underneath it.
+
+- **A VARBIT THAT NO LONGER EXISTS THROWS, IT DOES NOT RETURN ZERO** (2.100,
+  2026-10-01). The game update deleted varbit **4398**, the GE new-offer
+  price. `client.getVarbitValue(4398)` raised `IndexOutOfBoundsException` on
+  the first line of `resolveOfferScreen()`, so it wrote NOTHING:
+  `target_price`, `target_quantity` and all four click boxes published empty
+  while the Copilot panel plainly showed a price. The flipper, in plugin mode,
+  had no box and looped on whatever it could find — clicking inventory slot 3,
+  `master`, `back`. **`resolve_error` is the only reason this took minutes**;
+  the V2.19 wrapper that catches the throw and names it earned its keep.
+- **THE GE OFFER PRICE IS NOW VARP 1043, READ AS A LONG.** Prices outgrew 32
+  bits — the same widening that took the RuneLite API int → long in 1.13.0 —
+  so Jagex dropped the varbit rather than truncate it. `getVarpLongValue(1043)`
+  is what Flipping Copilot's own source reads. **`getVarpLongValue` does not
+  exist before 1.13.0**, so launch.bat's `PINNED` went 1.12.39 → **1.13.0**;
+  the old pin would no longer compile and the fallback would have left the VM
+  with no client at all. Nothing is lost — the live game has no 4398 for an
+  older client to read either.
+- **THIS IS THE NO-LOOKUP-TABLE RULE, PAID IN FULL.** `4398` compiled happily
+  against a runelite-api that had already DELETED the constant naming it:
+  `VarbitID.GE_NEWOFFER_PRICE` is present in 1.12.39 and 1.13.0 and gone from
+  1.13.1. Written as the symbol, the 1.13.1 build would have failed at compile
+  time with a name on it, launch.bat would have pinned back, and the breakage
+  would have arrived as a build error instead of as a flipper clicking the
+  inventory in a loop. Every id on the GE path is a symbol now
+  (`GE_NEWOFFER_TYPE`, `GE_NEWOFFER_QUANTITY`, `GE_SELECTEDSLOT`,
+  `TRADINGPOST_SEARCH`, `CHATBOX_GE_SEARCH_RESULTS`).
+- **`CHATBOX_GE_SEARCH_RESULTS` MOVED IN THE SAME UPDATE** — 10616884 (162.52)
+  in 1.12.39 and 1.13.0, 10616885 (162.53) in 1.13.1. Hardcoded, it reads the
+  wrong child in silence and `search_item` is unresolvable for ever. That is
+  the quiet half of the same bug: one id threw and was found in minutes, the
+  other would have mislabelled indefinitely.
+- **WIDEN THE SUGGESTION PRICE TOO.** `Suggestion.price` is a `long` in
+  Copilot's model, and `getIntSafe` truncates above ~2.1b in silence — the
+  truncated value is then compared against the real offer price, so
+  `set_price` would fire for ever on an expensive item without ever matching.
+  2.100 adds `getLongSafe` and uses it for both `sugPrice` and the published
+  `target_price`. Same call as 2.97.
+- **READ THE THIRD-PARTY PLUGIN'S SOURCE WHEN THE GAME MOVES UNDER BOTH OF
+  YOU.** Flipping Copilot's own `GrandExchange.java` named varp 1043, the long
+  read, and the unchanged offer-container child indices (50 / 51 / 54 / 58,
+  back `GE_OFFERS,4`) in one file. Josh dropped the source in
+  `osrs-suite/incoming/` and it answered in minutes what live observation
+  would have taken a morning to narrow down.

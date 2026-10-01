@@ -24,6 +24,7 @@ import net.runelite.api.events.ProjectileMoved;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.ObjectID;
+import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.Skill;
 import net.runelite.api.DecorativeObject;
@@ -50,6 +51,7 @@ import net.runelite.api.events.GameObjectDespawned;
 import net.runelite.api.events.WallObjectSpawned;
 import net.runelite.api.events.WallObjectDespawned;
 import java.time.LocalDate;
+import net.runelite.api.widgets.ComponentID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.RuneLiteProperties;
 import net.runelite.client.config.ConfigManager;
@@ -1809,7 +1811,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.99";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.100";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -3263,7 +3265,9 @@ public class GEVisualAidPlugin extends Plugin
         String  itemName    = getStringSafe(suggestion, "getName");
         int     itemId      = getIntSafe(suggestion, "getItemId");
         String  offerType   = getStringSafe(suggestion, "offerType");
-        int     targetPrice = getIntSafe(suggestion, "getPrice");
+        // 2.100: long, not int - this is the number the flipper TYPES into the
+        // price box, and getIntSafe would truncate it above ~2.1b in silence.
+        long    targetPrice = getLongSafe(suggestion, "getPrice");
         int     targetQty   = getIntSafe(suggestion, "getQuantity");
         boolean dumpAlert   = getBoolSafe(suggestion, "isDumpAlert");
 
@@ -3392,23 +3396,60 @@ public class GEVisualAidPlugin extends Plugin
                 + sugMeta);
     }
 
+    // 2.100 - THE GE OFFER PRICE IS NO LONGER A VARBIT, AND THE RAW NUMBER
+    // KILLED THE WHOLE RESOLVE.
+    //
+    // 2026-10-01's game update deleted varbit 4398. `getVarbitValue(4398)`
+    // does not return 0 for a varbit that is gone - it THROWS
+    // IndexOutOfBoundsException, which aborted resolveOfferScreen() before it
+    // wrote anything, so target_price, target_quantity and all four click
+    // boxes published EMPTY while the Copilot panel plainly showed a price.
+    // The flipper, in plugin mode, had no box to click and looped on whatever
+    // it could find. Only `resolve_error` said why, and it is the sole reason
+    // this took minutes rather than a day - the V2.19 wrapper earning its keep.
+    //
+    // The price is now VARP 1043, READ AS A LONG. Prices outgrew 32 bits -
+    // the same widening that took RuneLite's GE API int -> long in 1.13.0 -
+    // and a varbit cannot carry it, so Jagex dropped the varbit rather than
+    // truncating it. runelite-api agrees: `VarbitID.GE_NEWOFFER_PRICE` exists
+    // in 1.12.39 and 1.13.0 and is GONE from 1.13.1. Flipping Copilot's own
+    // source reads `getVarpLongValue(1043)` for exactly this.
+    //
+    // **THIS IS WHY THE RULE SAYS SYMBOLS, NOT NUMBERS.** `4398` compiled
+    // happily against an API that had already deleted the constant naming it.
+    // Had this line said `VarbitID.GE_NEWOFFER_PRICE`, the 1.13.1 build would
+    // have FAILED at compile time, launch.bat would have pinned back, and the
+    // breakage would have arrived as a build error with a name on it instead
+    // of as a flipper clicking inventory slot 3 in a loop. Every id here is a
+    // symbol now.
+    //
+    // `getVarpLongValue` DOES NOT EXIST BEFORE 1.13.0, so this file no longer
+    // compiles against the 1.12.39 fallback pin - launch.bat's PINNED must be
+    // 1.13.0 or newer. That is not a loss: the live game has no varbit 4398
+    // any more, so an older client could not read the price either.
+    private static final int GE_SETUP_PRICE_VARP = 1043;
+
     private void resolveOfferScreen(Object sug, String ui, String slotStr, String invStr,
                                     String sugMeta, String itemName,
                                     boolean dumpAlert) throws Exception
     {
-        String  offerType     = client.getVarbitValue(4397) == 1 ? "sell" : "buy";
-        int     currentItemId = client.getVarpValue(1151);
-        int     offerPrice    = client.getVarbitValue(4398);
-        int     offerQuantity = client.getVarbitValue(4396);
-        boolean searchOpen    = client.getWidget(10616884) != null
-                && !client.getWidget(10616884).isHidden();
+        String  offerType     = client.getVarbitValue(VarbitID.GE_NEWOFFER_TYPE) == 1 ? "sell" : "buy";
+        int     currentItemId = client.getVarpValue(VarPlayerID.TRADINGPOST_SEARCH);
+        long    offerPrice    = client.getVarpLongValue(GE_SETUP_PRICE_VARP);
+        int     offerQuantity = client.getVarbitValue(VarbitID.GE_NEWOFFER_QUANTITY);
+        // 2.100: CHATBOX_GE_SEARCH_RESULTS MOVED TODAY TOO - 10616884 (162.52)
+        // in 1.12.39 and 1.13.0, 10616885 (162.53) in 1.13.1. Hardcoded, it
+        // would have read the wrong child in silence and left `search_item`
+        // permanently unresolvable, which is the quieter half of the same bug.
+        Widget  searchResults = client.getWidget(ComponentID.CHATBOX_GE_SEARCH_RESULTS);
+        boolean searchOpen    = searchResults != null && !searchResults.isHidden();
 
         // V2.19: were raw invoke() — a single renamed getter threw, killed
         // resolveAndWrite(), and froze the state file entirely. These are the
         // same getters resolveAndWrite() already reads via the safe wrappers.
         String  sugType   = getStringSafe(sug, "offerType");
         int     sugItemId = getIntSafe(sug, "getItemId");
-        int     sugPrice  = getIntSafe(sug, "getPrice");
+        long    sugPrice  = getLongSafe(sug, "getPrice");   // 2.100: Suggestion.price is long
         int     sugQty    = getIntSafe(sug, "getQuantity");
 
         boolean typeMatches = offerType.equals(sugType);
@@ -3490,7 +3531,7 @@ public class GEVisualAidPlugin extends Plugin
         }
         else if (typeMatches && currentItemId == -1 && searchOpen)
         {
-            Widget results = client.getWidget(10616884);
+            Widget results = searchResults;
             if (results != null)
             {
                 String name = (String) invoke(sug, "getName");
@@ -3958,7 +3999,7 @@ public class GEVisualAidPlugin extends Plugin
         // 4439 = the GE slot currently being configured (0 = none) — the same
         // signal getOpenSlot() already uses, and stable across widget changes.
         // Widget check kept as a secondary so nothing regresses if it returns.
-        int     geOpenSlotVb  = client.getVarbitValue(4439);
+        int     geOpenSlotVb  = client.getVarbitValue(VarbitID.GE_SELECTEDSLOT);
         boolean geOfferScreen = geOpenSlotVb > 0 || isVisible(465, 26);
         boolean geHistoryOpen = isVisible(383, 0);
         boolean bankOpen      = isVisible(12, 0);
@@ -4016,7 +4057,7 @@ public class GEVisualAidPlugin extends Plugin
         int    geSlotOpen  = 0;
         if (geOfferScreen)
         {
-            geOfferType = client.getVarbitValue(4397) == 1 ? "sell" : "buy";
+            geOfferType = client.getVarbitValue(VarbitID.GE_NEWOFFER_TYPE) == 1 ? "sell" : "buy";
             // V2.18: varbit 4439 is already 1-8 (0 = none). Identical value to
             // the old getOpenSlot()+1, without the second varbit read.
             geSlotOpen  = geOpenSlotVb;
@@ -13505,11 +13546,27 @@ public class GEVisualAidPlugin extends Plugin
     private boolean isAbort(Object s)  throws Exception { return (boolean) invoke(s, "isAbortSuggestion"); }
     private boolean isModify(Object s) throws Exception { return (boolean) invoke(s, "isModifySuggestion"); }
     private boolean isWait(Object s)   throws Exception { return (boolean) invoke(s, "isWaitSuggestion"); }
-    private int     getOpenSlot()      { return client.getVarbitValue(4439) - 1; }
+    private int     getOpenSlot()      { return client.getVarbitValue(VarbitID.GE_SELECTEDSLOT) - 1; }
 
     private String getStringSafe(Object o, String m)
     {
         try { return (String) invoke(o, m); } catch (Exception e) { return ""; }
+    }
+
+    // 2.100: THE SUGGESTION PRICE IS 64-BIT AND MUST STAY THAT WAY.
+    // `Suggestion.price` is a `long` in Copilot's own model. getIntSafe()
+    // unboxes via Number and calls intValue(), which SILENTLY TRUNCATES above
+    // ~2.1b - and the truncated value would be compared against the real
+    // offer price, so set_price would fire for ever on an expensive item
+    // without ever matching. Same rule as 2.97: widen, do not cast.
+    private long getLongSafe(Object o, String m)
+    {
+        try
+        {
+            Object v = invoke(o, m);
+            return (v instanceof Number) ? ((Number) v).longValue() : -1L;
+        }
+        catch (Exception e) { return -1L; }
     }
 
     private int getIntSafe(Object o, String m)
