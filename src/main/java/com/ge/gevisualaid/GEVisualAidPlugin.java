@@ -1811,7 +1811,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.100";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.101";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -3429,13 +3429,70 @@ public class GEVisualAidPlugin extends Plugin
     // any more, so an older client could not read the price either.
     private static final int GE_SETUP_PRICE_VARP = 1043;
 
+    // 2.101 - THE PRICE READ MUST NOT BE ABLE TO KILL THE RESOLVE, AND IT
+    // MUST SAY WHERE IT GOT THE NUMBER.
+    //
+    // 2.100 swapped varbit 4398 for `getVarpLongValue(1043)` on the strength
+    // of Flipping Copilot's own source - which carries a TODO saying they had
+    // not confirmed it either. Live, it throws a DIFFERENT exception:
+    //     IllegalArgumentException: varp 1043 is an int
+    // and because the read sat bare on the first line of resolveOfferScreen()
+    // that throw killed the whole resolve all over again, exactly as 4398 had.
+    // Two different causes, one identical symptom: every box blank and a
+    // flipper clicking nothing useful in a loop.
+    //
+    // **THE REAL LESSON IS NOT WHICH VARP IT IS.** A number that one game
+    // update moved can move again, and this one sits where a throw costs the
+    // entire offer screen. So the read is wrapped, can only ever return a
+    // number, and NAMES ITS SOURCE in the feed - `ge_offer_price_source` is
+    // `varp_long`, `varp_int` or `unreadable`, and `ge_offer_price` is the
+    // value beside it, published every tick whether Copilot is suggesting or
+    // not. That is what makes it checkable against the screen without a
+    // deploy: set a price by hand and see whether the feed agrees.
+    //
+    // varp 1043 is the varp varbit 4398 was defined on, which is why Copilot
+    // reached for it; runelite-api's own name for it (`TRADEREMOVED_OTHER`)
+    // is a stale cache label and not evidence either way. `varp_int` is the
+    // branch that answers today. The long attempt stays FIRST because the
+    // price outgrew 32 bits once already - when Jagex widens the varp, this
+    // follows with no change.
+    private volatile String offerPriceSource = "not_read";
+
+    private long readOfferPrice()
+    {
+        try
+        {
+            long v = client.getVarpLongValue(GE_SETUP_PRICE_VARP);
+            offerPriceSource = "varp_long";
+            return v;
+        }
+        catch (IllegalArgumentException stillAnIntVarp) { /* fall through */ }
+        catch (Throwable t) { /* fall through */ }
+
+        try
+        {
+            long v = client.getVarpValue(GE_SETUP_PRICE_VARP);
+            offerPriceSource = "varp_int";
+            return v;
+        }
+        catch (Throwable t)
+        {
+            // -1 rather than 0: 0 is a REAL price (an untouched offer box) and
+            // would read as "the price is already set to nothing", which is a
+            // different instruction to every consumer than "I could not read
+            // it". Same rule as mlm_eta_source withholding a guess.
+            offerPriceSource = "unreadable";
+            return -1L;
+        }
+    }
+
     private void resolveOfferScreen(Object sug, String ui, String slotStr, String invStr,
                                     String sugMeta, String itemName,
                                     boolean dumpAlert) throws Exception
     {
         String  offerType     = client.getVarbitValue(VarbitID.GE_NEWOFFER_TYPE) == 1 ? "sell" : "buy";
         int     currentItemId = client.getVarpValue(VarPlayerID.TRADINGPOST_SEARCH);
-        long    offerPrice    = client.getVarpLongValue(GE_SETUP_PRICE_VARP);
+        long    offerPrice    = readOfferPrice();
         int     offerQuantity = client.getVarbitValue(VarbitID.GE_NEWOFFER_QUANTITY);
         // 2.100: CHATBOX_GE_SEARCH_RESULTS MOVED TODAY TOO - 10616884 (162.52)
         // in 1.12.39 and 1.13.0, 10616885 (162.53) in 1.13.1. Hardcoded, it
@@ -4054,6 +4111,10 @@ public class GEVisualAidPlugin extends Plugin
         boolean settingsOpen = isVisible(116, 0);
 
         String geOfferType = "none";
+        // 2.101: published every tick, independent of whether Copilot is
+        // suggesting anything, so the number can be checked against the price
+        // on screen without waiting for a suggestion or a deploy.
+        long   geOfferPrice = -1;
         int    geSlotOpen  = 0;
         if (geOfferScreen)
         {
@@ -4061,6 +4122,7 @@ public class GEVisualAidPlugin extends Plugin
             // V2.18: varbit 4439 is already 1-8 (0 = none). Identical value to
             // the old getOpenSlot()+1, without the second varbit read.
             geSlotOpen  = geOpenSlotVb;
+            geOfferPrice = readOfferPrice();
             if (geSlotOpen < 0) geSlotOpen = 0;
         }
 
@@ -4125,6 +4187,8 @@ public class GEVisualAidPlugin extends Plugin
                 + "ge_main_page=" + geMainPage + "\n"
                 + "ge_offer_screen=" + geOfferScreen + "\n"
                 + "ge_offer_type=" + geOfferType + "\n"
+                + "ge_offer_price=" + geOfferPrice + "\n"              // 2.101
+                + "ge_offer_price_source=" + offerPriceSource + "\n"   // 2.101
                 + "ge_slot_open=" + geSlotOpen + "\n"
                 + "ge_history_open=" + geHistoryOpen + "\n"
                 + "bank_open=" + bankOpen + "\n"
@@ -4244,6 +4308,7 @@ public class GEVisualAidPlugin extends Plugin
                 + "player_idle_seconds=0\ncopilot_idle_seconds=0\n"
                 + "server_restart_seconds=-1\n"
                 + "ge_main_page=false\nge_offer_screen=false\nge_offer_type=none\nge_slot_open=0\n"
+                + "ge_offer_price=-1\nge_offer_price_source=offline\n"   // 2.101
                 + "ge_history_open=false\nbank_open=false\nbank_pin_open=false\n"
                 + "inventory_open=false\nequipment_open=false\nprayer_open=false\n"
                 + "magic_open=false\ncombat_options_open=false\nskills_open=false\n"

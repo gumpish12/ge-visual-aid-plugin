@@ -608,3 +608,26 @@ non-trivial change.
   back `GE_OFFERS,4`) in one file. Josh dropped the source in
   `osrs-suite/incoming/` and it answered in minutes what live observation
   would have taken a morning to narrow down.
+- **2.100 FIXED THE VARBIT AND KEPT THE SHAPE OF THE BUG** (2.101). Swapping
+  `getVarbitValue(4398)` for `getVarpLongValue(1043)` traded
+  `IndexOutOfBoundsException: Varbit 4398 does not exist` for
+  `IllegalArgumentException: varp 1043 is an int` — a different cause and an
+  identical symptom, because the read still sat BARE on the first line of
+  `resolveOfferScreen()` where any throw costs the whole offer screen. **The
+  lesson was never which varp it is.** `readOfferPrice()` now tries the long
+  varp, falls back to the int varp, and can only ever return a number;
+  `ge_offer_price_source` says which branch answered (`varp_long` /
+  `varp_int` / `unreadable` / `offline`) and `ge_offer_price` is published
+  every tick beside it, suggestion or no suggestion — so the number is
+  checkable against the price on screen without a deploy. It returns **-1,
+  not 0**, when unreadable: 0 is a real price and would read as "already set
+  to nothing".
+- **A TODO IN SOMEONE ELSE'S SOURCE IS NOT A CONFIRMATION.** Flipping
+  Copilot's `getOfferPrice()` carried *"TODO: Confirm that varp 1043 holds the
+  long setup price after the game update"* and I used it as though it were
+  settled. It was their guess, written the same day, and their fallback
+  (`getVarbitValue(GE_NEWOFFER_PRICE)`) cannot work either — that constant is
+  gone from 1.13.1. Read the TODO as what it is. `varp_int` is the branch that
+  answers today; the long attempt stays first so a future widening needs no
+  change. runelite-api's own name for 1043 (`TRADEREMOVED_OTHER`) is a stale
+  cache label and is not evidence either way.
