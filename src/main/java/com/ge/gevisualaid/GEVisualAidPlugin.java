@@ -1811,7 +1811,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.101";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.102";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -3074,6 +3074,10 @@ public class GEVisualAidPlugin extends Plugin
             log.warn("GEVisualAid resolve error", e);
             writeResolveFailureState(e);
         }
+
+        // 2.102: the offer-price hunt. AFTER resolveAndWrite so the scan uses
+        // THIS tick's suggested price. Client thread; offer screen only.
+        rebuildGeOfferDump(geOfferScreenNow(), lastSuggestedPrice);
     }
 
     // V2.19: Last-resort state write. Called when resolveAndWrite() throws, so
@@ -3268,6 +3272,7 @@ public class GEVisualAidPlugin extends Plugin
         // 2.100: long, not int - this is the number the flipper TYPES into the
         // price box, and getIntSafe would truncate it above ~2.1b in silence.
         long    targetPrice = getLongSafe(suggestion, "getPrice");
+        lastSuggestedPrice  = targetPrice;                 // 2.102: for /geoffer
         int     targetQty   = getIntSafe(suggestion, "getQuantity");
         boolean dumpAlert   = getBoolSafe(suggestion, "isDumpAlert");
 
@@ -13207,6 +13212,7 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/widgets", this::handleWidgetsRequest); // 2.81
             httpServer.createContext("/tick",   this::handleTickRequest);     // 2.85
             httpServer.createContext("/motherlode", this::handleMotherlodeRequest); // 2.87
+            httpServer.createContext("/geoffer", this::handleGeOfferRequest); // 2.102
             httpServer.createContext("/loadout", this::handleLoadoutRequest);   // 2.95
             httpServer.createContext("/hop",    this::handleHopRequest);
             httpServer.createContext("/agility", this::handleAgilityRequest);
@@ -13466,6 +13472,138 @@ public class GEVisualAidPlugin extends Plugin
             log.warn("GEVisualAid loadout rebuild error: {}", t.getMessage());
             loadoutBlock = "loadout_state=error\n";
         }
+    }
+
+    // 2.102 - `/geoffer`: FIND WHERE THE OFFER PRICE ACTUALLY LIVES.
+    //
+    // 2.100 and 2.101 both guessed, from Flipping Copilot's source, that the
+    // price is varp 1043. It reads, it does not throw any more, and it is
+    // still WRONG: with 5006 typed into the box the resolve stayed on
+    // `set_price` instead of moving to `confirm`, so the number coming back
+    // is not the number on screen. Two guesses is enough - this measures it.
+    //
+    // THE TRICK IS THAT WE ALREADY KNOW THE ANSWER. Copilot suggests a price,
+    // Josh types exactly that price, and `getVarps()` is a plain int array -
+    // so scanning every varp for the suggested value names the varp that
+    // holds it, live, with no cache dump and no guessing. The same scan runs
+    // over `getVarpsLong()` for when the price does widen. Several varps can
+    // hold the same number by coincidence, which is why the dump lists ALL of
+    // them and the offer container's text beside it rather than picking one.
+    //
+    // Built on the CLIENT THREAD in onGameTick like /loadout (2.96) - widgets
+    // and varps are client-thread state and this is served to an HTTP thread.
+    // It only builds while the offer screen is open, so it costs nothing the
+    // rest of the time.
+    //
+    // This is a DIAGNOSTIC, not a mechanism: matching on value is how you
+    // find the varp once, not how you read it every tick.
+    private volatile String geOfferDump = "geoffer_state=no_reading_yet\n";
+
+    // 2.102: the suggested price as of the last resolve, for the /geoffer
+    // varp scan. A diagnostic hand-off, not state anything acts on.
+    private volatile long lastSuggestedPrice = -1;
+
+    // 2.102: same test the state header uses - varbit first, widget as the
+    // secondary, so it agrees with ge_offer_screen rather than being a
+    // second opinion that can disagree with it.
+    private boolean geOfferScreenNow()
+    {
+        try { return client.getVarbitValue(VarbitID.GE_SELECTEDSLOT) > 0 || isVisible(465, 26); }
+        catch (Throwable t) { return false; }
+    }
+
+    private void rebuildGeOfferDump(boolean offerScreenOpen, long suggestedPrice)
+    {
+        if (!offerScreenOpen)
+        {
+            geOfferDump = "geoffer_state=offer_screen_closed\n";
+            return;
+        }
+
+        StringBuilder r = new StringBuilder(2048);
+        try
+        {
+            r.append("geoffer_state=ok\n");
+            r.append("geoffer_price_read=").append(readOfferPrice()).append("\n");
+            r.append("geoffer_price_source=").append(offerPriceSource).append("\n");
+            r.append("geoffer_quantity_varbit=")
+                    .append(client.getVarbitValue(VarbitID.GE_NEWOFFER_QUANTITY)).append("\n");
+            r.append("geoffer_scan_target=").append(suggestedPrice).append("\n");
+
+            // Which varps currently hold the suggested price. With a price
+            // typed in by hand, one of these is the one we want.
+            if (suggestedPrice > 0)
+            {
+                StringBuilder hitsInt = new StringBuilder();
+                try
+                {
+                    int[] varps = client.getVarps();
+                    if (varps != null)
+                        for (int i = 0; i < varps.length; i++)
+                            if (varps[i] == suggestedPrice)
+                                hitsInt.append(hitsInt.length() == 0 ? "" : ",").append(i);
+                }
+                catch (Throwable t) { hitsInt.append("read_error"); }
+                r.append("geoffer_scan_varps=").append(hitsInt).append("\n");
+
+                StringBuilder hitsLong = new StringBuilder();
+                try
+                {
+                    long[] lv = client.getVarpsLong();
+                    if (lv != null)
+                        for (int i = 0; i < lv.length; i++)
+                            if (lv[i] == suggestedPrice)
+                                hitsLong.append(hitsLong.length() == 0 ? "" : ",").append(i);
+                }
+                catch (Throwable t) { hitsLong.append("read_error"); }
+                r.append("geoffer_scan_varps_long=").append(hitsLong).append("\n");
+            }
+            else
+            {
+                r.append("geoffer_scan_varps=no_suggestion\n");
+                r.append("geoffer_scan_varps_long=no_suggestion\n");
+            }
+
+            // The offer container's own text, as a second route to the price
+            // and the thing to fall back on if no varp turns out to carry it.
+            Widget c = client.getWidget(InterfaceID.GE_OFFERS, 26);
+            if (c == null)
+            {
+                r.append("geoffer_container=not_loaded\n");
+            }
+            else
+            {
+                Widget[] kids = c.getChildren();
+                r.append("geoffer_container_children=")
+                        .append(kids == null ? -1 : kids.length).append("\n");
+                if (kids != null)
+                    for (int i = 0; i < kids.length; i++)
+                    {
+                        Widget k = kids[i];
+                        if (k == null) continue;
+                        String txt = "";
+                        try { txt = k.getText(); } catch (Throwable ignored) { }
+                        if (txt == null || txt.isEmpty()) continue;   // text children only
+                        r.append("geoffer_child_").append(i)
+                                .append(txt.contains("\n") ? "=<multiline>" : ("=" + txt))
+                                .append(k.isHidden() ? "   [hidden]" : "")
+                                .append("\n");
+                    }
+            }
+        }
+        catch (Throwable t)
+        {
+            r.append("geoffer_state=error\ngeoffer_error=")
+                    .append(t.getClass().getSimpleName()).append(": ").append(t.getMessage())
+                    .append("\n");
+        }
+        geOfferDump = r.toString();
+    }
+
+    private void handleGeOfferRequest(HttpExchange ex)
+    {
+        try { sendPlain(ex, "plugin_output_version=" + PLUGIN_OUTPUT_VERSION + "\n" + geOfferDump); }
+        catch (Throwable t) { log.warn("GEVisualAid /geoffer error: {}", t.getMessage()); }
     }
 
     private void handleLoadoutRequest(HttpExchange ex)
