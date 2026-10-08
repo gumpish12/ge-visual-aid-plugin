@@ -661,3 +661,48 @@ non-trivial change.
   could not, and the next time Jagex moves something on that screen it is
   already there. It dumps the container's text children beside the scan, so
   the price has a second witness that needs no varp at all.
+
+- **A TOTAL THAT IS A SUM SHOULD PUBLISH ITS TERMS, AND THEN CHECK THEM**
+  (2.104). `portfolio_unrealised_profit` shipped in 2.5 as one number per
+  account and stayed one number for ninety-nine releases. One number cannot
+  say whether +14.1m is four calm holds or one winner hiding three losers,
+  which is what Josh actually wanted to know. Copilot already had the
+  breakdown — `PortfolioStateRS.buildSummaryData()` is a loop adding
+  `portfolioUnrealizedProfit()` over the cards where `isInPortfolio()` — so
+  `portfolio_items` is **the terms of the sum already on the dashboard**,
+  read from the same map with the same filter. Not a second calculation of
+  the same quantity: the first one taken apart. That is the only reason it
+  is safe, and it is what makes it checkable.
+- **SO IT CHECKS ITSELF, AND THE CONSUMER PRINTS THE FAILURE.**
+  `portfolio_items_profit_sum` is compared with the summary total and
+  `portfolio_items_check` says `ok` or `mismatch:<delta>`; the tracker shows
+  a mismatch in red instead of the rows. A breakdown that does not add up to
+  its own headline is the mislabel-rather-than-fail-loudly trap in its purest
+  form — it would look authoritative and be wrong.
+- **THE SUM IS OVER EVERY HELD ROW, NEVER THE ONES THAT FIT.** `PF_ITEM_CAP`
+  is a runaway stop (40), not a budget — same call as the widget cap. Had the
+  total been added up from the rows actually printed, a capped portfolio would
+  disagree with Copilot's own figure and **the check would have blamed Copilot
+  for this plugin's truncation**. Proved red by moving one line.
+- **USE THE OTHER PLUGIN'S OWN ARITHMETIC, NOT YOUR COPY OF IT.** Per-item
+  profit calls `portfolioUnrealizedProfit()` rather than `qty * unitProfit`
+  computed here: their method treats a null unit profit as zero, and
+  reimplementing that is exactly how two numbers drift apart in silence.
+- **`javap` THE INSTALLED JAR, NOT THE SOURCE IN `incoming/`.** All nine
+  reflected methods were confirmed against
+  `.runelite/plugins/flipping-copilot_*.jar`. 2.99 established that the hub
+  serves a different build per client version, so Josh's dropped source and
+  the jar the client actually loads are **not the same authority** — the
+  source answers what the methods mean, the jar answers whether they exist.
+- **THE SEPARATORS MUST NOT BE ABLE TO APPEAR IN A VALUE.** Rows are
+  `:`-delimited inside a `|`-delimited list, so `safeInvokeName` strips both
+  out of item names. No OSRS item name holds either today; that is not a
+  reason to let one through tomorrow and shift all six numbers after it. The
+  tracker's parser also reads the numeric fields **from the end** for the
+  same reason — same lesson as the `/filter` summary line that could not be
+  parsed because an ordinary filter value contained its own punctuation.
+- **AND THE BLANK SAYS WHY**: `ok` / `empty` / `offline` / `no_copilot` /
+  `no_state` / `no_map` / `read_error:<x>`. Logged out reports `offline`
+  rather than `no_copilot`, because blaming Copilot for the client sitting at
+  the login screen sends you looking in the wrong place. A VM with no source
+  field at all is an older plugin, and the tracker says so in those words.
