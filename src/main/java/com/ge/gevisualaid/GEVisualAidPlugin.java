@@ -1811,7 +1811,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.103";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.104";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -4219,6 +4219,7 @@ public class GEVisualAidPlugin extends Plugin
                 + "ge_slots_value_gp=" + geValue + "\n"
                 + "total_wealth_gp=" + totalWealth + "\n"
                 + buildPortfolioState()
+                + buildPortfolioItemsState()
                 + buildClerkState()
                 + buildCopilotPreferencesState()
                 + buildApmAndMembershipState()
@@ -4326,6 +4327,15 @@ public class GEVisualAidPlugin extends Plugin
                 + "inventory_value_gp=0\nbank_value_gp=0\nequipment_value_gp=0\n"
                 + "ge_slots_value_gp=0\ntotal_wealth_gp=0\n"
                 + buildPortfolioState()
+                // Logged out there is no portfolio to read, and "no_copilot"
+                // would blame Copilot for the client sitting at the login
+                // screen. Name the real reason. (2.104)
+                + "portfolio_items_source=offline\n"
+                + "portfolio_items_count=0\n"
+                + "portfolio_items_dropped=0\n"
+                + "portfolio_items_profit_sum=0\n"
+                + "portfolio_items_check=offline\n"
+                + "portfolio_items=\n"
                 + buildClerkState()
                 + buildCopilotPreferencesState()
                 + buildApmAndMembershipState()
@@ -14354,6 +14364,157 @@ public class GEVisualAidPlugin extends Plugin
                 + "portfolio_cash_value="       + s[2] + "\n"
                 + "portfolio_assets_value="     + s[3] + "\n"
                 + "portfolio_locked_buy_cash="  + s[4] + "\n";
+    }
+
+    /**
+     * 2.104 — THE PORTFOLIO TOTAL IS A SUM, SO PUBLISH ITS TERMS.
+     *
+     * Josh: "rather than just credit 14.1m gp, under it, have what items are
+     * being held and how much current profit or loss etc?"
+     *
+     * `portfolio_unrealised_profit` has shipped since 2.5 as one number per
+     * account, and one number cannot say whether +14.1m is four calm holds or
+     * one big winner hiding three losers. Flipping Copilot already has the
+     * breakdown: PortfolioStateRS.buildSummaryData() is
+     *
+     *     for (PortfolioItemCardData item : map.values())
+     *         if (item.isInPortfolio())
+     *             unrealizedProfit += item.portfolioUnrealizedProfit();
+     *
+     * so the rows below are the TERMS OF THE SUM Josh is already looking at,
+     * read from the same map with the same filter. That is the whole reason
+     * this is safe: it is not a second calculation of the same quantity, it
+     * is the first one taken apart.
+     *
+     * AND IT CHECKS ITSELF. `portfolio_items_profit_sum` is added up here and
+     * compared with `portfolio_unrealised_profit`; `portfolio_items_check`
+     * reports `ok` or `mismatch:<delta>`. A breakdown that does not add up to
+     * the headline is the mislabel-rather-than-fail-loudly trap in its purest
+     * form - it would look authoritative and be wrong - so it says so instead.
+     *
+     * The per-item profit uses FC's OWN portfolioUnrealizedProfit() rather
+     * than qty * unitProfit computed here. Their method treats a null unit
+     * profit as zero, and reimplementing that is how the two drift apart.
+     *
+     * ONE PIPE-SEPARATED FIELD, not N numbered ones: this has to cross into
+     * Flipping.ahk, and `untracked_inv_list` already set that precedent in
+     * 2.6. Rows are sorted by absolute profit, biggest first, so the cap
+     * below keeps the holds that matter rather than an arbitrary handful.
+     */
+    private static final int PF_ITEM_CAP = 40;
+
+    private String buildPortfolioItemsState()
+    {
+        String source;
+        StringBuilder rows = new StringBuilder();
+        int count = 0;
+        long sum = 0L;
+        int dropped = 0;
+
+        try
+        {
+            Object portfolioState = getPortfolioState();
+            if (profitCalculator == null)      source = "no_copilot";
+            else if (portfolioState == null)   source = "no_state";
+            else
+            {
+                Object mapObj = portfolioState.getClass()
+                        .getMethod("getItemCardDataByItemId").invoke(portfolioState);
+                if (!(mapObj instanceof java.util.Map)) source = "no_map";
+                else
+                {
+                    java.util.Map<?, ?> rawMap = (java.util.Map<?, ?>) mapObj;
+
+                    // Collect first, sort second. Only held rows are kept, so
+                    // the sum below is over exactly what FC's own summary sums.
+                    java.util.List<long[]>   nums  = new java.util.ArrayList<>();
+                    java.util.List<String>   names = new java.util.ArrayList<>();
+                    for (Object cardData : rawMap.values())
+                    {
+                        if (cardData == null) continue;
+                        Class<?> cls = cardData.getClass();
+                        if (!Boolean.TRUE.equals(safeInvokeBool(cardData, cls, "isInPortfolio"))) continue;
+
+                        long qty = safeInvokeLong(cardData, cls, "getPortfolioQuantity");
+                        if (qty <= 0) continue;   // isInPortfolio() IS qty>0, but never trust that twice
+
+                        long profit = safeInvokeLong(cardData, cls, "portfolioUnrealizedProfit");
+                        nums.add(new long[]{
+                                safeInvokeLong(cardData, cls, "getItemId"),
+                                qty,
+                                safeInvokeLong(cardData, cls, "getUnitBuyPrice"),
+                                safeInvokeLong(cardData, cls, "getPostTaxSellUnitPrice"),
+                                safeInvokeLong(cardData, cls, "getUnrealizedUnitProfit"),
+                                profit,
+                                safeInvokeLong(cardData, cls, "getHeldMinutes")
+                        });
+                        names.add(safeInvokeName(cardData, cls));
+                        sum += profit;            // summed over ALL held rows, never over the capped subset
+                    }
+
+                    // Sort both lists together by |profit| descending.
+                    Integer[] order = new Integer[nums.size()];
+                    for (int i = 0; i < order.length; i++) order[i] = i;
+                    java.util.Arrays.sort(order, (a, b) ->
+                            Long.compare(Math.abs(nums.get(b)[5]), Math.abs(nums.get(a)[5])));
+
+                    for (Integer idx : order)
+                    {
+                        if (count >= PF_ITEM_CAP) { dropped++; continue; }
+                        long[] n = nums.get(idx);
+                        if (count > 0) rows.append('|');
+                        rows.append(n[0]).append(':').append(names.get(idx));
+                        for (int k = 1; k < n.length; k++) rows.append(':').append(n[k]);
+                        count++;
+                    }
+                    source = nums.isEmpty() ? "empty" : "ok";
+                }
+            }
+        }
+        catch (Throwable t)
+        {
+            // A throw here must not reach onGameTick: the .txt write happens
+            // after this and a frozen file is indistinguishable from a dead
+            // plugin. Same reasoning as the 2.101 offer-price wrapper.
+            source = "read_error:" + t.getClass().getSimpleName();
+            rows.setLength(0);
+            count = 0;
+            sum = 0L;
+        }
+
+        // The self-check. getPortfolioSummary() is the number Josh already
+        // sees on the dashboard; these rows have to add up to it.
+        String check;
+        long[] s = getPortfolioSummary();
+        if (s == null)                 check = "no_summary";
+        else if (s[1] == sum)          check = "ok";
+        else                           check = "mismatch:" + (sum - s[1]);
+
+        return "portfolio_items_source=" + source + "\n"
+                + "portfolio_items_count=" + count + "\n"
+                + "portfolio_items_dropped=" + dropped + "\n"
+                + "portfolio_items_profit_sum=" + sum + "\n"
+                + "portfolio_items_check=" + check + "\n"
+                + "portfolio_items=" + rows + "\n";
+    }
+
+    /**
+     * The row separators are ':' and '|', so a name containing either would
+     * silently shift every field after it - the same shape as the /filter
+     * summary line that could not be parsed because an ordinary filter value
+     * contained its punctuation. No OSRS item name holds these today; that is
+     * not a reason to let one through tomorrow.
+     */
+    private String safeInvokeName(Object target, Class<?> cls)
+    {
+        try
+        {
+            Object v = cls.getMethod("getItemName").invoke(target);
+            if (v == null) return "?";
+            String n = v.toString().replace(':', ' ').replace('|', ' ').replace('\n', ' ').trim();
+            return n.isEmpty() ? "?" : n;
+        }
+        catch (Throwable t) { return "?"; }
     }
 
     /**
