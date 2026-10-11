@@ -1811,7 +1811,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.105";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.106";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -14433,6 +14433,57 @@ public class GEVisualAidPlugin extends Plugin
      * below keeps the holds that matter rather than an arbitrary handful.
      */
     /**
+     * 2.106 — "10M EXPECTED IN THE GE AND 10M IN HOLDS" IS 10M, NOT 20M.
+     *
+     * Josh: *"what id see sometimes is 10m expected profit in the ge, and 10m
+     * in holds. So id think there’s 20m to be earned but it’s the same."*
+     *
+     * He is right, and the suite has been inviting that reading since V9.01,
+     * where the tracker’s own comment claims the two are "distinct". They are
+     * not. Read in Copilot’s `ProfitCalculator.getProfitByItemName`, which is
+     * what feeds every `slot_N_copilot_profit` and therefore the GE expected
+     * total:
+     *
+     *     if (offer == null || !offer.getOfferStatus().equals(OfferStatus.SELL))
+     *         continue;
+     *     PortfolioItemCardData card = ...get(offer.getItemId());
+     *     if (card == null || card.getUnitBuyPrice() <= 0 ...) continue;
+     *     return calculateProfitPerItem(itemId, offer.getPrice(),
+     *                                   card.getUnitBuyPrice()) * offer.getTotalQuantity();
+     *
+     * **IT SKIPS EVERY NON-SELL OFFER**, so a buy offer contributes nothing,
+     * and it reads the SAME `PortfolioItemCardData` the portfolio sums. So GE
+     * expected is not a second pot: it is the money already listed, valued at
+     * the price actually asked instead of Copilot’s post-tax estimate. The two
+     * figures overlap on everything listed and adding them always overstates.
+     *
+     * So the split is published as a PARTITION OF THE UNREALISED PROFIT, on
+     * exactly the boundary 2.105 drew for the values:
+     *
+     *     portfolio_ge_profit   + portfolio_hold_profit
+     *       == portfolio_unrealised_profit
+     *
+     * exact by construction, because both are `getUnrealizedUnitProfit()`
+     * times a share of one quantity. That identity is what lets the tracker
+     * show one total with a breakdown instead of two numbers a reader is
+     * invited to add up.
+     *
+     * THIS IS NOT A THIRD OPINION ON GE EXPECTED. `portfolio_ge_profit` is
+     * Copilot’s post-tax estimate for the listed share; the slot total is the
+     * asking price for the same share. They are two valuations of one holding
+     * and are meant to differ slightly - which is informative, and is why
+     * both stay. What must never happen is a SUM of them.
+     *
+     * One known asymmetry, left alone deliberately: `getProfitByItemName`
+     * multiplies by `offer.getTotalQuantity()`, the whole offer including the
+     * part already traded, while the portfolio counts only what is still
+     * owned. So a half-filled sell offer is over-counted on the slot side.
+     * That is Copilot’s arithmetic in Copilot’s helper; reimplementing it
+     * here is how two numbers drift apart in silence (2.104). The tracker
+     * prefers the portfolio side for totals and shows the slot side as the
+     * asking-price view, which is the honest way round.
+     */
+    /**
      * 2.105 — the share of a tracked holding that is currently LISTED.
      *
      * Static and package-visible so `mlmCheck` can exercise the real thing
@@ -14521,6 +14572,10 @@ public class GEVisualAidPlugin extends Plugin
         StringBuilder split = new StringBuilder();
         int splitCount = 0;
         long geValue = 0L, holdValue = 0L, geQtyTotal = 0L;
+        // 2.106: the same boundary applied to the PROFIT, so the two halves
+        // add up to portfolio_unrealised_profit rather than inviting a reader
+        // to add the GE total to it.
+        long geProfit = 0L, holdProfit = 0L;
         boolean geFieldMissing = false;
 
         try
@@ -14571,6 +14626,14 @@ public class GEVisualAidPlugin extends Plugin
                         geValue   += unit * geShare;
                         holdValue += unit * (qty - geShare);
                         geQtyTotal += geShare;
+                        // getUnrealizedUnitProfit() is a boxed Long and may be
+                        // null; safeInvokeLong gives 0 for that, which is what
+                        // Copilot's own safeUnrealizedUnitProfit() does - so
+                        // these two halves total portfolioUnrealizedProfit()
+                        // exactly, including for an item with no estimate yet.
+                        long unitProfit = safeInvokeLong(cardData, cls, "getUnrealizedUnitProfit");
+                        geProfit   += unitProfit * geShare;
+                        holdProfit += unitProfit * (qty - geShare);
 
                         nums.add(new long[]{
                                 safeInvokeLong(cardData, cls, "getItemId"),
@@ -14637,6 +14700,7 @@ public class GEVisualAidPlugin extends Plugin
             split.setLength(0);
             splitCount = 0;
             geValue = -1L; holdValue = -1L; geQtyTotal = 0L;
+            geProfit = 0L; holdProfit = 0L;
         }
 
         // The self-check. getPortfolioSummary() is the number Josh already
@@ -14660,6 +14724,13 @@ public class GEVisualAidPlugin extends Plugin
         String splitSource = geFieldMissing ? "no_ge_field" : source;
         if (geFieldMissing)               splitCheck = "no_ge_field";
         else if (geValue < 0 || holdValue < 0)  splitCheck = "read_error";
+        // 2.106: the profit halves must total the profit sum this method
+        // already checked against Copilot's own unrealised figure. Chained
+        // on purpose: if the two halves do not reconstruct the total, the
+        // breakdown that replaces "GE expected plus holds" is itself wrong,
+        // and a wrong breakdown is worse than the ambiguity it replaced.
+        else if (geProfit + holdProfit != sum)
+            splitCheck = "profit_mismatch:" + (geProfit + holdProfit - sum);
         else if (s == null)                splitCheck = "no_summary";
         else if (geValue + holdValue == s[3]) splitCheck = "ok";
         else                               splitCheck = "mismatch:" + (geValue + holdValue - s[3]);
@@ -14676,6 +14747,12 @@ public class GEVisualAidPlugin extends Plugin
                 + "portfolio_ge_value=" + (geFieldMissing ? -1L : geValue) + "\n"
                 + "portfolio_hold_value=" + (geFieldMissing ? -1L : holdValue) + "\n"
                 + "portfolio_ge_qty=" + geQtyTotal + "\n"
+                // Unlike the VALUES these are signed and a loss is a real
+                // reading, so -1 cannot mean "unknown" here. They are only
+                // meaningful when the split itself is, which
+                // portfolio_split_source already says.
+                + "portfolio_ge_profit=" + geProfit + "\n"
+                + "portfolio_hold_profit=" + holdProfit + "\n"
                 + "portfolio_split_check=" + splitCheck + "\n"
                 + "portfolio_item_split=" + split + "\n";
     }
