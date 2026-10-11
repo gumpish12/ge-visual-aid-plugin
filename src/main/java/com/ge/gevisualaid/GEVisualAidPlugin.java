@@ -14551,17 +14551,6 @@ public class GEVisualAidPlugin extends Plugin
                         if (qty <= 0) continue;   // isInPortfolio() IS qty>0, but never trust that twice
 
                         long profit = safeInvokeLong(cardData, cls, "portfolioUnrealizedProfit");
-                        nums.add(new long[]{
-                                safeInvokeLong(cardData, cls, "getItemId"),
-                                qty,
-                                safeInvokeLong(cardData, cls, "getUnitBuyPrice"),
-                                safeInvokeLong(cardData, cls, "getPostTaxSellUnitPrice"),
-                                safeInvokeLong(cardData, cls, "getUnrealizedUnitProfit"),
-                                profit,
-                                safeInvokeLong(cardData, cls, "getHeldMinutes")
-                        });
-                        names.add(safeInvokeName(cardData, cls));
-                        sum += profit;            // summed over ALL held rows, never over the capped subset
 
                         // ── 2.105: where is it? ──────────────────────────
                         Long geRaw   = safeInvokeLongOrNull(cardData, cls, "getRuneliteGeQuantity");
@@ -14569,30 +14558,36 @@ public class GEVisualAidPlugin extends Plugin
                         long geQty   = Math.max(0L, geRaw == null ? 0L : geRaw);
                         long invQty  = Math.max(0L, safeInvokeLong(cardData, cls, "getRuneliteInventoryQuantity"));
                         long bankQty = Math.max(0L, safeInvokeLong(cardData, cls, "getPortfolioBankQuantity"));
-                        // Clamped so the two values below always partition
-                        // the holding. An account can hold MORE than it has
-                        // tracked - getNotInPortfolioQuantity() is Copilot's
-                        // name for that - and the untracked surplus is not
-                        // this portfolio's money to account for.
-                        long geShare = portfolioGeShare(geQty, qty);
                         long unit    = safeInvokeLong(cardData, cls, "getPostTaxSellUnitPrice");
+                        // Clamped so the two VALUES partition the holding.
+                        // An account can hold MORE than it has tracked -
+                        // getNotInPortfolioQuantity() is Copilot's name for
+                        // that - and the untracked surplus is not this
+                        // portfolio's money to account for.
+                        long geShare = portfolioGeShare(geQty, qty);
+                        // EVERY held row, never the capped subset, for the
+                        // same reason the profit sum is: a cap is a runaway
+                        // stop and must not move an arithmetic total.
                         geValue   += unit * geShare;
                         holdValue += unit * (qty - geShare);
                         geQtyTotal += geShare;
-                        // EVERY held row, never the capped subset - same
-                        // reason the profit sum is: a cap is a runaway stop
-                        // and must not change an arithmetic total. The ROW
-                        // list is capped (it is for reading); the numbers
-                        // above are not.
-                        if (splitCount < PF_ITEM_CAP)
-                        {
-                            if (splitCount > 0) split.append('|');
-                            split.append(safeInvokeLong(cardData, cls, "getItemId"))
-                                 .append(':').append(geQty)
-                                 .append(':').append(invQty)
-                                 .append(':').append(bankQty);
-                            splitCount++;
-                        }
+
+                        nums.add(new long[]{
+                                safeInvokeLong(cardData, cls, "getItemId"),
+                                qty,
+                                safeInvokeLong(cardData, cls, "getUnitBuyPrice"),
+                                unit,
+                                safeInvokeLong(cardData, cls, "getUnrealizedUnitProfit"),
+                                profit,
+                                safeInvokeLong(cardData, cls, "getHeldMinutes"),
+                                // 7-9 ride along so the split can be emitted
+                                // from the SORTED order below. They are NOT
+                                // part of the portfolio_items row - see the
+                                // fixed field count where it is written.
+                                geQty, invQty, bankQty
+                        });
+                        names.add(safeInvokeName(cardData, cls));
+                        sum += profit;            // summed over ALL held rows, never over the capped subset
                     }
 
                     // Sort both lists together by |profit| descending.
@@ -14607,7 +14602,23 @@ public class GEVisualAidPlugin extends Plugin
                         long[] n = nums.get(idx);
                         if (count > 0) rows.append('|');
                         rows.append(n[0]).append(':').append(names.get(idx));
-                        for (int k = 1; k < n.length; k++) rows.append(':').append(n[k]);
+                        // A FIXED SIX, not n.length. The tracker reads this
+                        // row's numbers FROM THE END, so walking the whole
+                        // array would append 2.105's three counts and shift
+                        // every one of them for an older tracker - the exact
+                        // breakage the separate split field exists to avoid.
+                        for (int k = 1; k <= 6; k++) rows.append(':').append(n[k]);
+
+                        // THE SAME FORTY. Emitted here rather than in map
+                        // order so the split covers exactly the rows that are
+                        // shown. Live feed, 2026-10-11: 76 items held against
+                        // a cap of 40, so two differently-ordered lists of
+                        // forty were forty DIFFERENT items - a shown row with
+                        // no "listed" tag beside an unshown one that had it.
+                        if (count > 0) split.append('|');
+                        split.append(n[0]).append(':').append(n[7])
+                             .append(':').append(n[8]).append(':').append(n[9]);
+                        splitCount++;
                         count++;
                     }
                     source = nums.isEmpty() ? "empty" : "ok";
