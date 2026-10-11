@@ -706,3 +706,62 @@ non-trivial change.
   rather than `no_copilot`, because blaming Copilot for the client sitting at
   the login screen sends you looking in the wrong place. A VM with no source
   field at all is an older plugin, and the tracker says so in those words.
+
+
+- **A HOLD AND A LISTING ARE THE SAME MONEY IN TWO PLACES, AND THE CARD DATA
+  ALREADY KNOWS WHICH** (2.105). Josh: *"occasionally an item will stay as a
+  hold, even when its then placed in the ge to be sold."* It stays because it
+  has not been SOLD - the profit is genuinely unrealised, so Copilot is right
+  to keep it and `portfolio_unrealised_profit` did not change. **The missing
+  fact was never the total, it was the LOCATION.**
+  `PortfolioItemCardData.runeliteGeQuantity` carries it, and
+  `PortfolioStateRS.buildGeQuantitiesByItemId()` builds it from Copilot's own
+  offer list - the unsold remainder of every SELL offer plus the collection
+  box - so it means "listed for sale right now" and does NOT depend on the GE
+  interface having been opened.
+- **AND THE SAME BOUNDARY STOPPED A DOUBLE COUNT TWO REPOS AWAY.** Josh asked
+  in the same breath to add hold value to the tracker's "capital in use". A
+  sell offer is ALREADY counted there at `price * total`, so adding the whole
+  portfolio would have counted every listed item twice - and double-counted
+  precisely the items in the bug report. One boundary answered both; the
+  amber band is holds MINUS what is listed.
+- **COPILOT'S OWN BANK METHOD IS NOT A PARTITION, DELIBERATELY.**
+  `getPortfolioBankQuantity()` caps the bank share at `suggestionBankQuantity`,
+  so GE + inventory + bank can total LESS than `portfolioQuantity` - correct
+  for the badge it drives ("is any of this in the bank"), useless for cutting a
+  value in two. Their raw observations are published untouched and the GE share
+  is clamped `min(geQty, portfolioQuantity)` with the rest as the remainder.
+  **The clamp is the whole function**: an account can hold more than it tracks
+  (their own `getNotInPortfolioQuantity`), so unclamped the hold share goes
+  NEGATIVE and listing a big stack makes capital in use appear to FALL.
+- **A SEPARATE FIELD, NOT THREE MORE COLUMNS ON `portfolio_items`.** The
+  tracker reads that row's numbers FROM THE END (`tail = len - 6`) so a
+  separator in a name cannot shift them. Appending columns would shift all six
+  for any tracker older than the plugin - and **the plugin reaches the VMs on
+  its own at each launch while the tracker is a separate container deploy**, so
+  that skew is not hypothetical. `portfolio_item_split` is joined on the item
+  id and is four bare numbers, so it has no separator hazard at all.
+- **THE ONE FAILURE HERE THAT LOOKS LIKE A REAL ANSWER IS A MISSING FIELD.**
+  2.99 established the hub is keyed on the CLIENT version, so a VM pinned to an
+  older RuneLite gets an older Copilot jar - possibly one with no
+  `getRuneliteGeQuantity`. `safeInvokeLong` returns 0 there, which reads as
+  "none of it is listed", puts the whole holding in the amber band, inflates
+  capital in use on the machine that is already behind, and errors nowhere.
+  `safeInvokeLongOrNull` tells a missing method from a real zero,
+  `portfolio_split_source=no_ge_field` names it, both values go out as **-1**,
+  and the tracker says "its Flipping Copilot build has no GE quantity, which
+  usually means RuneLite is pinned here".
+- **-1 IS UNKNOWN AND 0 IS NOTHING LISTED**, logged out included. A confident
+  zero at the login screen reads as "nothing is in the GE", which is the exact
+  mislabel this release exists to remove.
+- **THE SPLIT CHECKS ITSELF**, like 2.104: `portfolio_ge_value` +
+  `portfolio_hold_value` must equal Copilot's own `portfolio_assets_value`,
+  because both are `postTaxSellUnitPrice * portfolioQuantity` sliced two ways.
+  `portfolio_split_check` says `ok` or `mismatch:<delta>`.
+- **THE ARITHMETIC WAS LIFTED OUT OF THE LOOP SO A CHECKER COULD REACH IT.**
+  `portfolioGeShare` is static and package-visible for `mlmCheck`, which calls
+  the real compiled one. Proved red 5/5: no clamp at the top, no clamp at the
+  bottom, a confident zero when logged out, the self-check disabled, and a
+  field dropped from the feed. The partition is asserted as the IDENTITY
+  (`share + (qty - share) == qty`) rather than as more numbers, because a clamp
+  that merely returns something in range still breaks the sum.

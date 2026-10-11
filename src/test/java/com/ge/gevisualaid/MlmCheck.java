@@ -478,6 +478,67 @@ public class MlmCheck
         f = c.getDeclaredField("MLM_PAYDIRT"); f.setAccessible(true);
         eq("the item name is the one the log printed", f.get(null), "Pay-dirt");
 
+        // ---- 15. the portfolio location split (2.105) --------------------
+        //
+        // Josh: a 1m item "will show as a hold item and then in the ge when
+        // its being sold, its not removed from the hold prediction". The row
+        // is right to stay - it is unsold, so the profit is unrealised - and
+        // what was missing is WHERE the quantity sits. portfolioGeShare is
+        // the boundary, and the real compiled one is called here rather than
+        // a copy, for the reason at the top of this file.
+        Method geShare = c.getDeclaredMethod("portfolioGeShare", long.class, long.class);
+        geShare.setAccessible(true);
+        eq("nothing listed",            geShare.invoke(null, 0L,  10L), 0L);
+        eq("part of it listed",         geShare.invoke(null, 4L,  10L), 4L);
+        eq("all of it listed",          geShare.invoke(null, 10L, 10L), 10L);
+        eq("no holding, nothing to it", geShare.invoke(null, 5L,  0L),  0L);
+
+        // THE TWO THAT MATTER. Copilot reports what the CLIENT holds, which
+        // can exceed what the portfolio TRACKS (their own
+        // getNotInPortfolioQuantity names that case). Unclamped, the hold
+        // share goes negative and the amber band on the capital chart
+        // SUBTRACTS - so listing a big stack would make capital in use appear
+        // to drop. A negative share would do the same at the other end.
+        eq("more listed than tracked is clamped", geShare.invoke(null, 25L, 10L), 10L);
+        eq("a negative reading cannot subtract",  geShare.invoke(null, -3L, 10L), 0L);
+
+        // The split must PARTITION the holding at every one of those points,
+        // because portfolio_ge_value + portfolio_hold_value is checked
+        // against Copilot's own portfolio_assets_value in the feed. Asserted
+        // as the identity rather than as six more numbers: a clamp that
+        // merely returns something in range still breaks the sum.
+        long[][] cases = { {0,10}, {4,10}, {10,10}, {25,10}, {-3,10}, {5,0}, {3,3} };
+        for (long[] cse : cases)
+        {
+            long share = (Long) geShare.invoke(null, cse[0], cse[1]);
+            eq("ge+hold partitions " + cse[0] + " of " + cse[1],
+                    share + (cse[1] - share), cse[1]);
+            eq("the listed share is never negative " + cse[0] + "/" + cse[1], share >= 0L, true);
+            eq("the held share is never negative " + cse[0] + "/" + cse[1], cse[1] - share >= 0L, true);
+        }
+
+        // The feed has to actually carry it, and the logged-out branch has to
+        // say WHY rather than reporting a confident zero: "nothing listed" and
+        // "nobody looked" need different repairs and read identically as 0.
+        String pfSrc = new String(java.nio.file.Files.readAllBytes(
+                java.nio.file.Paths.get("src/main/java/com/ge/gevisualaid/GEVisualAidPlugin.java")),
+                java.nio.charset.StandardCharsets.UTF_8);
+        for (String k : new String[]{ "portfolio_split_source", "portfolio_ge_value",
+                                      "portfolio_hold_value", "portfolio_ge_qty",
+                                      "portfolio_split_check", "portfolio_item_split" })
+        {
+            eq("the feed declares " + k, pfSrc.contains("\"" + k + "=\""), true);
+        }
+        eq("logged out, the split is unknown and not zero",
+                pfSrc.contains("\"portfolio_ge_value=-1\\n\""), true);
+        eq("the split checks itself against the assets total",
+                pfSrc.contains("geValue + holdValue == s[3]"), true);
+        // The ROW list is capped for readability; the VALUES must not be, or a
+        // 41-item portfolio would disagree with Copilot and the check would
+        // blame Copilot for this plugin truncating. Same call as 2.104.
+        eq("the value totals are not inside the cap",
+                pfSrc.contains("geValue   += unit * geShare;"), true);
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }

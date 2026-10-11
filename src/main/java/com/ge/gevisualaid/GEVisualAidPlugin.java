@@ -1811,7 +1811,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.104";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.105";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -4336,6 +4336,15 @@ public class GEVisualAidPlugin extends Plugin
                 + "portfolio_items_profit_sum=0\n"
                 + "portfolio_items_check=offline\n"
                 + "portfolio_items=\n"
+                // 2.105: same reasoning — logged out, WHERE a holding sits is
+                // unknown rather than "all of it in the bank", and a zero
+                // ge_value would read as "nothing listed".
+                + "portfolio_split_source=offline\n"
+                + "portfolio_ge_value=-1\n"
+                + "portfolio_hold_value=-1\n"
+                + "portfolio_ge_qty=0\n"
+                + "portfolio_split_check=offline\n"
+                + "portfolio_item_split=\n"
                 + buildClerkState()
                 + buildCopilotPreferencesState()
                 + buildApmAndMembershipState()
@@ -14241,6 +14250,28 @@ public class GEVisualAidPlugin extends Plugin
         catch (Throwable t) { return null; }
     }
 
+    /**
+     * 2.105 — like safeInvokeLong, but NULL when the method is not there.
+     *
+     * The difference matters exactly once, and it is the trap this suite
+     * keeps walking into. 2.99 established that the plugin hub is keyed on
+     * the CLIENT version, so a VM pinned to an older RuneLite is handed an
+     * older Flipping Copilot jar - and an older PortfolioItemCardData may
+     * have no getRuneliteGeQuantity at all. safeInvokeLong would return 0
+     * there, which reads as "none of it is listed", which puts the entire
+     * holding into the amber band and quietly inflates capital in use on
+     * exactly the machine that is already behind. Nothing would error.
+     */
+    private Long safeInvokeLongOrNull(Object target, Class<?> cls, String methodName)
+    {
+        try
+        {
+            Object v = cls.getMethod(methodName).invoke(target);
+            return v instanceof Number ? Long.valueOf(((Number) v).longValue()) : null;
+        }
+        catch (Throwable t) { return null; }
+    }
+
     /** Reflective method invoke returning long, defaulting to 0 on failure. */
     private long safeInvokeLong(Object target, Class<?> cls, String methodName)
     {
@@ -14401,6 +14432,80 @@ public class GEVisualAidPlugin extends Plugin
      * 2.6. Rows are sorted by absolute profit, biggest first, so the cap
      * below keeps the holds that matter rather than an arbitrary handful.
      */
+    /**
+     * 2.105 — the share of a tracked holding that is currently LISTED.
+     *
+     * Static and package-visible so `mlmCheck` can exercise the real thing
+     * rather than a copy of it, which is the only way this arithmetic can be
+     * proved: a re-implementation passes for whatever reason the original
+     * fails.
+     *
+     * THE CLAMP IS THE WHOLE FUNCTION. An account can hold more of an item
+     * than it has tracked in the portfolio - Copilot names that case
+     * `getNotInPortfolioQuantity()` - so `runeliteGeQuantity` can exceed
+     * `portfolioQuantity`. Unclamped, the hold share
+     * `(portfolioQuantity - geShare)` goes NEGATIVE, and a negative hold
+     * value subtracts from the amber band on the tracker's capital chart:
+     * listing a big stack would make the money in use appear to FALL. The
+     * untracked surplus is not this portfolio's money to account for.
+     */
+    static long portfolioGeShare(long geQty, long portfolioQty)
+    {
+        if (portfolioQty <= 0L) return 0L;
+        return Math.min(Math.max(0L, geQty), portfolioQty);
+    }
+
+    /**
+     * 2.105 — A HOLD AND A LISTING ARE THE SAME MONEY IN TWO PLACES, AND THE
+     * CARD DATA ALREADY KNOWS WHICH.
+     *
+     * Josh: "occasionally an item will stay as a hold, even when its then
+     * placed in the ge to be sold. so like a high value item of say 1mil will
+     * show as a hold item and then in the ge when its being sold, its not
+     * removed from the hold prediction."
+     *
+     * It is not removed because it has not been sold, and Copilot is right to
+     * keep it: the profit is still unrealised. `portfolio_unrealised_profit`
+     * and every row under it are therefore CORRECT and will not change. What
+     * was missing is WHERE the quantity sits, and that is the whole of the
+     * complaint — a 1m item waiting in the bank and the same item already
+     * listed are the same number and two different situations.
+     *
+     * `PortfolioItemCardData` carries it. `runeliteGeQuantity` is built by
+     * `PortfolioStateRS.buildGeQuantitiesByItemId()` from Copilot’s OWN offer
+     * list — the unsold remainder of every SELL offer plus whatever is in the
+     * collection box — so it means exactly "listed for sale right now" and
+     * does NOT depend on the GE interface having been opened. Confirmed in
+     * their source, and confirmed to exist by javap against the jar the
+     * client actually loads (2.99: the hub serves a different build per
+     * client version, so those are two different questions).
+     *
+     * THE SPLIT IS A PARTITION AND COPILOT’S OWN BANK METHOD IS NOT ONE.
+     * `getPortfolioBankQuantity()` caps the bank share at the suggestion’s
+     * bank quantity, so their three shares can add up to less than
+     * `portfolioQuantity` — correct for the badge it drives ("is any of this
+     * in the bank"), useless for splitting a value in two. So their raw
+     * observations are published untouched and the GE share is clamped
+     * `min(geQty, portfolioQuantity)` with everything else as the remainder.
+     * GE first, because that is the share with independent evidence behind
+     * it; the remainder is what is left over, which is the only honest thing
+     * to call it.
+     *
+     * AND IT CHECKS ITSELF, like 2.104. `portfolio_ge_value` +
+     * `portfolio_hold_value` must equal `portfolio_assets_value` from
+     * Copilot’s own summary, because both are
+     * postTaxSellUnitPrice * portfolioQuantity sliced two ways.
+     * `portfolio_split_check` says `ok` or `mismatch:<delta>`.
+     *
+     * A SEPARATE FIELD, NOT THREE MORE COLUMNS ON `portfolio_items`. The
+     * tracker reads that row’s numbers FROM THE END (`tail = len - 6`) so a
+     * separator inside a name cannot shift them. Appending columns would
+     * shift all six for any tracker older than this plugin — and the plugin
+     * reaches the VMs on its own at each launch while the tracker is a
+     * separate container deploy, so that skew is not hypothetical. Joined on
+     * the item id, and every field here is a bare number, so this row has no
+     * separator hazard at all.
+     */
     private static final int PF_ITEM_CAP = 40;
 
     private String buildPortfolioItemsState()
@@ -14410,6 +14515,13 @@ public class GEVisualAidPlugin extends Plugin
         int count = 0;
         long sum = 0L;
         int dropped = 0;
+        // 2.105: the location split, accumulated in the SAME traversal. A
+        // second pass over the map would be a second reflection walk per
+        // write for data the first one already had in its hand.
+        StringBuilder split = new StringBuilder();
+        int splitCount = 0;
+        long geValue = 0L, holdValue = 0L, geQtyTotal = 0L;
+        boolean geFieldMissing = false;
 
         try
         {
@@ -14450,6 +14562,37 @@ public class GEVisualAidPlugin extends Plugin
                         });
                         names.add(safeInvokeName(cardData, cls));
                         sum += profit;            // summed over ALL held rows, never over the capped subset
+
+                        // ── 2.105: where is it? ──────────────────────────
+                        Long geRaw   = safeInvokeLongOrNull(cardData, cls, "getRuneliteGeQuantity");
+                        if (geRaw == null) geFieldMissing = true;
+                        long geQty   = Math.max(0L, geRaw == null ? 0L : geRaw);
+                        long invQty  = Math.max(0L, safeInvokeLong(cardData, cls, "getRuneliteInventoryQuantity"));
+                        long bankQty = Math.max(0L, safeInvokeLong(cardData, cls, "getPortfolioBankQuantity"));
+                        // Clamped so the two values below always partition
+                        // the holding. An account can hold MORE than it has
+                        // tracked - getNotInPortfolioQuantity() is Copilot's
+                        // name for that - and the untracked surplus is not
+                        // this portfolio's money to account for.
+                        long geShare = portfolioGeShare(geQty, qty);
+                        long unit    = safeInvokeLong(cardData, cls, "getPostTaxSellUnitPrice");
+                        geValue   += unit * geShare;
+                        holdValue += unit * (qty - geShare);
+                        geQtyTotal += geShare;
+                        // EVERY held row, never the capped subset - same
+                        // reason the profit sum is: a cap is a runaway stop
+                        // and must not change an arithmetic total. The ROW
+                        // list is capped (it is for reading); the numbers
+                        // above are not.
+                        if (splitCount < PF_ITEM_CAP)
+                        {
+                            if (splitCount > 0) split.append('|');
+                            split.append(safeInvokeLong(cardData, cls, "getItemId"))
+                                 .append(':').append(geQty)
+                                 .append(':').append(invQty)
+                                 .append(':').append(bankQty);
+                            splitCount++;
+                        }
                     }
 
                     // Sort both lists together by |profit| descending.
@@ -14480,6 +14623,9 @@ public class GEVisualAidPlugin extends Plugin
             rows.setLength(0);
             count = 0;
             sum = 0L;
+            split.setLength(0);
+            splitCount = 0;
+            geValue = -1L; holdValue = -1L; geQtyTotal = 0L;
         }
 
         // The self-check. getPortfolioSummary() is the number Josh already
@@ -14490,12 +14636,37 @@ public class GEVisualAidPlugin extends Plugin
         else if (s[1] == sum)          check = "ok";
         else                           check = "mismatch:" + (sum - s[1]);
 
+        // 2.105: the split’s own self-check. ge_value + hold_value are
+        // postTaxSellUnitPrice * portfolioQuantity cut in two, and
+        // portfolio_assets_value is the same product uncut, so they have to
+        // agree. A value split that does not add up to the total it came
+        // from would look authoritative and be wrong - and this one feeds a
+        // chart band and a cash floor, so it says so instead.
+        String splitCheck;
+        // NAMED, not folded into a zero. This is the one failure here that
+        // produces a perfectly plausible answer: every holding in the amber
+        // band, a split that still adds up, and no error anywhere.
+        String splitSource = geFieldMissing ? "no_ge_field" : source;
+        if (geFieldMissing)               splitCheck = "no_ge_field";
+        else if (geValue < 0 || holdValue < 0)  splitCheck = "read_error";
+        else if (s == null)                splitCheck = "no_summary";
+        else if (geValue + holdValue == s[3]) splitCheck = "ok";
+        else                               splitCheck = "mismatch:" + (geValue + holdValue - s[3]);
+
         return "portfolio_items_source=" + source + "\n"
                 + "portfolio_items_count=" + count + "\n"
                 + "portfolio_items_dropped=" + dropped + "\n"
                 + "portfolio_items_profit_sum=" + sum + "\n"
                 + "portfolio_items_check=" + check + "\n"
-                + "portfolio_items=" + rows + "\n";
+                + "portfolio_items=" + rows + "\n"
+                + "portfolio_split_source=" + splitSource + "\n"
+                // -1 both, so a consumer cannot plot the amber band from a
+                // reading this plugin could not actually take.
+                + "portfolio_ge_value=" + (geFieldMissing ? -1L : geValue) + "\n"
+                + "portfolio_hold_value=" + (geFieldMissing ? -1L : holdValue) + "\n"
+                + "portfolio_ge_qty=" + geQtyTotal + "\n"
+                + "portfolio_split_check=" + splitCheck + "\n"
+                + "portfolio_item_split=" + split + "\n";
     }
 
     /**
