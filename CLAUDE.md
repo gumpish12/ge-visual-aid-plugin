@@ -1,5 +1,13 @@
 # GEVisualAidPlugin
 
+> **Folder renamed 2026-10-12**: this was `IdeaProjects\example-plugin` — IntelliJ's
+> default name, never changed. The GitHub repo has always been
+> `github.com/gumpish12/ge-visual-aid-plugin` and the VMs have always cloned it
+> to `C:\Users\Josh\ge-visual-aid-plugin`, so nothing outside this PC moved. The
+> Java package `com.ge.gevisualaid`, the class name and
+> `runelite-plugin.properties` are UNCHANGED and must stay that way — the plugin
+> hub is keyed on them.
+
 RuneLite plugin (Java) that publishes OSRS game state for the wider automation
 suite. Written to `ge_visual_aid.txt` and served on `127.0.0.1:8081/state`.
 
@@ -19,7 +27,7 @@ C:\Users\gump1\IdeaProjects\osrs-suite\CLAUDE.md
 ```
 
 **Preferred:** start sessions in `osrs-suite` and pull this repo in with
-`/add-dir C:\Users\gump1\IdeaProjects\example-plugin`. That way the full rules
+`/add-dir C:\Users\gump1\IdeaProjects\ge-visual-aid-plugin`. That way the full rules
 load and cross-cutting changes (a new plugin field plus the AHK that reads it)
 happen in one session.
 
