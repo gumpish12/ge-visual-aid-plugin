@@ -1811,7 +1811,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.106";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.107";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -10220,7 +10220,34 @@ public class GEVisualAidPlugin extends Plugin
                 rs.setAddress(w.getAddress());
                 rs.setId(w.getId());
                 rs.setPlayerCount(w.getPlayers());
-                rs.setLocation(w.getLocation());
+                // 2.107: THE LOCATION IS DELIBERATELY NOT SET, AND THAT IS
+                // WHAT MAKES THIS COMPILE ON EVERY CLIENT.
+                //
+                // RuneLite 1.13.2 pulls http-api 1.2.26, which DELETED
+                // World.getLocation(); 1.13.0 and 1.13.1 pull 1.2.25, which
+                // still has it. `latest.release` picked 1.13.2 up on its own
+                // and the plugin stopped compiling, so RuneLite never
+                // started - on every machine, with nothing saying why. The
+                // standing hazard in build.gradle, paid out a second time.
+                //
+                // THERE IS NO CALL THAT WORKS ON BOTH. The int became an enum
+                // and only the NEW build can turn it back:
+                //   1.2.25  WorldRegion.valueOf(int)      int -> enum, no getId()
+                //   1.2.26  WorldRegion.fromLocationId(int) + getId()
+                // So reading the region and converting it compiles against
+                // 1.2.26 and fails against the pin - which would leave
+                // launch.bat's fallback just as dead as the newest client,
+                // and the fallback is the only reason a bad release costs one
+                // client instead of the whole fleet (the 2.97 ordering rule).
+                //
+                // NOTHING READS IT BACK. `hopTarget` is passed only to
+                // client.hopToWorld(), which connects by id and address; this
+                // World object is built here solely to hand to that call, and
+                // no feed field carries a world location. The value only ever
+                // fed RuneLite's own world-list UI, which this plugin does not
+                // use. So dropping it costs nothing observable, where guessing
+                // from the enum's ordinal would have invented a region id -
+                // the no-lookup-table rule, which is how 2.100 was paid for.
                 rs.setTypes(WorldUtil.toWorldTypes(w.getTypes()));
 
                 hopTarget    = rs;
