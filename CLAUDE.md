@@ -402,6 +402,17 @@ non-trivial change.
   in the sack that is about to be taken - so the threshold has to clear the
   biggest gap in a real full-inventory deposit, and that number comes from
   `mlm_sack_history`, not from me.
+- **BUT IT IS NOT A LIVE RISK, BECAUSE 2.90 STOPPED RELYING ON IT.** Josh,
+  2026-10-16: *"i thought it now waiting for it to arrive, incase it breaks?"* -
+  and he is right. The dangerous case (acting on sack space while 27 pay-dirt
+  is in the air) is handled by watching the INVENTORY, not by a steadiness
+  threshold: `mlm_flight_amount` carries what is on its way and
+  `mlm_sack_space_settled` is space minus that. **`MLM_SETTLE_TICKS` now only
+  colours the descriptive `mlm_sack_state` label** (`settling` / `settled`,
+  one `if` at the bottom of that state function). So measuring it would tidy a
+  word, not prevent a fault - do not write it up as outstanding work the way a
+  roadmap note once did. The number to act on is
+  `mlm_sack_space_settled`; plain `mlm_sack_space` is the trap.
 - **`motherlode_log.txt` LOGS CHANGES, NEVER STATE** (2.89, toggle
   `motherlodeLog`, read it at `/motherlode?log`, wipe with
   `/motherlode?log=clear`). A tick-by-tick dump buries the handful of
