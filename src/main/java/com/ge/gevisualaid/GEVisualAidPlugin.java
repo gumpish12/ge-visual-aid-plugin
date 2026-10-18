@@ -2582,6 +2582,17 @@ public class GEVisualAidPlugin extends Plugin
         for (int i = 0; i < 28; i++) inventorySlots[i]  = new InventorySlot();
         session.load();
         bondTracker.load();
+        // 2.108e: SEED THE OFFLINE BLOCK. A plugin that starts while the
+        // client is already sitting at the login screen gets no
+        // GameStateChanged - the transition happened before it subscribed -
+        // and no GameTick either, so neither caller of
+        // updateSpellbookAndSlayer ever runs and the feed reads
+        // "no_reading_yet" indefinitely. True, but weaker than the truth
+        // available: we know we are not logged in, so say offline.
+        // The 2.96 loadout seed exists for the same reason, one event
+        // earlier. Safe from the Swing thread startUp runs on, because the
+        // offline branch makes no client calls at all - it returns a literal.
+        updateSpellbookAndSlayer(false);
         overlayManager.add(overlay);
         linkToCopilot();
         linkToApm();

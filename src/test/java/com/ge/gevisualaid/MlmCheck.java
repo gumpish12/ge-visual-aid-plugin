@@ -671,10 +671,22 @@ public class MlmCheck
         // screen. Asserting the branch EXISTS is what 2.108 already did and
         // it passed while the bug was live; assert it is CALLED from the
         // logout path, beside mlmReset.
-        int resetAt = slSrc.indexOf("updateSpellbookAndSlayer(false)");
+        // Searched FORWARD FROM mlmReset, not from the top of the file: a
+        // plain indexOf found the startUp seed added later and declared the
+        // logout path broken. Anchor on the thing you mean.
         int mlmAt   = slSrc.indexOf("mlmReset();");
+        int resetAt = mlmAt < 0 ? -1 : slSrc.indexOf("updateSpellbookAndSlayer(false)", mlmAt);
         eq("the logout path resets slayer too",
-                resetAt > 0 && mlmAt > 0 && Math.abs(resetAt - mlmAt) < 900, true);
+                resetAt > 0 && (resetAt - mlmAt) < 900, true);
+
+        // ...AND SEEDED AT STARTUP. Starting at the login screen yields no
+        // GameStateChanged and no GameTick, so neither caller runs and the
+        // feed sat on "no_reading_yet" - observed live. Both call sites are
+        // required; asserting one would have passed with the other missing.
+        eq("startUp seeds the offline block",
+                slSrc.contains("updateSpellbookAndSlayer(false);\n        overlayManager.add"), true);
+        eq("there are TWO offline call sites, not one",
+                slSrc.split("updateSpellbookAndSlayer\\(false\\)", -1).length - 1, 2);
 
         // The spellbook NAME must not come from the varbit. Nobody has
         // watched all four of its values, so a 0..3 map would be a guess
