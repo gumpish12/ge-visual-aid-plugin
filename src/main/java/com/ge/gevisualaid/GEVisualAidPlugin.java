@@ -2738,6 +2738,16 @@ public class GEVisualAidPlugin extends Plugin
             // 2.86: the motherlode tile maps describe a scene that is gone.
             // Left in place they would keep reporting struts as unbroken.
             mlmReset();
+            // 2.108d: AND THE SAME FOR SLAYER - the fourth thing on this list
+            // to be caught by it. updateSpellbookAndSlayer runs from
+            // updateSceneState, which runs from onGameTick, and GameTick
+            // STOPS FIRING WHEN LOGGED OUT (2.3/2.4). So the careful offline
+            // branch - slayer_count=-1 rather than a confident 0 - was
+            // unreachable on the only path that reaches it, and the block
+            // simply froze: observed live at the login screen reporting
+            // "slayer_state=active, Gargoyles, 109 left". Writing a correct
+            // offline branch is worth nothing if nothing calls it.
+            updateSpellbookAndSlayer(false);
             try
             {
                 sceneStateBlock = config.sceneTrackingEnabled()

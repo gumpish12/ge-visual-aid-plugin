@@ -665,6 +665,17 @@ public class MlmCheck
         eq("the stall warning only fires on a real change",
                 slSrc.contains("if (fromChange && Integer.parseInt(still) > 300)"), true);
 
+        // THE OFFLINE BRANCH MUST BE REACHABLE. GameTick stops firing when
+        // logged out, so the only caller inside updateSceneState can never
+        // run it - the block froze and reported a live task at the login
+        // screen. Asserting the branch EXISTS is what 2.108 already did and
+        // it passed while the bug was live; assert it is CALLED from the
+        // logout path, beside mlmReset.
+        int resetAt = slSrc.indexOf("updateSpellbookAndSlayer(false)");
+        int mlmAt   = slSrc.indexOf("mlmReset();");
+        eq("the logout path resets slayer too",
+                resetAt > 0 && mlmAt > 0 && Math.abs(resetAt - mlmAt) < 900, true);
+
         // The spellbook NAME must not come from the varbit. Nobody has
         // watched all four of its values, so a 0..3 map would be a guess
         // printed as a fact - and the raw id has to go out beside the name

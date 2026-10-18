@@ -37,6 +37,34 @@ non-trivial change.
 
 ---
 
+## 🔴 RULE ZERO — EVERY CLICK IS A BOX, RANDOMISED. NO EXCEPTIONS.
+
+Josh, 2026-10-18: *"Every single set of clickable coordinates needs to be in
+the form of a box. Single pixel clickable coordinates are not acceptable. In
+some cases we use single pixel checks to gate a response, but all clicks must
+be randomised within a coordinate box. This is a hard firm rule with no
+deviations."*
+
+**What that means for THIS repo — the thing that publishes the coordinates:**
+
+- Every clickable thing this plugin emits publishes a RECT
+  (`_x1/_y1/_x2/_y2`). A feature that emits only a point is incomplete.
+- `click_x/click_y` is the rect centre and is a **REFERENCE**, never an
+  instruction. No page served by this plugin may call it "the point to click".
+  `mlmCheck` asserts that string cannot return.
+- A pixel **CHECK** is a different thing and stays single-pixel. Read one
+  pixel; never click one.
+- Consumers randomise inside the rect — `CBT_BoxPoint` (bell curve at 45% of
+  the half-width, clamped 4px inside each edge), via the humanised
+  `MoveAdv`/`ClickAdv` path. Full rule in `../osrs-suite/CLAUDE.md`.
+
+**It was unwritten until 2026-10-18**, living only inside `CBT_BoxPoint`, and
+in its absence `/widgets` told every reader to click the centre from 2.81
+onward and 2.108 repeated it on `/slayer`. A convention that exists in one
+function is one new reader away from being lost.
+
+---
+
 ## Rules that always apply here
 
 - **Diagnose before changing.** Read the actual file. Never assume.
@@ -228,20 +256,6 @@ non-trivial change.
   four correct ids. 2.84 says "not loaded - its interface is closed, OR the id
   is wrong" and names the action that separates them. **Only `hidden` proves
   an id is right**, because the interface had to load for it to be there.
-- **NEVER A SINGLE POINT — ALWAYS RANDOMISED WITHIN THE BOX.** Every click
-  box this plugin publishes carries a RECT (`_x1/_y1/_x2/_y2`) beside its
-  `click_x/click_y`, and the centre is a REFERENCE, not an instruction. The
-  consumer picks a point inside the rect: `CBT_BoxPoint` in the skiller does
-  it with a bell curve at 45% of the half-width, clamped 4px inside the
-  edges. Clicking the exact centre every time is a pixel-perfect signature
-  no human produces.
-  **This rule was unwritten until 2026-10-18 and lived only inside
-  `CBT_BoxPoint`.** Josh believed it was in here; it was not, and in its
-  absence 2.108 published `wg_high_alch_click_x/_y` and `/widgets` described
-  them as "the point to click" with no mention of the rect beside them. A
-  convention that exists in one function is one new consumer away from being
-  lost — and the new consumer was me.
-
 - **`@N` IS A CLICK INSET** — keep N% of the rectangle about its CENTRE
   (2.81). It shrinks the target and never moves it, for a glyph whose outer
   pixels are border (`164.34@80`) or a line of text with dead space either
