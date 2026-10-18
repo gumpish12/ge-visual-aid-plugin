@@ -1812,7 +1812,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.108";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.109";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -4578,6 +4578,12 @@ public class GEVisualAidPlugin extends Plugin
                 log.info("GEVisualAid agility progress set to {}", agProgress);
             }
             if (online) applyPendingPath();
+            // 2.109: the widget tree is client state, so the walk happens
+            // here and the HTTP thread waits for it. Online only - there is
+            // no interface tree at the login screen, and the handler answers
+            // that case itself rather than waiting for a tick that will
+            // never come.
+            if (online) applyPendingWidgetTree();
             if (online) updateAggroTimer(); else aggroReset();
             if (online) updateMotherlode(); else mlmReset();
             sceneStateBlock = buildSceneBlock(online);
@@ -13330,6 +13336,7 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/motherlode", this::handleMotherlodeRequest); // 2.87
             httpServer.createContext("/geoffer", this::handleGeOfferRequest); // 2.102
             httpServer.createContext("/slayer",  this::handleSlayerRequest);  // 2.108
+            httpServer.createContext("/widgettree", this::handleWidgetTreeRequest); // 2.109
             httpServer.createContext("/loadout", this::handleLoadoutRequest);   // 2.95
             httpServer.createContext("/hop",    this::handleHopRequest);
             httpServer.createContext("/agility", this::handleAgilityRequest);
@@ -15629,5 +15636,300 @@ public class GEVisualAidPlugin extends Plugin
                  : "not available (needs the standard book, magic tab open)")
          .append(nl);
         return r.toString();
+    }
+
+    // =======================================================================
+    // 2.109 - /widgettree, THE WIDGET INSPECTOR AS TEXT
+    //
+    // CLAUDE.md has said since 2.80 that RuneLite's Widget Inspector is "the
+    // only place these ids can be read". It is not - the Inspector has no
+    // private data, it walks getWidgetRoots() and reflects over InterfaceID
+    // for the names, both of which this plugin can do. What the Inspector
+    // has is a window, and a window cannot be grepped, cannot be read on a
+    // VM, and has to be transcribed by hand - which is how 2.80 shipped
+    // "160:38" against an Inspector printing "160.38" and published nothing
+    // for sixteen days.
+    //
+    // THE SYMBOLIC NAME IS THE POINT. 218.47 is a number that means nothing
+    // and rots silently; MagicSpellbook.HIGH_ALCHEMY is the symbol, fails
+    // the BUILD on a rename, and is already half the annotation anyone would
+    // write by hand. Same reflection RuneLite's own WidgetInspector uses.
+    // =======================================================================
+
+    private static final int WT_MAX_DEFAULT = 400;   // runaway stop; says when it bites
+    private static final int WT_MAX_CEILING = 4000;
+    private static final int WT_DEPTH_MAX   = 12;
+
+    // group<<16|child -> "MagicSpellbook.HIGH_ALCHEMY". Built once, lazily.
+    // Not a lookup table in the forbidden sense: it is generated FROM the
+    // api jar at runtime, so it cannot disagree with the jar it was built on.
+    private volatile java.util.Map<Integer, String> wtNames = null;
+
+    private volatile String wtQuery    = null;   // set by the HTTP thread
+    private volatile String wtResult   = "";     // set by the client thread
+    private volatile long   wtResultId = 0;
+    private final    Object wtLock     = new Object();
+
+    private java.util.Map<Integer, String> widgetNameMap()
+    {
+        java.util.Map<Integer, String> m = wtNames;
+        if (m != null) return m;
+        m = new java.util.HashMap<>();
+        try
+        {
+            for (Class<?> inner : InterfaceID.class.getDeclaredClasses())
+            {
+                for (java.lang.reflect.Field f : inner.getDeclaredFields())
+                {
+                    if (f.getType() != int.class) continue;
+                    if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    f.setAccessible(true);
+                    m.put(f.getInt(null), inner.getSimpleName() + "." + f.getName());
+                }
+            }
+        }
+        catch (Throwable t) { log.warn("GEVisualAid widget name map: {}", t.getMessage()); }
+        wtNames = m;
+        return m;
+    }
+
+    // Applied on the CLIENT THREAD from updateSceneState. The widget tree is
+    // client state; walking it from the HTTP thread is the one thing this
+    // repo has always refused to do.
+    private void applyPendingWidgetTree()
+    {
+        String q = wtQuery;
+        if (q == null) return;
+        wtQuery = null;
+        String out;
+        try { out = buildWidgetTree(q); }
+        catch (Throwable t)
+        { out = "widgettree_state=read_error:" + t.getClass().getSimpleName() + "\n"; }
+        synchronized (wtLock)
+        {
+            wtResult = out;
+            wtResultId++;
+            wtLock.notifyAll();
+        }
+    }
+
+    private void handleWidgetTreeRequest(HttpExchange ex)
+    {
+        try
+        {
+            String q = ex.getRequestURI().getRawQuery();
+            if (q == null) q = "";
+
+            // Logged out there is no interface tree to walk, and no GameTick
+            // to walk it on - so a request would wait the full timeout and
+            // then report a timeout, which reads as a broken endpoint rather
+            // than as a client at the login screen. Answer here instead.
+            if (client.getGameState() != GameState.LOGGED_IN)
+            {
+                sendPlain(ex, "plugin_output_version=" + PLUGIN_OUTPUT_VERSION + "\n"
+                        + "widgettree_state=offline\n"
+                        + "No interface tree exists while logged out. Log in and ask again.\n");
+                return;
+            }
+
+            long before = wtResultId;
+            wtQuery = q;
+            synchronized (wtLock)
+            {
+                long deadline = System.currentTimeMillis() + 2500;
+                while (wtResultId == before)
+                {
+                    long left = deadline - System.currentTimeMillis();
+                    if (left <= 0) break;
+                    wtLock.wait(left);
+                }
+            }
+            if (wtResultId == before)
+            {
+                sendPlain(ex, "plugin_output_version=" + PLUGIN_OUTPUT_VERSION + "\n"
+                        + "widgettree_state=timeout\n"
+                        + "The client thread did not answer within 2.5s. Ticks may have\n"
+                        + "stopped (loading, lag, or the client lost focus mid-login).\n");
+                return;
+            }
+            sendPlain(ex, wtResult);
+        }
+        catch (Throwable t) { log.warn("GEVisualAid /widgettree error: {}", t.getMessage()); }
+    }
+
+    private String buildWidgetTree(String query)
+    {
+        java.util.Map<String, String> p = new java.util.HashMap<>();
+        for (String kv : query.split("&"))
+        {
+            if (kv.isEmpty()) continue;
+            int eq = kv.indexOf('=');
+            String k = eq < 0 ? kv : kv.substring(0, eq);
+            String v = eq < 0 ? ""  : kv.substring(eq + 1);
+            try { v = java.net.URLDecoder.decode(v, "UTF-8"); } catch (Throwable ignored) { }
+            p.put(k.toLowerCase(java.util.Locale.ROOT), v);
+        }
+
+        int     group   = intOr(p.get("group"), -1);
+        String  find    = p.getOrDefault("find", "").trim().toLowerCase(java.util.Locale.ROOT);
+        boolean visOnly = "1".equals(p.get("visible")) || "true".equals(p.get("visible"));
+        boolean all     = "1".equals(p.get("all"))     || "true".equals(p.get("all"));
+        int     max     = Math.min(WT_MAX_CEILING, Math.max(1, intOr(p.get("max"), WT_MAX_DEFAULT)));
+
+        String nl = System.lineSeparator();
+        StringBuilder r = new StringBuilder(8192);
+        r.append("WIDGET TREE - the Widget Inspector, as text").append(nl);
+        r.append("plugin ").append(PLUGIN_OUTPUT_VERSION)
+         .append("   read ")
+         .append(new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date()))
+         .append(nl);
+        r.append("filters: group=").append(group < 0 ? "any" : group)
+         .append("  find=").append(find.isEmpty() ? "-" : find)
+         .append("  visible_only=").append(visOnly)
+         .append("  max=").append(max).append(nl);
+        r.append("usage: /widgettree?group=218  ?find=alch  ?visible=1  ?max=800  ?all=1")
+         .append(nl);
+        r.append("-----------------------------------------------------------------")
+         .append(nl);
+
+        // An unfiltered walk is tens of thousands of rows. Refuse rather than
+        // truncate: a truncated dump looks like a complete one that is simply
+        // missing what you were after, which is the worst of both.
+        if (group < 0 && find.isEmpty() && !all)
+        {
+            r.append("REFUSED: no filter given.").append(nl);
+            r.append("The whole tree is tens of thousands of rows and a truncated dump")
+             .append(nl)
+             .append("reads exactly like a complete one missing what you wanted.")
+             .append(nl)
+             .append("Narrow it with ?group= or ?find=, or say ?all=1 to mean it.")
+             .append(nl);
+            return r.toString();
+        }
+
+        java.util.Map<Integer, String> names = widgetNameMap();
+        int[] counters = new int[]{ 0, 0 };   // [0] emitted, [1] visited
+
+        Widget[] roots;
+        try { roots = client.getWidgetRoots(); }
+        catch (Throwable t)
+        {
+            r.append("REFUSED: getWidgetRoots() threw ").append(t.getClass().getSimpleName()).append(nl);
+            return r.toString();
+        }
+        if (roots == null) roots = new Widget[0];
+
+        StringBuilder body = new StringBuilder(8192);
+        for (Widget w : roots)
+            wtWalk(w, 0, group, find, visOnly, max, names, counters, body);
+
+        r.append(body);
+        r.append("-----------------------------------------------------------------")
+         .append(nl);
+        r.append("visited ").append(counters[1]).append("   printed ").append(counters[0]).append(nl);
+        // THE CAP SAYS WHEN IT BITES. 2.81's widget cap was 24, was blown by
+        // the first real list of 50, and kept the first 24 in silence while
+        // the rest read as "not found" - the wrong diagnosis entirely.
+        if (counters[0] >= max)
+            r.append("*** CAP HIT at ").append(max)
+             .append(" - there are MORE. Narrow the filter or raise ?max=").append(nl);
+        if (counters[0] == 0)
+            r.append("Nothing matched. An interface that is not open has no widgets at")
+             .append(nl)
+             .append("all, so an empty result here is usually a closed tab, not a bad id.")
+             .append(nl);
+        return r.toString();
+    }
+
+    private void wtWalk(Widget w, int depth, int group, String find, boolean visOnly,
+                        int max, java.util.Map<Integer, String> names,
+                        int[] counters, StringBuilder out)
+    {
+        if (w == null || depth > WT_DEPTH_MAX || counters[0] >= max) return;
+        counters[1]++;
+
+        int id = -1, g = -1, c = -1;
+        try { id = w.getId(); g = id >>> 16; c = id & 0xFFFF; } catch (Throwable ignored) { }
+
+        boolean hidden = true;
+        try { hidden = w.isHidden(); } catch (Throwable ignored) { }
+
+        String name = names.get(id);
+        String text = "";
+        try { text = w.getText() == null ? "" : w.getText().replaceAll("<[^>]+>", "").trim(); }
+        catch (Throwable ignored) { }
+
+        boolean groupOk = group < 0 || g == group;
+        boolean findOk  = find.isEmpty()
+                || (name != null && name.toLowerCase(java.util.Locale.ROOT).contains(find))
+                || text.toLowerCase(java.util.Locale.ROOT).contains(find)
+                || (g + "." + c).contains(find);
+        boolean visOk   = !visOnly || !hidden;
+
+        if (groupOk && findOk && visOk && id >= 0)
+        {
+            java.awt.Rectangle b = null;
+            try { b = w.getBounds(); } catch (Throwable ignored) { }
+            int sprite = -1, itemId = -1, type = -1;
+            try { sprite = w.getSpriteId(); } catch (Throwable ignored) { }
+            try { itemId = w.getItemId();   } catch (Throwable ignored) { }
+            try { type   = w.getType();     } catch (Throwable ignored) { }
+
+            StringBuilder acts = new StringBuilder();
+            try
+            {
+                String[] a = w.getActions();
+                if (a != null)
+                    for (String s : a)
+                        if (s != null && !s.isEmpty())
+                        { if (acts.length() > 0) acts.append("/"); acts.append(s); }
+            }
+            catch (Throwable ignored) { }
+
+            for (int i = 0; i < depth && i < 8; i++) out.append("  ");
+            out.append(g).append('.').append(c);
+            if (name != null) out.append("  ").append(name);
+            out.append("  type=").append(type);
+            out.append(hidden ? "  HIDDEN" : "  visible");
+            // THE RECT, ALWAYS - never a bare centre. RULE ZERO: a clickable
+            // thing is four numbers, and this page exists to be read by
+            // someone deciding what to click.
+            if (b != null && b.width > 0 && b.height > 0)
+                out.append("  rect=").append(b.x).append(',').append(b.y)
+                   .append(',').append(b.x + b.width).append(',').append(b.y + b.height)
+                   .append("  (").append(b.width).append('x').append(b.height).append(')');
+            else
+                out.append("  rect=none");
+            if (sprite >= 0) out.append("  sprite=").append(sprite);
+            if (itemId > 0)  out.append("  item=").append(itemId);
+            if (acts.length() > 0) out.append("  actions=[").append(acts).append(']');
+            if (!text.isEmpty())
+                out.append("  text=\"")
+                   .append(text.length() > 60 ? text.substring(0, 60) + "..." : text)
+                   .append('"');
+            out.append(System.lineSeparator());
+            counters[0]++;
+        }
+
+        try { wtWalkAll(w.getStaticChildren(),  depth + 1, group, find, visOnly, max, names, counters, out); }
+        catch (Throwable ignored) { }
+        try { wtWalkAll(w.getDynamicChildren(), depth + 1, group, find, visOnly, max, names, counters, out); }
+        catch (Throwable ignored) { }
+        try { wtWalkAll(w.getNestedChildren(),  depth + 1, group, find, visOnly, max, names, counters, out); }
+        catch (Throwable ignored) { }
+    }
+
+    private void wtWalkAll(Widget[] kids, int depth, int group, String find, boolean visOnly,
+                           int max, java.util.Map<Integer, String> names,
+                           int[] counters, StringBuilder out)
+    {
+        if (kids == null) return;
+        for (Widget k : kids) wtWalk(k, depth, group, find, visOnly, max, names, counters, out);
+    }
+
+    private static int intOr(String s, int dflt)
+    {
+        if (s == null || s.isEmpty()) return dflt;
+        try { return Integer.parseInt(s.trim()); } catch (Exception e) { return dflt; }
     }
 }

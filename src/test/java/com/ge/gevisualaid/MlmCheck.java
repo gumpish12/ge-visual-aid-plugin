@@ -717,6 +717,49 @@ public class MlmCheck
         int slGateAt = slSrc.indexOf("if (!config.sceneTrackingEnabled())");
         eq("the slayer read runs before the scene gate",
                 slCallAt > 0 && slGateAt > slCallAt, true);
+
+        // ================================================================
+        // 2.109 - /widgettree
+        // ================================================================
+
+        // THE WALK IS CLIENT STATE. Doing it in the HTTP handler is the one
+        // thing this repo has always refused to do; the handler queues and
+        // waits, updateSceneState walks.
+        eq("the tree is walked from the client thread",
+                slSrc.contains("if (online) applyPendingWidgetTree();"), true);
+        eq("...and the handler only queues",
+                slSrc.contains("wtQuery = q;"), true);
+
+        // REFUSE, DO NOT TRUNCATE. A truncated dump reads exactly like a
+        // complete one that happens not to contain what you wanted - which
+        // is the 2.81 widget-cap failure with a bigger number.
+        eq("an unfiltered walk is refused, not truncated",
+                slSrc.contains("REFUSED: no filter given."), true);
+        eq("the cap announces itself when it bites",
+                slSrc.contains("*** CAP HIT at "), true);
+
+        // RULE ZERO. This page exists to be read by someone deciding what to
+        // click, so every row carries the RECT. A row that printed only a
+        // centre would be the rule broken at the source.
+        eq("every row carries a rect",
+                slSrc.contains("out.append(\"  rect=\")"), true);
+        eq("...and says so explicitly when there is none",
+                slSrc.contains("rect=none"), true);
+
+        // Logged out there is no tree AND no GameTick to walk it on, so a
+        // queued request would wait the full timeout and report "timeout" -
+        // which reads as a broken endpoint, not a client at the login
+        // screen. Two different repairs, so two different words.
+        eq("logged out is answered by the handler, not by timing out",
+                slSrc.contains("widgettree_state=offline"), true);
+        eq("a real timeout is still a distinct state",
+                slSrc.contains("widgettree_state=timeout"), true);
+
+        // THE NAMES ARE GENERATED FROM THE JAR, NOT TYPED. A hand-written
+        // id->name map is the forbidden kind of table; reflecting over
+        // InterfaceID cannot disagree with the api it was built against.
+        eq("symbolic names come from reflection over InterfaceID",
+                slSrc.contains("InterfaceID.class.getDeclaredClasses()"), true);
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }
