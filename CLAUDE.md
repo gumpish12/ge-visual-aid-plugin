@@ -228,6 +228,20 @@ non-trivial change.
   four correct ids. 2.84 says "not loaded - its interface is closed, OR the id
   is wrong" and names the action that separates them. **Only `hidden` proves
   an id is right**, because the interface had to load for it to be there.
+- **NEVER A SINGLE POINT — ALWAYS RANDOMISED WITHIN THE BOX.** Every click
+  box this plugin publishes carries a RECT (`_x1/_y1/_x2/_y2`) beside its
+  `click_x/click_y`, and the centre is a REFERENCE, not an instruction. The
+  consumer picks a point inside the rect: `CBT_BoxPoint` in the skiller does
+  it with a bell curve at 45% of the half-width, clamped 4px inside the
+  edges. Clicking the exact centre every time is a pixel-perfect signature
+  no human produces.
+  **This rule was unwritten until 2026-10-18 and lived only inside
+  `CBT_BoxPoint`.** Josh believed it was in here; it was not, and in its
+  absence 2.108 published `wg_high_alch_click_x/_y` and `/widgets` described
+  them as "the point to click" with no mention of the rect beside them. A
+  convention that exists in one function is one new consumer away from being
+  lost — and the new consumer was me.
+
 - **`@N` IS A CLICK INSET** — keep N% of the rectangle about its CENTRE
   (2.81). It shrinks the target and never moves it, for a glyph whose outer
   pixels are border (`164.34@80`) or a line of text with dead space either

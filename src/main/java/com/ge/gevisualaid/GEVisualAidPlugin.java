@@ -8733,7 +8733,12 @@ public class GEVisualAidPlugin extends Plugin
            .append("   widgets ").append(wgNames.size())
            .append("   read ").append(new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date()))
            .append(System.lineSeparator());
-        rep.append("CLICK is the point to click - the rect centre, after any inset.")
+        // 2.108c: was "the point to click", which told every reader of this
+        // page to do the one thing the suite must never do. The centre is a
+        // REFERENCE; the rect beside it is what you click inside.
+        rep.append("CLICK is the rect CENTRE after any inset - a reference, NOT a click point.")
+           .append(System.lineSeparator());
+        rep.append("Randomise inside the RECT. A pixel-perfect centre click is a signature.")
            .append(System.lineSeparator());
         rep.append("--------------------------------------------------------------------------")
            .append(System.lineSeparator());
@@ -15599,7 +15604,7 @@ public class GEVisualAidPlugin extends Plugin
          .append(", from ").append(f.getOrDefault("spellbook_source", "?")).append(")").append(nl);
         r.append("HIGH ALCH ")
          .append("true".equals(f.get("alch_available"))
-                 ? "available - click point is wg_high_alch in /widgets"
+                 ? "available - randomise inside the wg_high_alch RECT (/widgets)"
                  : "not available (needs the standard book, magic tab open)")
          .append(nl);
         return r.toString();

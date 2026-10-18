@@ -636,6 +636,15 @@ public class MlmCheck
             eq("offline also publishes " + k, offline.contains(k + "="), true);
         }
 
+        // The centre is a REFERENCE. No page this plugin serves may call it
+        // a click point: the suite randomises inside the rect, and a
+        // pixel-perfect centre click is a signature no human produces. The
+        // rule was unwritten until 2026-10-18 and 2.108 broke it twice.
+        eq("no page calls the centre a point to click",
+                slSrc.contains("is the point to click"), false);
+        eq("/widgets says to randomise inside the rect",
+                slSrc.contains("Randomise inside the RECT"), true);
+
         // 2.108b: the signature only reads while the tab is OPEN, so a shut
         // tab must fall back to a LEARNED pairing, never an assumed one, and
         // must still say "unknown" before the tab has been seen once.
