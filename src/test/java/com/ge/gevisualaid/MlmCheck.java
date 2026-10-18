@@ -636,6 +636,26 @@ public class MlmCheck
             eq("offline also publishes " + k, offline.contains(k + "="), true);
         }
 
+        // 2.108b: the signature only reads while the tab is OPEN, so a shut
+        // tab must fall back to a LEARNED pairing, never an assumed one, and
+        // must still say "unknown" before the tab has been seen once.
+        eq("a shut tab falls back to a remembered id",
+                slSrc.contains("source = \"remembered_id\""), true);
+        eq("...which is only ever written from a real signature reading",
+                slSrc.contains("if (id >= 0 && id < sbLearned.length) sbLearned[id] = name;"), true);
+        eq("the learned map is published so it can be checked",
+                slSrc.contains("spellbook_id_map="), true);
+
+        // A count timed from FIRST SIGHT reads identically to one that has
+        // stalled, and warning on it accuses the task every time you log in.
+        // Checked on the ONLINE expression, not the bare key: the offline
+        // branch publishes the same key as a literal, so searching for the
+        // key alone stayed true with the online field deleted. Proved.
+        eq("the count says which kind of number it is",
+                slSrc.contains("slCountSeen ? \"change\" : \"first_sight\""), true);
+        eq("the stall warning only fires on a real change",
+                slSrc.contains("if (fromChange && Integer.parseInt(still) > 300)"), true);
+
         // The spellbook NAME must not come from the varbit. Nobody has
         // watched all four of its values, so a 0..3 map would be a guess
         // printed as a fact - and the raw id has to go out beside the name

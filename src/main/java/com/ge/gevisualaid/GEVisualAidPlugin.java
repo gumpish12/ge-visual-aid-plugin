@@ -15035,12 +15035,18 @@ public class GEVisualAidPlugin extends Plugin
             "high_alch=" + (InterfaceID.MagicSpellbook.HIGH_ALCHEMY >>> 16)
                     + "." + (InterfaceID.MagicSpellbook.HIGH_ALCHEMY & 0xFFFF);
 
+    // id -> name, learned by watching the two agree. Session-scoped on
+    // purpose: a remembered pairing is only as good as the client build it
+    // was seen on, and one tab open re-earns it.
+    private final String[] sbLearned = new String[8];
+
     private volatile String spellbookBlock = "spellbook_state=no_reading_yet\n";
     private volatile String slayerBlock    = "slayer_state=no_reading_yet\n";
 
     private int    slLastCount  = -1;
     private int    slCountTick  = -1;
     private String slCountTask  = "";
+    private boolean slCountSeen = false;
     private volatile String slSuperior   = "";
     private volatile long   slSuperiorMs = 0;
     private final java.util.LinkedHashSet<String> slSeen = new java.util.LinkedHashSet<>();
@@ -15080,6 +15086,7 @@ public class GEVisualAidPlugin extends Plugin
                  + "spellbook_id=-1\n"
                  + "spellbook_source=offline\n"
                  + "spellbook_interface_loaded=false\n"
+                 + "spellbook_id_map=\n"
                  + "alch_available=false\n"
                  + "alch_point_field=wg_high_alch\n";
         }
@@ -15106,17 +15113,51 @@ public class GEVisualAidPlugin extends Plugin
             if (SB_SIGNATURE[i] == InterfaceID.MagicSpellbook.HIGH_ALCHEMY) alchVisible = true;
         }
 
+        // THE SIGNATURE ONLY READS WHILE THE TAB IS OPEN, which 2.108 shipped
+        // without noticing: with the magic tab shut the spells all still
+        // EXIST (interface_loaded=true) and are all hidden, so the name read
+        // "unknown" for the 99% of the time nobody is looking at the
+        // spellbook. That is not "always on", which is the whole ask.
+        //
+        // So the pairing is LEARNED instead of assumed. Every time the
+        // signature IS readable the id is recorded against the name it was
+        // seen with, and a shut tab then reports the remembered name for
+        // that id. Nothing is guessed: before the tab has been opened once
+        // this session the answer is "unknown", honestly, and the source
+        // field always says which of the two answered.
         String source;
-        if (!idErr.isEmpty() && present == 0) source = "varbit_error:" + idErr;
-        else if (present == 0)                source = "interface_not_loaded";
-        else if (name.equals("unknown"))      source = "no_signature_visible";
-        else                                  source = "signature";
+        if (!name.equals("unknown"))
+        {
+            source = "signature";
+            if (id >= 0 && id < sbLearned.length) sbLearned[id] = name;
+        }
+        else if (id >= 0 && id < sbLearned.length && sbLearned[id] != null)
+        {
+            name   = sbLearned[id];
+            source = "remembered_id";
+        }
+        else if (!idErr.isEmpty())  source = "varbit_error:" + idErr;
+        else if (present == 0)      source = "interface_not_loaded";
+        else                        source = "tab_closed_and_id_unseen";
+
+        StringBuilder map = new StringBuilder();
+        for (int i = 0; i < sbLearned.length; i++)
+        {
+            if (sbLearned[i] == null) continue;
+            if (map.length() > 0) map.append("|");
+            map.append(i).append("=").append(sbLearned[i]);
+        }
 
         return "spellbook_state=live\n"
              + "spellbook=" + name + "\n"
              + "spellbook_id=" + id + "\n"
              + "spellbook_source=" + source + "\n"
              + "spellbook_interface_loaded=" + (present > 0) + "\n"
+             // What this session has actually WITNESSED, id=name. The map is
+             // published rather than kept private so the mapping can be read
+             // off the feed and checked against the screen - the same reason
+             // ge_offer_price goes out raw beside its source.
+             + "spellbook_id_map=" + map + "\n"
              + "alch_available=" + alchVisible + "\n"
              + "alch_point_field=wg_high_alch\n";
     }
@@ -15138,6 +15179,7 @@ public class GEVisualAidPlugin extends Plugin
                  + "slayer_points=-1\nslayer_streak=-1\nslayer_master=-1\n"
                  + "slayer_boss_id=-1\n"
                  + "slayer_count_last_change_tick=-1\nslayer_count_still_ticks=-1\n"
+                 + "slayer_count_timed_from=offline\n"
                  + "slayer_superiors_unlocked=false\nslayer_superiors_off=false\n"
                  + "slayer_superior_last=\nslayer_superior_ms=0\nslayer_superior_age_ms=-1\n"
                  + "slayer_match_word=\nslayer_npc_filter=\n"
@@ -15162,16 +15204,25 @@ public class GEVisualAidPlugin extends Plugin
         // goes out; a consumer compares it with how long it has been killing.
         int tick = -1;
         try { tick = client.getTickCount(); } catch (Throwable ignored) { }
+        //
+        // AND IT SAYS WHICH KIND OF NUMBER IT IS. A task already assigned
+        // when the client started has had no change to time from, so the
+        // clock runs from FIRST SIGHT - which reads identically to "109
+        // kills have failed to register" and is the opposite conclusion.
+        // Same trap as mlm_dep_N_timed_from, caught here by reading the
+        // live feed 103 ticks after a restart.
         if (!task.equals(slCountTask))
         {
-            slCountTask = task;
-            slLastCount = count;
-            slCountTick = tick;
+            slCountTask  = task;
+            slLastCount  = count;
+            slCountTick  = tick;
+            slCountSeen  = false;
         }
         else if (count != slLastCount)
         {
-            slLastCount = count;
-            slCountTick = tick;
+            slLastCount  = count;
+            slCountTick  = tick;
+            slCountSeen  = true;
         }
         int still = (slCountTick < 0 || tick < 0) ? -1 : (tick - slCountTick);
 
@@ -15200,6 +15251,7 @@ public class GEVisualAidPlugin extends Plugin
              + "slayer_boss_id=" + bossId + "\n"
              + "slayer_count_last_change_tick=" + slCountTick + "\n"
              + "slayer_count_still_ticks=" + still + "\n"
+             + "slayer_count_timed_from=" + (slCountSeen ? "change" : "first_sight") + "\n"
              + "slayer_superiors_unlocked="
                  + (client.getVarbitValue(VarbitID.SLAYER_UNLOCK_SUPERIORMOBS) == 1) + "\n"
              + "slayer_superiors_off="
@@ -15475,15 +15527,25 @@ public class GEVisualAidPlugin extends Plugin
          .append("   streak ").append(f.getOrDefault("slayer_streak", "?")).append(nl);
 
         String still = f.getOrDefault("slayer_count_still_ticks", "-1");
-        r.append("COUNT   last moved ").append(still).append(" ticks ago");
+        String from  = f.getOrDefault("slayer_count_timed_from", "?");
+        boolean fromChange = from.equals("change");
+        r.append("COUNT   ")
+         .append(fromChange ? "last moved " : "watched for ")
+         .append(still).append(" ticks");
         try
         {
             // The question Josh actually asked: if these are not counting,
             // they are the wrong monsters or the wrong place. The number is
             // reported raw and the warning is a reading of it, not a rule -
             // a slow kill and a non-counting kill look the same for a while.
-            if (Integer.parseInt(still) > 300)
+            //
+            // ONLY ON A REAL CHANGE. Timed from first sight the clock
+            // measures how long the client has been up, and warning on that
+            // accuses the task of not counting every time you log in.
+            if (fromChange && Integer.parseInt(still) > 300)
                 r.append("   <-- NOT COUNTING? check the area and the variant");
+            else if (!fromChange)
+                r.append("   (no kill seen yet this session - not a stall)");
         }
         catch (Exception ignored) { }
         r.append(nl);
