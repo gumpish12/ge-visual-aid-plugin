@@ -15299,7 +15299,20 @@ public class GEVisualAidPlugin extends Plugin
         if (t.isEmpty()) return "";
         int sp = t.lastIndexOf(' ');
         String w = sp < 0 ? t : t.substring(sp + 1);
-        if (w.length() > 3 && w.endsWith("s")) w = w.substring(0, w.length() - 1);
+
+        // THE NAIVE STRIP WAS WRONG ON FIVE REAL TASKS, measured against the
+        // 152 in RuneLite's own enum: Dwarves -> "Dwarve", Elves -> "Elve",
+        // Wolves -> "Wolve", Jellies -> "Jellie", and worst of all
+        // "The Cave Kraken Boss" -> "Bos", which is not a word and would
+        // word-match something unrelated rather than fail. English has three
+        // rules here and they cover every case in that list.
+        if (w.length() > 4 && w.endsWith("ies"))
+            w = w.substring(0, w.length() - 3) + "y";          // Jellies -> Jelly
+        else if (w.length() > 4 && w.endsWith("ves"))
+            w = w.substring(0, w.length() - 3) + "f";          // Elves -> Elf
+        else if (w.length() > 3 && w.endsWith("s")
+                && w.charAt(w.length() - 2) != 's')            // Boss stays Boss
+            w = w.substring(0, w.length() - 1);
         return w;
     }
 

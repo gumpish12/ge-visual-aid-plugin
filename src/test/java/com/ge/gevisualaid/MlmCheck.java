@@ -562,6 +562,16 @@ public class MlmCheck
         // word boundary, not the length, is what stops it matching "Batman".
         eq("bats -> bat",
                 GEVisualAidPlugin.slayerMatchWord("Bats"), "Bat");
+        // The five the naive strip got wrong, measured against the 152 task
+        // names in RuneLite's own enum. "Bos" is the dangerous one: not a
+        // word, so it fails by matching something unrelated, not by matching
+        // nothing. These are regression tests, not examples.
+        eq("dwarves -> dwarf", GEVisualAidPlugin.slayerMatchWord("Dwarves"), "Dwarf");
+        eq("elves -> elf",     GEVisualAidPlugin.slayerMatchWord("Elves"), "Elf");
+        eq("wolves -> wolf",   GEVisualAidPlugin.slayerMatchWord("Wolves"), "Wolf");
+        eq("jellies -> jelly", GEVisualAidPlugin.slayerMatchWord("Jellies"), "Jelly");
+        eq("a double s is not a plural",
+                GEVisualAidPlugin.slayerMatchWord("The Cave Kraken Boss"), "Boss");
         eq("no task is no word", GEVisualAidPlugin.slayerMatchWord(""), "");
         eq("null is no word", GEVisualAidPlugin.slayerMatchWord(null), "");
 
