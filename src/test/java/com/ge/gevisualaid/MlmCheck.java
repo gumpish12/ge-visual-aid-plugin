@@ -760,6 +760,24 @@ public class MlmCheck
         // InterfaceID cannot disagree with the api it was built against.
         eq("symbolic names come from reflection over InterfaceID",
                 slSrc.contains("InterfaceID.class.getDeclaredClasses()"), true);
+
+        // 2.109a: /widgettree printed RAW CANVAS bounds under the same field
+        // name /widgets uses for desktop pixels - 62,5,86,29 against
+        // 3370,1837,3406,1873 for the SAME button, seen live. Both look like
+        // coordinates and the small one clicks the corner of the screen.
+        // It must use the SAME transform, captured where buildSceneBlock
+        // computes it; a second copy of that arithmetic is the 2.104 trap.
+        eq("the tree converts to desktop pixels",
+                slSrc.contains("toScreenX(b.x, wtOx, wtDsx)"), true);
+        eq("...using the captured transform, not its own copy",
+                slSrc.contains("wtCanvasOk = canvasOk;"), true);
+        eq("raw canvas bounds are never printed as rect",
+                slSrc.contains("rect=no_transform(canvas_off)"), true);
+        // A scrolled-out widget still HAS a rectangle, just somewhere else -
+        // possibly over the game world, where clicking it walks the player.
+        eq("a scrolled-out widget is named, not offered as a target",
+                slSrc.contains("OFFSCREEN-DO-NOT-CLICK"), true);
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }

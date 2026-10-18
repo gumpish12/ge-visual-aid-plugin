@@ -4684,6 +4684,17 @@ public class GEVisualAidPlugin extends Plugin
         }
         catch (Throwable ignored) { canvasOk = false; }
 
+        // 2.109a: PUBLISH THE TRANSFORM TO /widgettree, do not let it compute
+        // its own. Shipped unfixed, /widgettree printed raw canvas bounds
+        // under the same field name /widgets uses for desktop pixels - the
+        // high alch button read rect=62,5,86,29 on one page and
+        // rect=3370,1837,3406,1873 on the other. Two meanings, one word, and
+        // the smaller one looks like a perfectly usable coordinate.
+        // Captured rather than recomputed for the 2.104 reason: a second copy
+        // of the same arithmetic is how two numbers drift apart in silence.
+        wtCanvasOk = canvasOk;
+        wtOx = ox; wtOy = oy; wtDsx = dsx; wtDsy = dsy; wtCw = cw; wtCh = ch;
+
         sb.append("canvas_ok=").append(canvasOk).append("\n");
         sb.append("canvas_screen_x=").append((int) (ox * dsx)).append("\n");
         sb.append("canvas_screen_y=").append((int) (oy * dsy)).append("\n");
@@ -15665,6 +15676,11 @@ public class GEVisualAidPlugin extends Plugin
     // api jar at runtime, so it cannot disagree with the jar it was built on.
     private volatile java.util.Map<Integer, String> wtNames = null;
 
+    // The canvas transform, captured where buildSceneBlock computes it.
+    private volatile boolean wtCanvasOk = false;
+    private volatile int     wtOx = 0, wtOy = 0, wtCw = 0, wtCh = 0;
+    private volatile double  wtDsx = 1.0, wtDsy = 1.0;
+
     private volatile String wtQuery    = null;   // set by the HTTP thread
     private volatile String wtResult   = "";     // set by the client thread
     private volatile long   wtResultId = 0;
@@ -15892,12 +15908,42 @@ public class GEVisualAidPlugin extends Plugin
             out.append("  type=").append(type);
             out.append(hidden ? "  HIDDEN" : "  visible");
             // THE RECT, ALWAYS - never a bare centre. RULE ZERO: a clickable
-            // thing is four numbers, and this page exists to be read by
-            // someone deciding what to click.
+            // thing is four numbers, and this page is read by someone
+            // deciding what to click.
+            //
+            // IN DESKTOP PIXELS, THE SAME SPACE /widgets USES. The raw bounds
+            // are canvas-relative and roughly 1/1.32 of the real thing here;
+            // printed under the same word "rect" they are a trap, because 62,5
+            // is a perfectly plausible-looking coordinate that clicks the
+            // corner of the screen. The canvas figure is kept beside it under
+            // its own name.
             if (b != null && b.width > 0 && b.height > 0)
-                out.append("  rect=").append(b.x).append(',').append(b.y)
-                   .append(',').append(b.x + b.width).append(',').append(b.y + b.height)
-                   .append("  (").append(b.width).append('x').append(b.height).append(')');
+            {
+                if (wtCanvasOk)
+                {
+                    out.append("  rect=")
+                       .append(toScreenX(b.x, wtOx, wtDsx)).append(',')
+                       .append(toScreenY(b.y, wtOy, wtDsy)).append(',')
+                       .append(toScreenX(b.x + b.width,  wtOx, wtDsx)).append(',')
+                       .append(toScreenY(b.y + b.height, wtOy, wtDsy))
+                       .append("  (").append((int) (b.width * wtDsx))
+                       .append('x').append((int) (b.height * wtDsy)).append(')');
+                }
+                else
+                {
+                    // Never print raw bounds as "rect". Canvas tracking off,
+                    // or the canvas not on screen yet: say which.
+                    out.append("  rect=no_transform(canvas_off)");
+                }
+                out.append("  canvas=").append(b.x).append(',').append(b.y)
+                   .append(',').append(b.x + b.width).append(',').append(b.y + b.height);
+                // A SCROLLED-OUT WIDGET STILL HAS A RECTANGLE, just somewhere
+                // else - possibly over the game world, where clicking it walks
+                // the player. 2.66 learned this on bank items. Name it here.
+                if (wtCanvasOk && (b.x + b.width < 0 || b.y + b.height < 0
+                        || (wtCw > 0 && b.x > wtCw) || (wtCh > 0 && b.y > wtCh)))
+                    out.append("  OFFSCREEN-DO-NOT-CLICK");
+            }
             else
                 out.append("  rect=none");
             if (sprite >= 0) out.append("  sprite=").append(sprite);
