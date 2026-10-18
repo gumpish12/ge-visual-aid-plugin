@@ -21,6 +21,7 @@ import net.runelite.api.Player;
 import net.runelite.api.Prayer;
 import net.runelite.api.Projectile;
 import net.runelite.api.events.ProjectileMoved;
+import net.runelite.api.gameval.DBTableID;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.ObjectID;
@@ -1811,7 +1812,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.107";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.108";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2775,6 +2776,22 @@ public class GEVisualAidPlugin extends Plugin
                 if (clean.length() > 400) clean = clean.substring(0, 400);
                 lastSystemMessage   = clean;
                 lastSystemMessageMs = System.currentTimeMillis();
+            }
+        }
+
+        // 2.108: THE SUPERIOR SPAWN HAS NO OTHER SIGNAL. No varbit fires and
+        // the NPC is just another spawn until this line arrives, so RuneLite's
+        // own Slayer plugin detects it exactly this way. SPAM is included
+        // beside GAMEMESSAGE because which of the two carries it depends on
+        // the player's chat filter, and testing only one would work on one
+        // account and silently never fire on another.
+        if (type == ChatMessageType.GAMEMESSAGE || type == ChatMessageType.SPAM)
+        {
+            String m = event.getMessage();
+            if (m != null && m.contains(SL_SUPERIOR_CHAT))
+            {
+                slSuperior   = "appeared";
+                slSuperiorMs = System.currentTimeMillis();
             }
         }
     }
@@ -4223,7 +4240,9 @@ public class GEVisualAidPlugin extends Plugin
                 + buildClerkState()
                 + buildCopilotPreferencesState()
                 + buildApmAndMembershipState()
-                + buildSceneState();
+                + buildSceneState()
+                + buildSpellbookState()                      // 2.108
+                + buildSlayerState();                        // 2.108
     }
 
     private String buildSlotState()
@@ -4348,7 +4367,9 @@ public class GEVisualAidPlugin extends Plugin
                 + buildClerkState()
                 + buildCopilotPreferencesState()
                 + buildApmAndMembershipState()
-                + buildSceneState();
+                + buildSceneState()
+                + buildSpellbookState()                      // 2.108
+                + buildSlayerState();                        // 2.108
     }
 
     private String buildClerkState()
@@ -4499,6 +4520,15 @@ public class GEVisualAidPlugin extends Plugin
     // -----------------------------------------------------------------------
     private void updateSceneState()
     {
+        // 2.108: ABOVE the Scene & Tiles gate below, deliberately. The
+        // spellbook and slayer fields read no scene geometry - they are
+        // varps, two cache tables and one interface - so gating them on a
+        // scene toggle would make them vanish for a reason that has nothing
+        // to do with them. Self-guarded, so a throw cannot reach the scene
+        // build underneath it.
+        try { updateSpellbookAndSlayer(client.getGameState() == GameState.LOGGED_IN); }
+        catch (Throwable ignored) { }
+
         try
         {
             // V2.22: master gate. Off means off — no client reads at all,
@@ -5317,6 +5347,17 @@ public class GEVisualAidPlugin extends Plugin
         esNpcs      = npcs.toString();
         esItems     = itms.toString();
         esBoxes     = boxs.toString();
+        // 2.108: the high alch button is ALWAYS in the merged list. Appended
+        // rather than built separately so it travels the one widget path -
+        // same desktop-pixel conversion, same _state vocabulary, and it shows
+        // up in /widgets for free. Appended LAST and only if absent, so a
+        // label the operator wrote themselves still wins and is not reported
+        // as a duplicate rejection.
+        if (wgts.indexOf("high_alch=") < 0)
+        {
+            if (wgts.length() > 0) wgts.append(",");
+            wgts.append(WG_BUILTIN_HIGH_ALCH);
+        }
         esWidgets   = wgts.toString();
         esActive    = act.toString();
         esAvailable = avail.toString();
@@ -13262,6 +13303,7 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/tick",   this::handleTickRequest);     // 2.85
             httpServer.createContext("/motherlode", this::handleMotherlodeRequest); // 2.87
             httpServer.createContext("/geoffer", this::handleGeOfferRequest); // 2.102
+            httpServer.createContext("/slayer",  this::handleSlayerRequest);  // 2.108
             httpServer.createContext("/loadout", this::handleLoadoutRequest);   // 2.95
             httpServer.createContext("/hop",    this::handleHopRequest);
             httpServer.createContext("/agility", this::handleAgilityRequest);
@@ -14941,5 +14983,550 @@ public class GEVisualAidPlugin extends Plugin
         }
         throw new NoSuchMethodException(methodName + " not found on "
                 + obj.getClass().getSimpleName());
+    }
+
+    // =======================================================================
+    // 2.108 - SPELLBOOK, HIGH ALCHEMY AND SLAYER
+    //
+    // On BOTH state headers and NOT behind the Scene & Tiles gate, because
+    // none of this reads the scene: it is varps, two cache tables and one
+    // interface. The split 2.85 made for the game clock applies - there is no
+    // filter here and nothing to gate, so a toggle whose only power would be
+    // to make a free field absent is a way to break this silently. With none,
+    // an absent slayer_state has exactly one meaning: a plugin below 2.108.
+    //
+    // THE TASK NAME IS NOT A LOOKUP TABLE. It comes out of the game's own
+    // cache - DBTableID.SlayerTask and SlayerArea, the same rows RuneLite's
+    // own Slayer plugin reads - so it cannot rot and cannot mislabel. Every
+    // id below is a SYMBOL, which fails the BUILD on a rename rather than
+    // matching nothing for ever.
+    //
+    // net.runelite.api.Varbits still carries a SUPERIOR_ENABLED = 5362, while
+    // the gameval names for that feature are SLAYER_UNLOCK_SUPERIORMOBS =
+    // 5358 and SLAYER_TOGGLEOFF_SUPERIORMOBS = 14825. Three numbers for one
+    // question and the deprecated one matches neither, so it is not used
+    // here, and both halves go out rather than one "enabled" flag: superiors
+    // need the unlock bought AND the toggle left on.
+    // =======================================================================
+
+    private static final String SL_SUPERIOR_CHAT = "A superior foe has appeared";
+    private static final int    SL_TASKID_BOSSES = 98;   // [proc,helper_slayer_current_assignment]
+    private static final int    SL_SEEN_CAP      = 40;   // runaway stop, not a budget
+
+    // The four spellbooks, each named by a spell only IT has. Verified live
+    // on 2026-10-18 in Josh's own client: with the Widget Inspector's "hide
+    // hidden" on, only the active book's spells are present under 218.3, and
+    // HIGH_ALCHEMY sat at 218.47 exactly.
+    private static final int[] SB_SIGNATURE = {
+            InterfaceID.MagicSpellbook.HIGH_ALCHEMY,
+            InterfaceID.MagicSpellbook.ICE_BARRAGE,
+            InterfaceID.MagicSpellbook.VENGEANCE,
+            InterfaceID.MagicSpellbook.WARD_OF_ARCEUUS,
+    };
+    private static final String[] SB_NAME = { "standard", "ancient", "lunar", "arceuus" };
+
+    // Appended to the MERGED widget list so the high alch button travels the
+    // SAME path as every other widget: one conversion to desktop pixels, one
+    // _state vocabulary, and it appears in /widgets for free. A second
+    // implementation computing its own coordinates is exactly how two numbers
+    // that mean the same thing drift apart. Spelled FROM the symbol, so if
+    // the component ever moves this string moves with it.
+    static final String WG_BUILTIN_HIGH_ALCH =
+            "high_alch=" + (InterfaceID.MagicSpellbook.HIGH_ALCHEMY >>> 16)
+                    + "." + (InterfaceID.MagicSpellbook.HIGH_ALCHEMY & 0xFFFF);
+
+    private volatile String spellbookBlock = "spellbook_state=no_reading_yet\n";
+    private volatile String slayerBlock    = "slayer_state=no_reading_yet\n";
+
+    private int    slLastCount  = -1;
+    private int    slCountTick  = -1;
+    private String slCountTask  = "";
+    private volatile String slSuperior   = "";
+    private volatile long   slSuperiorMs = 0;
+    private final java.util.LinkedHashSet<String> slSeen = new java.util.LinkedHashSet<>();
+    private String slSeenTask = "";
+
+    // Called from updateSceneState ABOVE the Scene & Tiles gate. Each half is
+    // guarded separately: a throw in one must not blank the other, and a
+    // blank that cannot say why is the 2.92 trap.
+    private void updateSpellbookAndSlayer(boolean online)
+    {
+        try   { spellbookBlock = buildSpellbookBlock(online); }
+        catch (Throwable t)
+        { spellbookBlock = "spellbook_state=read_error:" + t.getClass().getSimpleName() + "\n"; }
+
+        try   { slayerBlock = buildSlayerBlock(online); }
+        catch (Throwable t)
+        { slayerBlock = "slayer_state=read_error:" + t.getClass().getSimpleName() + "\n"; }
+    }
+
+    private String buildSpellbookState() { return spellbookBlock; }
+    private String buildSlayerState()    { return slayerBlock; }
+
+    // ---- spellbook ---------------------------------------------------------
+    //
+    // The NAME is read off the INTERFACE, not off the varbit. The varbit is an
+    // index into a cache enum and nobody here has watched all four of its
+    // values change, so a hardcoded 0..3 map would be a guess wearing the
+    // clothes of a fact. Which spells are PRESENT is a reading. The raw id
+    // goes out beside it so the mapping can be measured FROM THE FEED later
+    // without a deploy - the same reason ge_offer_price is published raw.
+    private String buildSpellbookBlock(boolean online)
+    {
+        if (!online)
+        {
+            return "spellbook_state=offline\n"
+                 + "spellbook=unknown\n"
+                 + "spellbook_id=-1\n"
+                 + "spellbook_source=offline\n"
+                 + "spellbook_interface_loaded=false\n"
+                 + "alch_available=false\n"
+                 + "alch_point_field=wg_high_alch\n";
+        }
+
+        int    id    = -1;
+        String idErr = "";
+        try { id = client.getVarbitValue(VarbitID.SPELLBOOK); }
+        catch (Throwable t) { idErr = t.getClass().getSimpleName(); }
+
+        int     present     = 0;
+        String  name        = "unknown";
+        boolean alchVisible = false;
+
+        for (int i = 0; i < SB_SIGNATURE.length; i++)
+        {
+            Widget w = null;
+            try { w = client.getWidget(SB_SIGNATURE[i]); } catch (Throwable ignored) { }
+            if (w == null) continue;
+            present++;
+            boolean hidden = true;
+            try { hidden = w.isHidden(); } catch (Throwable ignored) { }
+            if (hidden) continue;
+            name = SB_NAME[i];
+            if (SB_SIGNATURE[i] == InterfaceID.MagicSpellbook.HIGH_ALCHEMY) alchVisible = true;
+        }
+
+        String source;
+        if (!idErr.isEmpty() && present == 0) source = "varbit_error:" + idErr;
+        else if (present == 0)                source = "interface_not_loaded";
+        else if (name.equals("unknown"))      source = "no_signature_visible";
+        else                                  source = "signature";
+
+        return "spellbook_state=live\n"
+             + "spellbook=" + name + "\n"
+             + "spellbook_id=" + id + "\n"
+             + "spellbook_source=" + source + "\n"
+             + "spellbook_interface_loaded=" + (present > 0) + "\n"
+             + "alch_available=" + alchVisible + "\n"
+             + "alch_point_field=wg_high_alch\n";
+    }
+
+    // ---- slayer ------------------------------------------------------------
+    private String buildSlayerBlock(boolean online)
+    {
+        if (!online)
+        {
+            slLastCount = -1;
+            slCountTick = -1;
+            slCountTask = "";
+            // -1, never 0. slayer_count=0 is a REAL value meaning the task is
+            // finished, so a confident zero at the login screen would send a
+            // consumer off to buy a new one. Same call as 2.105.
+            return "slayer_state=offline\n"
+                 + "slayer_task=\nslayer_task_id=-1\nslayer_location=\n"
+                 + "slayer_count=-1\nslayer_count_initial=-1\n"
+                 + "slayer_points=-1\nslayer_streak=-1\nslayer_master=-1\n"
+                 + "slayer_boss_id=-1\n"
+                 + "slayer_count_last_change_tick=-1\nslayer_count_still_ticks=-1\n"
+                 + "slayer_superiors_unlocked=false\nslayer_superiors_off=false\n"
+                 + "slayer_superior_last=\nslayer_superior_ms=0\nslayer_superior_age_ms=-1\n"
+                 + "slayer_match_word=\nslayer_npc_filter=\n"
+                 + "slayer_seen_names=\nslayer_seen_count=0\nslayer_seen_source=offline\n";
+        }
+
+        int count   = client.getVarpValue(VarPlayerID.SLAYER_COUNT);
+        int taskId  = client.getVarpValue(VarPlayerID.SLAYER_TARGET);
+        int areaId  = client.getVarpValue(VarPlayerID.SLAYER_AREA);
+        int initial = client.getVarpValue(VarPlayerID.SLAYER_COUNT_ORIGINAL);
+        int points  = client.getVarbitValue(VarbitID.SLAYER_POINTS);
+        int master  = client.getVarbitValue(VarbitID.SLAYER_MASTER);
+        int bossId  = client.getVarbitValue(VarbitID.SLAYER_TARGET_BOSSID);
+
+        boolean hasTask = count > 0;
+        String  task    = hasTask ? slayerTaskName(taskId, bossId) : "";
+        String  loc     = (hasTask && areaId > 0) ? slayerAreaName(areaId) : "";
+
+        // THE COUNT NOT MOVING IS THE ANSWER TO "ARE THESE EVEN COUNTING" -
+        // the question Josh asked for a location-specific task. It is only
+        // readable as the number of ticks SINCE it last moved, so that is what
+        // goes out; a consumer compares it with how long it has been killing.
+        int tick = -1;
+        try { tick = client.getTickCount(); } catch (Throwable ignored) { }
+        if (!task.equals(slCountTask))
+        {
+            slCountTask = task;
+            slLastCount = count;
+            slCountTick = tick;
+        }
+        else if (count != slLastCount)
+        {
+            slLastCount = count;
+            slCountTick = tick;
+        }
+        int still = (slCountTick < 0 || tick < 0) ? -1 : (tick - slCountTick);
+
+        String word   = slayerMatchWord(task);
+        String filter = word.isEmpty() ? "" : (word + "#Attack");
+
+        String seenSource = slayerCollectSeen(task, word);
+        StringBuilder seen = new StringBuilder();
+        for (String s : slSeen)
+        {
+            if (seen.length() > 0) seen.append("|");
+            seen.append(s);
+        }
+
+        long supAge = slSuperiorMs == 0 ? -1 : (System.currentTimeMillis() - slSuperiorMs);
+
+        return "slayer_state=" + (hasTask ? "active" : "no_task") + "\n"
+             + "slayer_task=" + task + "\n"
+             + "slayer_task_id=" + taskId + "\n"
+             + "slayer_location=" + loc + "\n"
+             + "slayer_count=" + count + "\n"
+             + "slayer_count_initial=" + initial + "\n"
+             + "slayer_points=" + points + "\n"
+             + "slayer_streak=" + slayerStreak(master) + "\n"
+             + "slayer_master=" + master + "\n"
+             + "slayer_boss_id=" + bossId + "\n"
+             + "slayer_count_last_change_tick=" + slCountTick + "\n"
+             + "slayer_count_still_ticks=" + still + "\n"
+             + "slayer_superiors_unlocked="
+                 + (client.getVarbitValue(VarbitID.SLAYER_UNLOCK_SUPERIORMOBS) == 1) + "\n"
+             + "slayer_superiors_off="
+                 + (client.getVarbitValue(VarbitID.SLAYER_TOGGLEOFF_SUPERIORMOBS) == 1) + "\n"
+             + "slayer_superior_last=" + slSuperior + "\n"
+             // The ABSOLUTE stamp goes out beside the age, the 2.85 rule:
+             // this block is rebuilt every tick so the age is never more
+             // than a tick stale, but only the absolute number lets a
+             // consumer that polls at its own rate work out its own lateness.
+             + "slayer_superior_ms=" + slSuperiorMs + "\n"
+             + "slayer_superior_age_ms=" + supAge + "\n"
+             + "slayer_match_word=" + word + "\n"
+             + "slayer_npc_filter=" + filter + "\n"
+             + "slayer_seen_names=" + seen + "\n"
+             + "slayer_seen_count=" + slSeen.size() + "\n"
+             + "slayer_seen_source=" + seenSource + "\n";
+    }
+
+    // The task name out of the game's own cache. Bosses are a sublist: varp
+    // 395 reads 98 and the real row sits behind SLAYER_TARGET_BOSSID.
+    private String slayerTaskName(int taskId, int bossId)
+    {
+        try
+        {
+            int row;
+            if (taskId == SL_TASKID_BOSSES)
+            {
+                java.util.List<Integer> bossRows = client.getDBRowsByValue(
+                        DBTableID.SlayerTaskSublist.ID,
+                        DBTableID.SlayerTaskSublist.COL_TASK_SUBTABLE_ID, 0, bossId);
+                if (bossRows == null || bossRows.isEmpty()) return "";
+                Object[] f = client.getDBTableField(
+                        bossRows.get(0), DBTableID.SlayerTaskSublist.COL_TASK, 0);
+                if (f == null || f.length == 0 || !(f[0] instanceof Integer)) return "";
+                row = (Integer) f[0];
+            }
+            else
+            {
+                java.util.List<Integer> rows = client.getDBRowsByValue(
+                        DBTableID.SlayerTask.ID, DBTableID.SlayerTask.COL_ID, 0, taskId);
+                if (rows == null || rows.isEmpty()) return "";
+                row = rows.get(0);
+            }
+            Object[] n = client.getDBTableField(row, DBTableID.SlayerTask.COL_NAME_UPPERCASE, 0);
+            if (n == null || n.length == 0 || n[0] == null) return "";
+            return sanitiseValue(String.valueOf(n[0]));
+        }
+        catch (Throwable t) { return ""; }
+    }
+
+    private String slayerAreaName(int areaId)
+    {
+        try
+        {
+            java.util.List<Integer> rows = client.getDBRowsByValue(
+                    DBTableID.SlayerArea.ID, DBTableID.SlayerArea.COL_AREA_ID, 0, areaId);
+            if (rows == null || rows.isEmpty()) return "";
+            Object[] f = client.getDBTableField(
+                    rows.get(0), DBTableID.SlayerArea.COL_AREA_NAME_IN_HELPER, 0);
+            if (f == null || f.length == 0 || f[0] == null) return "";
+            return sanitiseValue(String.valueOf(f[0]));
+        }
+        catch (Throwable t) { return ""; }
+    }
+
+    // THE STREAK LIVES IN A DIFFERENT PLACE PER MASTER. Reading only
+    // SLAYER_TASKS_COMPLETED reports a confident zero on a wilderness or
+    // Mortimer streak, which is a wrong number rather than a missing one.
+    private int slayerStreak(int master)
+    {
+        try
+        {
+            switch (master)
+            {
+                case 8:  return client.getVarbitValue(VarbitID.SLAYER_WILDERNESS_TASKS_COMPLETED);
+                case 10: return client.getVarpValue(VarPlayerID.SLAYER_MORTIMER_TASKS_COMPLETED);
+                default: return client.getVarbitValue(VarbitID.SLAYER_TASKS_COMPLETED);
+            }
+        }
+        catch (Throwable t) { return -1; }
+    }
+
+    // THE MATCH WORD, NOT A MONSTER TABLE. RuneLite's own Slayer plugin takes
+    // the task name, strips the trailing "s" and matches NPC names on a word
+    // boundary - "Aberrant spectres" becomes "spectre", which finds Aberrant,
+    // Deviant, Abhorrent and Repugnant spectres alike. A hand-kept list of
+    // every monster per task would be 130 rows that rot in silence; this
+    // cannot name a monster that does not exist or miss one that does.
+    //
+    // The LAST word is used rather than the whole name, because the family is
+    // what the variants share: a superior and a wiki variant keep the noun
+    // and change the adjective.
+    static String slayerMatchWord(String task)
+    {
+        if (task == null) return "";
+        String t = task.trim();
+        if (t.isEmpty()) return "";
+        int sp = t.lastIndexOf(' ');
+        String w = sp < 0 ? t : t.substring(sp + 1);
+        if (w.length() > 3 && w.endsWith("s")) w = w.substring(0, w.length() - 1);
+        return w;
+    }
+
+    static boolean slayerNameMatches(String npcName, String word)
+    {
+        if (npcName == null || word == null || word.isEmpty()) return false;
+        String n = npcName.toLowerCase(java.util.Locale.ROOT);
+        String w = word.toLowerCase(java.util.Locale.ROOT);
+        int at = n.indexOf(w);
+        while (at >= 0)
+        {
+            boolean leftOk = at == 0 || !Character.isLetter(n.charAt(at - 1));
+            int end = at + w.length();
+            // A trailing "s" belongs to the same word - "spectres" matches
+            // "spectre" - but "spectral" must not.
+            if (end < n.length() && n.charAt(end) == 's') end++;
+            boolean rightOk = end >= n.length() || !Character.isLetter(n.charAt(end));
+            if (leftOk && rightOk) return true;
+            at = n.indexOf(w, at + 1);
+        }
+        return false;
+    }
+
+    // THE LIST OF WHAT COUNTS BUILDS ITSELF FROM WHAT IS SEEN. This is what
+    // the operator orders by priority, and it is an OBSERVATION: a name is in
+    // it only because an attackable NPC carrying it stood in the scene. An
+    // empty list on a new task is honest - it fills as the variants are met -
+    // where a scraped table looks complete on day one and is wrong a year
+    // later without ever saying so.
+    private String slayerCollectSeen(String task, String word)
+    {
+        if (!task.equals(slSeenTask))
+        {
+            slSeenTask = task;
+            slSeen.clear();
+        }
+        if (word.isEmpty()) return "no_task";
+        if (slSeen.size() >= SL_SEEN_CAP) return "capped";
+
+        try
+        {
+            for (NPC n : client.getNpcs())
+            {
+                if (n == null) continue;
+                String nm = n.getName();
+                if (nm == null || !slayerNameMatches(nm, word)) continue;
+                // The Attack action is what separates a target from scenery
+                // wearing the same noun. An action list is a free readiness
+                // signal here exactly as it is at the Blast Furnace.
+                String[] acts = null;
+                try
+                {
+                    // TRANSFORMED, not raw: an NPC whose form depends on a
+                    // varbit carries its real actions only on the transformed
+                    // composition, and the raw one can read as unattackable.
+                    net.runelite.api.NPCComposition c = n.getTransformedComposition();
+                    if (c == null) c = n.getComposition();
+                    if (c != null) acts = c.getActions();
+                }
+                catch (Throwable ignored) { }
+                boolean attackable = false;
+                if (acts != null)
+                    for (String a : acts) if ("Attack".equals(a)) { attackable = true; break; }
+                if (!attackable) continue;
+
+                int lvl = -1;
+                try { lvl = n.getCombatLevel(); } catch (Throwable ignored) { }
+                if (slSeen.size() < SL_SEEN_CAP) slSeen.add(sanitiseValue(nm) + ":" + lvl);
+            }
+        }
+        catch (Throwable t) { return "read_error:" + t.getClass().getSimpleName(); }
+
+        return slSeen.isEmpty() ? "none_in_scene" : "observed";
+    }
+
+    // The separators must not be able to appear in a value - the same rule
+    // the portfolio rows follow. No OSRS name holds these today; that is not
+    // a reason to let one through tomorrow and shift every field after it.
+    private static String sanitiseValue(String s)
+    {
+        if (s == null) return "";
+        return s.replaceAll("<[^>]+>", "")
+                .replace('|', ' ').replace(':', ' ')
+                .replace('\n', ' ').replace('\r', ' ')
+                .replace("=", "").trim();
+    }
+
+    // =======================================================================
+    // 2.108 - /slayer, THE HUMAN VIEW
+    //
+    // Same reasoning as /widgets, /tick and /motherlode: the numbers are all
+    // in /state already, buried in tens of kilobytes, which is not a thing
+    // anyone can watch a task count down in. Josh asked "how do i watch the
+    // mlm sack count" about exactly this shape of problem in 2.87.
+    //
+    // RENDERED FROM THE PUBLISHED FIELDS, not recomputed. The two cannot
+    // disagree, which is the property 2.104 had to add a self-check to get.
+    // =======================================================================
+    private void handleSlayerRequest(HttpExchange ex)
+    {
+        try { sendPlain(ex, buildSlayerReport()); }
+        catch (Throwable t) { log.warn("GEVisualAid /slayer error: {}", t.getMessage()); }
+    }
+
+    private String buildSlayerReport()
+    {
+        java.util.Map<String, String> f = new java.util.HashMap<>();
+        for (String line : (spellbookBlock + slayerBlock).split("\n"))
+        {
+            int eq = line.indexOf('=');
+            if (eq > 0) f.put(line.substring(0, eq), line.substring(eq + 1));
+        }
+
+        String nl = System.lineSeparator();
+        StringBuilder r = new StringBuilder(1024);
+        r.append("SLAYER - task, points and what is in the scene").append(nl);
+        r.append("plugin ").append(PLUGIN_OUTPUT_VERSION)
+         .append("   read ")
+         .append(new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date()))
+         .append(nl);
+        r.append("---------------------------------------------------------------").append(nl);
+
+        String state = f.getOrDefault("slayer_state", "missing");
+
+        // EVERY WAY OF HAVING NOTHING TO SHOW NAMES WHICH WAY IT IS. Logged
+        // out, no task, and a read that threw are three different repairs
+        // and an identical blank page.
+        if (!state.equals("active") && !state.equals("no_task"))
+        {
+            r.append("NO READING: ").append(state).append(nl);
+            if (state.equals("offline"))
+                r.append("  The client is not logged in. Nothing is wrong.").append(nl);
+            else if (state.equals("no_reading_yet"))
+                r.append("  No game tick has been seen since the plugin started.").append(nl);
+            else if (state.startsWith("read_error"))
+                r.append("  A client read threw. The cause is in the state above.").append(nl);
+            else
+                r.append("  Field missing entirely - this plugin is older than 2.108.").append(nl);
+            return r.toString();
+        }
+
+        if (state.equals("no_task"))
+        {
+            r.append("NO TASK ASSIGNED").append(nl);
+            r.append("  points ").append(f.getOrDefault("slayer_points", "?"))
+             .append("   streak ").append(f.getOrDefault("slayer_streak", "?"))
+             .append("   master ").append(f.getOrDefault("slayer_master", "?")).append(nl);
+            return r.toString();
+        }
+
+        String task  = f.getOrDefault("slayer_task", "");
+        String left  = f.getOrDefault("slayer_count", "?");
+        String init  = f.getOrDefault("slayer_count_initial", "?");
+        String loc   = f.getOrDefault("slayer_location", "");
+
+        r.append("TASK   ").append(task.isEmpty() ? "(name unresolved)" : task)
+         .append("   ").append(left).append(" left of ").append(init).append(nl);
+        r.append("WHERE  ").append(loc.isEmpty() ? "anywhere - no area assigned" : loc).append(nl);
+        r.append("POINTS ").append(f.getOrDefault("slayer_points", "?"))
+         .append("   streak ").append(f.getOrDefault("slayer_streak", "?")).append(nl);
+
+        String still = f.getOrDefault("slayer_count_still_ticks", "-1");
+        r.append("COUNT   last moved ").append(still).append(" ticks ago");
+        try
+        {
+            // The question Josh actually asked: if these are not counting,
+            // they are the wrong monsters or the wrong place. The number is
+            // reported raw and the warning is a reading of it, not a rule -
+            // a slow kill and a non-counting kill look the same for a while.
+            if (Integer.parseInt(still) > 300)
+                r.append("   <-- NOT COUNTING? check the area and the variant");
+        }
+        catch (Exception ignored) { }
+        r.append(nl);
+
+        boolean unlocked = "true".equals(f.get("slayer_superiors_unlocked"));
+        boolean off      = "true".equals(f.get("slayer_superiors_off"));
+        r.append("SUPERIOR ").append(unlocked ? (off ? "unlocked but TOGGLED OFF" : "on")
+                                              : "not unlocked");
+        String age = f.getOrDefault("slayer_superior_age_ms", "-1");
+        if (!age.equals("-1"))
+            r.append("   last seen ").append(Long.parseLong(age) / 1000).append("s ago");
+        r.append(nl);
+
+        r.append("---------------------------------------------------------------").append(nl);
+        r.append("MATCHING  any attackable npc whose name contains \"")
+         .append(f.getOrDefault("slayer_match_word", "")).append("\"").append(nl);
+        r.append("  npc filter to paste: ")
+         .append(f.getOrDefault("slayer_npc_filter", "")).append(nl);
+        r.append("  (no monster table - the word comes off the task name, and the")
+         .append(nl).append("   Attack action is what separates a target from scenery)")
+         .append(nl);
+
+        String src  = f.getOrDefault("slayer_seen_source", "?");
+        String seen = f.getOrDefault("slayer_seen_names", "");
+        r.append(nl).append("SEEN THIS TASK (").append(f.getOrDefault("slayer_seen_count", "0"))
+         .append(", source ").append(src).append(")").append(nl);
+        if (seen.isEmpty())
+        {
+            if (src.equals("none_in_scene"))
+                r.append("  Nothing matching is loaded right now. Walk to them.").append(nl);
+            else
+                r.append("  (").append(src).append(")").append(nl);
+        }
+        else
+        {
+            for (String s : seen.split("\\|"))
+            {
+                int c = s.lastIndexOf(':');
+                String nm = c < 0 ? s : s.substring(0, c);
+                String lv = c < 0 ? "?" : s.substring(c + 1);
+                r.append("  ").append(nm).append("   combat ").append(lv).append(nl);
+            }
+            r.append(nl).append("  This list is OBSERVED, not a table - a name is here only")
+             .append(nl).append("  because one stood in the scene. It fills as you meet them.")
+             .append(nl);
+        }
+
+        r.append("---------------------------------------------------------------").append(nl);
+        r.append("SPELLBOOK ").append(f.getOrDefault("spellbook", "?"))
+         .append("  (id ").append(f.getOrDefault("spellbook_id", "?"))
+         .append(", from ").append(f.getOrDefault("spellbook_source", "?")).append(")").append(nl);
+        r.append("HIGH ALCH ")
+         .append("true".equals(f.get("alch_available"))
+                 ? "available - click point is wg_high_alch in /widgets"
+                 : "not available (needs the standard book, magic tab open)")
+         .append(nl);
+        return r.toString();
     }
 }

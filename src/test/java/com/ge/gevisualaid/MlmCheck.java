@@ -539,6 +539,122 @@ public class MlmCheck
         eq("the value totals are not inside the cap",
                 pfSrc.contains("geValue   += unit * geShare;"), true);
 
+
+        // ================================================================
+        // 2.108 - SLAYER AND SPELLBOOK
+        //
+        // The match word replaces a 130-row monster table, so it is the one
+        // piece here that can mislabel rather than fail loudly: a word too
+        // broad attacks the wrong thing, a word too narrow walks past three
+        // variants of the right one. It is asserted against real task names.
+        // ================================================================
+        String slSrc = new String(java.nio.file.Files.readAllBytes(
+                java.nio.file.Paths.get("src/main/java/com/ge/gevisualaid/GEVisualAidPlugin.java")),
+                java.nio.charset.StandardCharsets.UTF_8);
+
+        eq("aberrant spectres -> spectre",
+                GEVisualAidPlugin.slayerMatchWord("Aberrant spectres"), "spectre");
+        eq("abyssal demons -> demon",
+                GEVisualAidPlugin.slayerMatchWord("Abyssal demons"), "demon");
+        eq("bloodveld keeps its name",
+                GEVisualAidPlugin.slayerMatchWord("Bloodveld"), "Bloodveld");
+        // "Bats" -> "Bat" is right: the npcs are "Bat" and "Giant bat". The
+        // word boundary, not the length, is what stops it matching "Batman".
+        eq("bats -> bat",
+                GEVisualAidPlugin.slayerMatchWord("Bats"), "Bat");
+        eq("no task is no word", GEVisualAidPlugin.slayerMatchWord(""), "");
+        eq("null is no word", GEVisualAidPlugin.slayerMatchWord(null), "");
+
+        // The whole claim of this release: one word off the task name finds
+        // every variant, including the two the wiki lists separately and the
+        // superior. If this stops holding, the table argument comes back.
+        for (String v : new String[]{ "Aberrant spectre", "Deviant spectre",
+                                      "Abhorrent spectre", "Repugnant spectre",
+                                      "Aberrant spectres" })
+        {
+            eq("the word finds " + v,
+                    GEVisualAidPlugin.slayerNameMatches(v, "spectre"), true);
+        }
+        // ...and does NOT find a word that merely starts the same. A
+        // substring match here would attack anything "spectral" in range.
+        eq("spectral is not a spectre",
+                GEVisualAidPlugin.slayerNameMatches("Spectral creature", "spectre"), false);
+        eq("demonic is not a demon",
+                GEVisualAidPlugin.slayerNameMatches("Demonic gorilla", "demon"), false);
+        eq("an empty word matches nothing",
+                GEVisualAidPlugin.slayerNameMatches("Aberrant spectre", ""), false);
+        eq("a null name matches nothing",
+                GEVisualAidPlugin.slayerNameMatches(null, "spectre"), false);
+
+        // THE BUILT-IN WIDGET IS SPELLED FROM THE SYMBOL. Written as the
+        // literal 218.47 it would compile for ever against an api that had
+        // already moved the component - the 2.100 failure exactly - so the
+        // value is checked AND the source is checked for the symbol.
+        eq("the built-in high alch widget resolves to 218.47",
+                GEVisualAidPlugin.WG_BUILTIN_HIGH_ALCH, "high_alch=218.47");
+        eq("...and is spelled from the symbol, not the number",
+                slSrc.contains("InterfaceID.MagicSpellbook.HIGH_ALCHEMY >>> 16"), true);
+        eq("the merged widget list always carries it",
+                slSrc.contains("wgts.append(WG_BUILTIN_HIGH_ALCH)"), true);
+
+        // Logged out, slayer_count MUST be -1. Zero is a real value meaning
+        // the task is finished, so a confident zero at the login screen tells
+        // a consumer to go and buy a new task. Same trap as 2.105.
+        eq("logged out, the count is unknown and not zero",
+                slSrc.contains("\"slayer_count=-1\\nslayer_count_initial=-1\\n\""), true);
+        eq("logged out, the points are unknown and not zero",
+                slSrc.contains("slayer_points=-1"), true);
+
+        // EVERY FIELD THE ONLINE BRANCH PUBLISHES MUST EXIST OFFLINE TOO. A
+        // field that appears and disappears with the login state is read by
+        // the far end as "this plugin is too old", which sends the repair to
+        // entirely the wrong machine.
+        int offFrom = slSrc.indexOf("slayer_state=offline");
+        int offTo   = slSrc.indexOf("slayer_seen_source=offline") + 30;
+        eq("the offline slayer branch is findable", offFrom > 0 && offTo > offFrom, true);
+        String offline = (offFrom > 0 && offTo > offFrom) ? slSrc.substring(offFrom, offTo) : "";
+        java.util.regex.Matcher mk = java.util.regex.Pattern
+                .compile("\"(slayer_[a-z_]+)=\"")
+                .matcher(slSrc);
+        java.util.Set<String> onlineKeys = new java.util.LinkedHashSet<>();
+        while (mk.find()) onlineKeys.add(mk.group(1));
+        eq("the online branch declares a reasonable number of fields",
+                onlineKeys.size() >= 15, true);
+        for (String k : onlineKeys)
+        {
+            if (k.equals("slayer_state")) continue;
+            eq("offline also publishes " + k, offline.contains(k + "="), true);
+        }
+
+        // The spellbook NAME must not come from the varbit. Nobody has
+        // watched all four of its values, so a 0..3 map would be a guess
+        // printed as a fact - and the raw id has to go out beside the name
+        // so the mapping stays measurable from the feed without a deploy.
+        eq("the spellbook name is read off the interface",
+                slSrc.contains("source = \"signature\""), true);
+        eq("the raw varbit goes out beside it",
+                slSrc.contains("\"spellbook_id=\" + id"), true);
+        eq("the four books are named by symbols",
+                slSrc.contains("InterfaceID.MagicSpellbook.ICE_BARRAGE")
+                        && slSrc.contains("InterfaceID.MagicSpellbook.VENGEANCE")
+                        && slSrc.contains("InterfaceID.MagicSpellbook.WARD_OF_ARCEUUS"), true);
+
+        // The stale constant must not creep back. net.runelite.api.Varbits
+        // still exports SUPERIOR_ENABLED = 5362 and it matches neither
+        // gameval name for the feature.
+        eq("the deprecated superior varbit is not used",
+                slSrc.contains("Varbits.SUPERIOR_ENABLED"), false);
+        eq("both halves of the superior question are published",
+                slSrc.contains("SLAYER_UNLOCK_SUPERIORMOBS")
+                        && slSrc.contains("SLAYER_TOGGLEOFF_SUPERIORMOBS"), true);
+
+        // Slayer reads must sit ABOVE the Scene & Tiles gate - they read no
+        // scene, and gating them there makes them vanish for an unrelated
+        // reason. Order inside updateSceneState is the whole guarantee.
+        int slCallAt = slSrc.indexOf("updateSpellbookAndSlayer(client.getGameState()");
+        int slGateAt = slSrc.indexOf("if (!config.sceneTrackingEnabled())");
+        eq("the slayer read runs before the scene gate",
+                slCallAt > 0 && slGateAt > slCallAt, true);
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }
