@@ -906,6 +906,19 @@ public class MlmCheck
         // ClientThread, not the HTTP thread: off-thread this read does not
         // throw, it just yields nothing, which is how it shipped reading
         // no_such_item for every id while getItemPrice beside it worked.
+        // 2.112: WHETHER A PICK-UP NEEDS A FREE SLOT. The wiki marks noted
+        // drops, but coins, runes and arrows stack natively and no wiki
+        // column says so - isStackable() is the game's own answer, and
+        // getLinkedNoteId() is what an inventory check must match, because
+        // the note and the item are different ids.
+        eq("/item says whether an item stacks",
+                slSrc.contains("_stackable=\").append(stk)"), true);
+        eq("...and gives the noted form's id, which is a different item",
+                slSrc.contains("getLinkedNoteId()"), true);
+        // Both branches, or the field comes and goes with the item existing.
+        eq("the unknown-item branch publishes them too",
+                slSrc.contains("_stackable=false\\n\"") && slSrc.contains("_noted_id=-1\\n\""), true);
+
         eq("the item read runs on the client thread",
                 slSrc.contains("clientThread.invoke(() -> {"), true);
         eq("...and the handler waits for it rather than guessing",

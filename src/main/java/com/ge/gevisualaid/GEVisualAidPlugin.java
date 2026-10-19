@@ -1820,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.111";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.112";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -16219,6 +16219,14 @@ public class GEVisualAidPlugin extends Plugin
                     r.append("item_").append(n).append("_ha_price=-1\n");
                     r.append("item_").append(n).append("_ge_price=-1\n");
                     r.append("item_").append(n).append("_ge_tradeable=false\n");
+                    // THE SAME FIELDS AS THE REAL BRANCH. A field that
+                    // appears only when the item exists reads downstream as
+                    // "this plugin is too old" rather than "no such item",
+                    // and sends the repair to the wrong machine. stackable
+                    // is false rather than absent; noted_id is -1, the
+                    // unknown marker, not 0 which is a real id.
+                    r.append("item_").append(n).append("_stackable=false\n");
+                    r.append("item_").append(n).append("_noted_id=-1\n");
                     r.append("item_").append(n).append("_alch=unknown_item\n");
                     r.append("item_").append(n).append("_state=no_such_item\n");
                     n++;
@@ -16234,6 +16242,29 @@ public class GEVisualAidPlugin extends Plugin
                 r.append("item_").append(n).append("_ha_price=").append(ha).append("\n");
                 r.append("item_").append(n).append("_ge_price=").append(ge).append("\n");
                 r.append("item_").append(n).append("_ge_tradeable=").append(tr).append("\n");
+                // 2.112: WHETHER A PICK-UP NEEDS A FREE SLOT. Josh,
+                // 2026-10-19, on noted drops: "if we have some in our
+                // inventory we can continue to pick them up even if the
+                // inventory is full. Where as non noted items, need a
+                // spare slot."
+                //
+                // The wiki marks the NOTED drops, but that is only half of
+                // it: coins, runes and arrows stack natively and behave the
+                // same way, and no wiki column says so. isStackable() is the
+                // game's own answer. getLinkedNoteId() gives the noted form
+                // where one exists, which is what an inventory check has to
+                // match against - the note and the item are different ids.
+                boolean stk = false;
+                int noteId = -1;
+                try
+                {
+                    ItemComposition c = itemManager.getItemComposition(id);
+                    stk    = c.isStackable();
+                    noteId = c.getLinkedNoteId();
+                }
+                catch (Throwable ignored) { }
+                r.append("item_").append(n).append("_stackable=").append(stk).append("\n");
+                r.append("item_").append(n).append("_noted_id=").append(noteId).append("\n");
                 r.append("item_").append(n).append("_alch=")
                  .append(alchVerdict(ha, ge, tr, margin)).append("\n");
                 r.append("item_").append(n).append("_state=ok\n");
