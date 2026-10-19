@@ -943,6 +943,14 @@ public class MlmCheck
         eq("...and a later loss can be reported again",
                 slSrc.contains("spLinkTried = false;   // so a later loss is reported again"), true);
 
+        // 2.114: a /config write made at the LOGIN SCREEN answered "queued"
+        // and then sat there, because applyPendingConfig only runs from
+        // onGameTick and GameTick does not fire while logged out. "Queued"
+        // reads exactly like a write that worked. Found turning on rune
+        // tracking after Josh's mage session stalled on empty runes.
+        eq("a config write drains on the client thread, not the next tick",
+                slSrc.contains("clientThread.invoke(this::applyPendingConfig)"), true);
+
         eq("the item read runs on the client thread",
                 slSrc.contains("clientThread.invoke(() -> {"), true);
         eq("...and the handler waits for it rather than guessing",

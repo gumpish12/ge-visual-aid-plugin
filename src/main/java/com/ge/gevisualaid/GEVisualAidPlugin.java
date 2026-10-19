@@ -1820,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.113";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.114";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -10915,6 +10915,23 @@ public class GEVisualAidPlugin extends Plugin
                     }
                     out.append("queued ").append(r.key).append("=").append(norm).append("\n");
                 }
+                // 2.114: DRAIN IT NOW, not on the next game tick.
+                //
+                // applyPendingConfig() runs from updateSceneState, which runs
+                // from onGameTick - and GameTick does not fire while logged
+                // out. So a setting written at the LOGIN SCREEN answered
+                // "queued" and then sat there until someone logged in, which
+                // reads exactly like a write that worked. Found while turning
+                // on rune tracking for Josh after his mage session stalled on
+                // empty runes: the reply said queued, and /config still read
+                // false.
+                //
+                // ClientThread.invoke runs on the client thread whether or
+                // not anyone is logged in - the same reason /item uses it.
+                // applyPendingConfig drains under its own lock, so being
+                // called from here as well as from the tick is safe.
+                try { clientThread.invoke(this::applyPendingConfig); }
+                catch (Throwable ignored) { }
                 reply.append(out);
             }
         }
