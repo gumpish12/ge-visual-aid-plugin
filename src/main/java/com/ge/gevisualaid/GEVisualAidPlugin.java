@@ -1820,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.112";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.113";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -11376,13 +11376,37 @@ public class GEVisualAidPlugin extends Plugin
         }
     }
 
-    // Locate ShortestPathPlugin and cache every reflective handle. Tried once
-    // per session unless it succeeds.
+    // Locate ShortestPathPlugin and cache every reflective handle.
+    //
+    // 2.113 — IT USED TO GIVE UP FOR THE WHOLE SESSION. The line here was
+    // `if (spLinkTried && spPlugin == null) return false;`, commented
+    // "tried once per session unless it succeeds". So one miss - and the
+    // likeliest miss is simply looking before a plugin-hub plugin has
+    // finished loading - latched `no_plugin` until RuneLite was restarted.
+    //
+    // Caught live on 2026-10-19 with the skiller stuck in the MM2 cave:
+    //
+    //     plugin=Shortest Path|enabled|active     <- this plugin's OWN list
+    //     path_plugin_found=false                 <- this plugin's own link
+    //     path_state=no_plugin
+    //
+    // Both of those read the SAME pluginManager.getPlugins(). The list had
+    // it and the link said it was not installed, which can only be true if
+    // the link never ran again - so the latch was the whole fault, proved
+    // without a debugger.
+    //
+    // This is the third time in this file: 2.75 cached a sub-object that
+    // was REPLACED underneath it, 2.92 gated a re-link on a different
+    // handle's liveness, and this gated it on having once failed. The rule
+    // CLAUDE.md already states - re-read reflected handles rather than
+    // caching the ANSWER - applies to "not found" exactly as much as to a
+    // stale object. A negative result is not a fact about the session.
+    //
+    // spLinkTried now only throttles the LOG, which was the thing worth
+    // keeping: a line every tick would bury the client log.
     private boolean linkShortestPath()
     {
         if (spPlugin != null && spRestart != null) return true;
-        if (spLinkTried && spPlugin == null) return false;
-        spLinkTried = true;
 
         try
         {
@@ -11395,9 +11419,14 @@ public class GEVisualAidPlugin extends Plugin
             }
             if (spPlugin == null)
             {
-                log.info("GEVisualAid: Shortest Path plugin not installed");
+                // Logged ONCE. The retry itself is every call now; it is a
+                // loop over a handful of plugins and costs nothing, but the
+                // log line would be per tick.
+                if (!spLinkTried) log.info("GEVisualAid: Shortest Path plugin not found yet - will keep looking");
+                spLinkTried = true;
                 return false;
             }
+            spLinkTried = false;   // so a later loss is reported again
 
             Class<?> pc = spPlugin.getClass();
             spRestart = pc.getMethod("restartPathfinding", int.class, java.util.Set.class);

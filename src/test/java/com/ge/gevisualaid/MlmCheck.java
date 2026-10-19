@@ -919,6 +919,30 @@ public class MlmCheck
         eq("the unknown-item branch publishes them too",
                 slSrc.contains("_stackable=false\\n\"") && slSrc.contains("_noted_id=-1\\n\""), true);
 
+        // 2.113: THE SHORTEST PATH LINK MUST NOT GIVE UP FOR THE SESSION.
+        // It had `if (spLinkTried && spPlugin == null) return false;`, so a
+        // single early miss - looking before a hub plugin finished loading -
+        // latched path_state=no_plugin until RuneLite restarted. Caught live
+        // with the plugin's OWN list reading "Shortest Path|enabled|active"
+        // beside its own path_plugin_found=false; both read the same
+        // getPlugins(), so the only way both are true is a link that never
+        // ran again. Third time in this file after 2.75 and 2.92: a NEGATIVE
+        // result is not a fact about the session.
+        // Tested against the source with // comments REMOVED. A "must not
+        // contain" check cannot be run over a file whose comments quote the
+        // very line being banned - and the comment above that fix quotes it
+        // deliberately, because a future reader needs to see what was
+        // wrong. Second time this has bitten: the deprecated-varbit check
+        // dodged it by searching for "Varbits.SUPERIOR_ENABLED" instead of
+        // the bare name, which worked but only by luck of spelling.
+        String slCode = slSrc.replaceAll("(?m)^\\s*//.*$", "");
+        eq("the shortest path link never latches off",
+                slCode.contains("if (spLinkTried && spPlugin == null) return false;"), false);
+        eq("...and spLinkTried only throttles the log now",
+                slSrc.contains("if (!spLinkTried) log.info(\"GEVisualAid: Shortest Path plugin not found yet"), true);
+        eq("...and a later loss can be reported again",
+                slSrc.contains("spLinkTried = false;   // so a later loss is reported again"), true);
+
         eq("the item read runs on the client thread",
                 slSrc.contains("clientThread.invoke(() -> {"), true);
         eq("...and the handler waits for it rather than guessing",
