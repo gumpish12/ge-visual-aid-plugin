@@ -986,6 +986,29 @@ public class MlmCheck
         eq("...and the dead form cannot come back",
                 slCode.contains("word + \"#Attack\""), false);
 
+        // 2.117: SHORTEST PATH CHANGED restartPathfinding's SIGNATURE.
+        //   was  restartPathfinding(int, Set<Integer>)
+        //   now  restartPathfinding(String, int, Targets)
+        // The plugin was still FOUND - the class name matched - so this
+        // surfaced as path_state=no_plugin, blaming a plugin that was
+        // enabled and active, while Josh's MM2 run walked nowhere for an
+        // afternoon. Both signatures are tried, OLD FIRST, because a VM
+        // pinned to an older RuneLite gets an older Shortest Path from the
+        // hub (2.99) and has to keep working.
+        eq("the old signature is still tried",
+                slCode.contains("getMethod(\"restartPathfinding\", int.class, java.util.Set.class)"), true);
+        eq("...and the new one is the fallback",
+                slCode.contains("getMethod(\"restartPathfinding\", String.class, int.class, targets)"), true);
+        eq("Targets.at adapts the same packed points",
+                slCode.contains("targets.getMethod(\"at\", java.util.Collection.class)"), true);
+        // ONE call site for both, or the two callers each learn which build
+        // is installed and drift apart at the next change.
+        eq("both callers go through one adapter",
+                slCode.contains("spRestartCall(-1, new HashSet<Integer>())")
+                        && slCode.contains("spRestartCall(start, ends)"), true);
+        eq("the feed names which API answered",
+                slCode.contains("\"path_api=\""), true);
+
         eq("the item read runs on the client thread",
                 slSrc.contains("clientThread.invoke(() -> {"), true);
         eq("...and the handler waits for it rather than guessing",

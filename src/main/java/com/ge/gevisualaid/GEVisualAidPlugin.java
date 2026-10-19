@@ -1820,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.116";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.117";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2259,6 +2259,8 @@ public class GEVisualAidPlugin extends Plugin
     private int[]           pathTarget    = null;   // last target actually applied
     private Object          spPlugin      = null;   // cached ShortestPathPlugin instance
     private java.lang.reflect.Method spRestart   = null;
+    private java.lang.reflect.Method spTargetsAt = null;   // 2.117, new API only
+    private volatile String          spApi       = "none"; // int_set | string_int_targets
     private java.lang.reflect.Field  spPathfield = null;
     private java.lang.reflect.Method spGetPath   = null;
     private java.lang.reflect.Method spPacked    = null;
@@ -5137,6 +5139,11 @@ public class GEVisualAidPlugin extends Plugin
         boolean wantPath = false;
         try { wantPath = config.pathTrackingEnabled(); } catch (Throwable ignored) { }
         sb.append("path_enabled=").append(wantPath).append("\n");
+        // 2.117: WHICH Shortest Path API answered. Its signature changed
+        // under us and path_state said "no_plugin", blaming a plugin that
+        // was enabled and active. none / int_set / string_int_targets - so
+        // the next change names itself instead of looking like absence.
+        sb.append("path_api=").append(spApi).append("\n");
         if (online && wantPath)
             appendPath(sb, wv, playerLoc, scenePlane, canvasOk, ox, oy, dsx, dsy, vpRect);
         else
@@ -11422,7 +11429,7 @@ public class GEVisualAidPlugin extends Plugin
         {
             if (req.length == 0)
             {
-                spRestart.invoke(spPlugin, -1, new HashSet<Integer>());   // empty = cancel
+                spRestartCall(-1, new HashSet<Integer>());   // empty = cancel
                 pathTarget = null;
                 log.info("GEVisualAid: shortest path cleared");
                 return;
@@ -11437,7 +11444,7 @@ public class GEVisualAidPlugin extends Plugin
 
             HashSet<Integer> ends = new HashSet<>();
             ends.add(Integer.valueOf(target));
-            spRestart.invoke(spPlugin, Integer.valueOf(start), ends);
+            spRestartCall(start, ends);
 
             pathTarget = req;
             log.info("GEVisualAid: shortest path set to {},{},{}", req[0], req[1], req[2]);
@@ -11445,6 +11452,26 @@ public class GEVisualAidPlugin extends Plugin
         catch (Throwable t)
         {
             log.warn("GEVisualAid shortest path set error: {}", t.getMessage());
+        }
+    }
+
+    // ONE CALL SITE FOR BOTH SIGNATURES. The two callers should not each
+    // have to know which Shortest Path build is installed - that knowledge
+    // belongs where the link was made, and duplicating it is how the two
+    // drift apart the next time the API moves.
+    private void spRestartCall(int start, java.util.Set<Integer> ends) throws Exception
+    {
+        if ("string_int_targets".equals(spApi))
+        {
+            // Targets.at() takes the same packed world points the old Set
+            // held, so this is an adapter and not a different request. The
+            // String is a label the plugin shows for the route.
+            Object targets = spTargetsAt.invoke(null, ends);
+            spRestart.invoke(spPlugin, "GEVisualAid", Integer.valueOf(start), targets);
+        }
+        else
+        {
+            spRestart.invoke(spPlugin, Integer.valueOf(start), ends);
         }
     }
 
@@ -11501,7 +11528,42 @@ public class GEVisualAidPlugin extends Plugin
             spLinkTried = false;   // so a later loss is reported again
 
             Class<?> pc = spPlugin.getClass();
-            spRestart = pc.getMethod("restartPathfinding", int.class, java.util.Set.class);
+            // 2.117 — SHORTEST PATH CHANGED THIS SIGNATURE AND NOTHING SAID SO.
+            //
+            //   was  restartPathfinding(int, Set<Integer>)
+            //   now  restartPathfinding(String, int, Targets)
+            //
+            // The plugin was still FOUND - the class name matched - so the
+            // failure was a NoSuchMethodException inside the link, caught,
+            // logged as "link failed" once, and then (before 2.113) never
+            // retried. path_state read no_plugin, which blamed the wrong
+            // thing entirely: the plugin was right there, enabled and
+            // active. Josh's MM2 run walked nowhere for an afternoon.
+            //
+            // Found from client.log naming the exact missing signature, then
+            // javap on the installed jar giving the new one - the 2.100 rule:
+            // when a third party moves under you, read THEIR jar, not the
+            // wiki and not your own memory.
+            //
+            // Both are tried, old first, because a VM pinned to an older
+            // RuneLite gets an older Shortest Path from the hub (2.99) and
+            // must keep working. path_api says which one answered, so this
+            // can never again be invisible.
+            spRestart = null;
+            spApi = "none";
+            try
+            {
+                spRestart = pc.getMethod("restartPathfinding", int.class, java.util.Set.class);
+                spApi = "int_set";
+            }
+            catch (NoSuchMethodException old)
+            {
+                ClassLoader cl0 = pc.getClassLoader();
+                Class<?> targets = cl0.loadClass("shortestpath.pathfinder.Targets");
+                spTargetsAt = targets.getMethod("at", java.util.Collection.class);
+                spRestart = pc.getMethod("restartPathfinding", String.class, int.class, targets);
+                spApi = "string_int_targets";
+            }
 
             spPathfield = pc.getDeclaredField("pathfinder");
             spPathfield.setAccessible(true);
@@ -11521,7 +11583,12 @@ public class GEVisualAidPlugin extends Plugin
         }
         catch (Throwable t)
         {
-            log.warn("GEVisualAid Shortest Path link failed: {}", t.getMessage());
+            // THROTTLED. 2.113 made the link retry every call, which is
+            // right - but it turned a one-off warning into one per tick,
+            // and Josh's log filled with the same line every second. The
+            // retry is the fix; the spam was a regression it caused.
+            if (!spLinkTried) log.warn("GEVisualAid Shortest Path link failed: {}", t.getMessage());
+            spLinkTried = true;
             spPlugin = null;
             return false;
         }
