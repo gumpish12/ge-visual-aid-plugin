@@ -951,6 +951,29 @@ public class MlmCheck
         eq("a config write drains on the client thread, not the next tick",
                 slSrc.contains("clientThread.invoke(this::applyPendingConfig)"), true);
 
+        // 2.115: A KODAI WAND IS NEITHER A STAFF NOR A TOME. The supplies
+        // test was `staff || tome`, so a Kodai was skipped and water read
+        // ZERO - which with rune tracking on is rune_cast_remaining=0 and an
+        // instant FALSE "out of runes". The cache has no param for this
+        // (checked ParamID in 1.13.2) and the only other statement of it is
+        // the spellbook row, which exists only while the magic tab is open.
+        // So it stays a heuristic, and the two things that make one
+        // acceptable are required instead: say what it concluded, and let
+        // the operator override it.
+        eq("a wand can supply runes",
+                slSrc.contains("nm.contains(\"wand\")"), true);
+        eq("the Kodai is named, because its name does not carry its element",
+                slSrc.contains("if (nm.contains(\"kodai\")) inf.put(\"water\", Boolean.TRUE);"), true);
+        eq("the feed says what it concluded",
+                slSrc.contains("\"rune_infinite=\"") && slSrc.contains("\"rune_infinite_from=\""), true);
+        eq("...and from which item, so a wrong guess is visible",
+                slSrc.contains("infFrom = safeItemName(it.getId());"), true);
+        // The override is applied AFTER the heuristic or it would not win.
+        int heurAt = slSrc.indexOf("nm.contains(\"kodai\")");
+        int ovrAt  = slSrc.indexOf("config.runeInfiniteExtra()");
+        eq("the operator override is applied last, so it always wins",
+                heurAt > 0 && ovrAt > heurAt, true);
+
         eq("the item read runs on the client thread",
                 slSrc.contains("clientThread.invoke(() -> {"), true);
         eq("...and the handler waits for it rather than guessing",

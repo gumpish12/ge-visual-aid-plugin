@@ -1440,6 +1440,18 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 106)
     default String set10Waypoints() { return ""; }
 
+    @ConfigItem(keyName = "runeInfiniteExtra", name = "Also treat these runes as unlimited",
+            description = "Comma separated elements - air, water, earth, fire - to count as "
+                    + "unlimited whatever is equipped. The plugin works this out from the "
+                    + "weapon's NAME, which is a heuristic: a Kodai wand supplies water and "
+                    + "says so nowhere in its name, and the game cache has no field for it. "
+                    + "If rune_infinite does not list what your weapon actually supplies, "
+                    + "name it here rather than waiting for a release - this is applied last "
+                    + "and always wins. rune_infinite and rune_infinite_from say what the "
+                    + "plugin decided and from which item.",
+            section = magicSection, position = 20)
+    default String runeInfiniteExtra() { return ""; }
+
     @ConfigItem(keyName = "alchMarginPercent", name = "Keep-instead-of-alch margin %",
             description = "How far ABOVE an item's high alchemy value its live GE price "
                     + "must be before the item is worth keeping rather than alching. "

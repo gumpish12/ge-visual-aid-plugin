@@ -1820,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.114";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.115";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -6851,6 +6851,7 @@ public class GEVisualAidPlugin extends Plugin
             sb.append("rune_combination=").append(combos).append("\n");
 
             // ---- equipped staff granting unlimited runes ----
+            String infFrom = "";
             try
             {
                 ItemContainer eq = client.getItemContainer(InventoryID.WORN);
@@ -6860,9 +6861,36 @@ public class GEVisualAidPlugin extends Plugin
                         if (it == null || it.getId() <= 0) continue;
                         String nm = safeItemName(it.getId()).toLowerCase();
                         if (nm.isEmpty()) continue;
-                        // A staff or tome supplies its element without limit.
-                        boolean supplies = nm.contains("staff") || nm.contains("tome");
+
+                        // 2.115: THE KODAI WAND IS NEITHER A STAFF NOR A TOME.
+                        // The test was `staff || tome`, so a Kodai was skipped
+                        // entirely and water counted as ZERO - which with rune
+                        // tracking on means rune_cast_remaining=0 and an
+                        // instant false "out of runes". Josh, 2026-10-19:
+                        // "when I have a Kodai wand equipped it gives me
+                        // unlimited water runes, so I don't have them in my
+                        // inventory".
+                        //
+                        // THE NAME IS NOT A RELIABLE SIGNAL AND THERE IS NO
+                        // BETTER ONE. The cache has no param for it - checked
+                        // ParamID in runelite-api 1.13.2, nothing about runes -
+                        // and the only other place the game states it is the
+                        // spellbook's rune row, which exists solely while the
+                        // magic tab is open. So this stays a heuristic, and
+                        // the two things that make a heuristic acceptable are
+                        // done instead: it SAYS what it concluded
+                        // (rune_infinite / rune_infinite_from), and the
+                        // operator can override it (runeInfiniteExtra) without
+                        // waiting for a release.
+                        boolean supplies = nm.contains("staff") || nm.contains("tome")
+                                        || nm.contains("wand")  || nm.contains("sceptre");
                         if (!supplies) continue;
+                        infFrom = safeItemName(it.getId());
+                        // A NAMED EXCEPTION, not a table of every staff: these
+                        // supply an element their NAME does not contain, so
+                        // the element match below cannot find them. Anything
+                        // whose name does carry its element needs no entry.
+                        if (nm.contains("kodai")) inf.put("water", Boolean.TRUE);
                         for (String el : new String[]{ "air", "water", "earth", "fire" })
                             if (nm.contains(el)) inf.put(el, Boolean.TRUE);
                         // Combination staves cover two elements each.
@@ -6875,6 +6903,33 @@ public class GEVisualAidPlugin extends Plugin
                     }
             }
             catch (Throwable ignored) { }
+
+            // THE OPERATOR OVERRIDE, applied last so it always wins. The
+            // heuristic above reads a NAME, and names are the thing this
+            // repo has been bitten by most - so the escape hatch is a
+            // setting rather than a release. Comma separated elements:
+            // "water" for a Kodai the heuristic somehow missed.
+            try
+            {
+                String extra = config.runeInfiniteExtra();
+                if (extra != null)
+                    for (String el : extra.split("[,;\\s]+"))
+                    {
+                        String e2 = el.trim().toLowerCase();
+                        if (!e2.isEmpty()) { inf.put(e2, Boolean.TRUE); infFrom = infFrom.isEmpty() ? "setting" : (infFrom + " + setting"); }
+                    }
+            }
+            catch (Throwable ignored) { }
+
+            // WHAT IT CONCLUDED, AND FROM WHAT. Without this an unlimited
+            // rune and a rune you simply have a lot of are the same number,
+            // and a heuristic that guessed wrong is invisible.
+            StringBuilder infList = new StringBuilder();
+            for (java.util.Map.Entry<String, Boolean> e : inf.entrySet())
+                if (Boolean.TRUE.equals(e.getValue()))
+                { if (infList.length() > 0) infList.append(","); infList.append(e.getKey()); }
+            sb.append("rune_infinite=").append(infList).append("\n");
+            sb.append("rune_infinite_from=").append(infFrom.isEmpty() ? "none" : infFrom).append("\n");
         }
         catch (Throwable t)
         {
