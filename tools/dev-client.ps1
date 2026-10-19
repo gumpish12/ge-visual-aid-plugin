@@ -174,6 +174,14 @@ function Show-Status {
 }
 
 function Stop-DevClient {
+    # Counted BEFORE anything is killed. The client is a child of the gradle
+    # launcher, so killing the launcher takes it too - and the client check
+    # further down then finds nothing and logs "no dev client running",
+    # which reads as though the stop did nothing at all. The log is the only
+    # record of what happened; it has to describe what was there, not what
+    # survived the first step.
+    $before = (Get-DevClient).Count
+
     # THE BUILD GOES FIRST. Killing the client while a gradle run is still in
     # flight gets you a client again a minute later, out of nowhere, with
     # nothing to point at. Stop means stopped.
@@ -184,7 +192,11 @@ function Stop-DevClient {
     Clear-Lock
 
     $procs = Get-DevClient
-    if ($procs.Count -eq 0) { Write-Note "stop: no dev client running"; return $true }
+    if ($procs.Count -eq 0) {
+        if ($before -gt 0) { Write-Note "stop: client went with the launcher ($before was running)" }
+        else               { Write-Note "stop: nothing was running" }
+        return $true
+    }
     if ($procs.Count -gt 1) { Write-Note "stop: $($procs.Count) clients found - killing all of them" }
     foreach ($p in $procs) {
         # PRINT WHAT IS ABOUT TO DIE, BEFORE KILLING IT. A wrong match has to
