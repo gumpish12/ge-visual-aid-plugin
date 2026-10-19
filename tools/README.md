@@ -39,9 +39,18 @@ bitten by the difference before — a VM running month-old plugin source
 publishes a perfectly healthy `/state`, so "I started it" is not evidence of
 anything. Cold start is around 50 seconds.
 
-**It refuses to start a second client.** Two plugins would fight over port
-8081 and the loser fails quietly. `launch.bat` carries a long comment about a
-stray retry starting a second client hours later; same hazard, same refusal.
+**It refuses to start a second client — including while one is still being
+built.** Two plugins fight over port 8081 and the loser runs with no HTTP
+server at all: alive, and invisible to every check. The first version only
+asked *"is a client running?"*, which is false for the whole ~30-second build
+window, and that is exactly how two appeared on 2026-10-19. It now also
+refuses while a launch is in flight, tracked by both a lock file and a live
+`gradlew` process for this repo — either alone can be missing.
+
+**`stop` kills the build before the client.** `gradlew run` blocks for the
+entire RuneLite session, so the launching `cmd` stays alive the whole time.
+Killing only the client while a build is in flight gets you a new client a
+minute later, out of nowhere, with nothing to point at.
 
 ### One bug it had, worth remembering
 
@@ -70,6 +79,13 @@ dirties it and makes the next `git pull --ff-only` refuse. Same reason
 **It cannot log in.** The client comes up at the login screen and a human has
 to log in. Anything that needs a logged-in client — widget geometry, the
 slayer task, the spellbook — still needs that one action.
+
+Because that is now the *only* thing a human is needed for, **any request to
+Josh must say which state it needs**: logged in to a world, or loaded and
+left at the login screen. Guessing wrong costs a round trip, and a check run
+against the wrong state can look like a pass — the logged-out feed is a
+subset of the logged-in one, so "the field is missing" and "the field is
+correctly `offline`" are easy to confuse.
 
 ### Relationship to `launch.bat`
 

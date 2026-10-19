@@ -70,6 +70,16 @@ $Gradlew = Join-Path $Repo 'gradlew.bat'
 $LogFile = Join-Path $env:USERPROFILE 'ge-visual-aid-devclient.log'
 $StateUrl = 'http://127.0.0.1:8081/state'
 
+# A LAUNCH IN FLIGHT IS NOT A RUNNING CLIENT, AND BOTH HAVE TO BLOCK A START.
+# For the thirty-odd seconds gradle spends building there is no client
+# process, so a guard that asks only "is a client running?" says no and
+# launches a second build. That is how two clients appeared on 2026-10-19:
+# the loser of the race for port 8081 runs with no HTTP server at all -
+# alive, and invisible to every check that matters. The lock records the
+# launching process so the window is covered.
+$LockFile = Join-Path $env:USERPROFILE 'ge-visual-aid-devclient.lock'
+$LockMaxAgeMin = 15
+
 # Keep in step with launch.bat's PINNED. It is a known-good - a version
 # watched working - not a preference.
 $PinnedVersion = '1.13.2'
@@ -90,6 +100,38 @@ function Get-DevClient {
     if (-not $procs) { return @() }
     @($procs | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($ClientMarker) })
 }
+
+# Any gradle/cmd process launching THIS repo. Used by stop: a build left
+# running after a kill will cheerfully produce a client a minute later, so a
+# "stopped" client comes back by itself and nothing says why.
+function Get-LaunchProcs {
+    $procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.CommandLine -and
+            $_.CommandLine -match [regex]::Escape($Repo) -and
+            $_.CommandLine -match 'gradlew' -and
+            $_.ProcessId -ne $PID
+        }
+    @($procs)
+}
+
+# The lock is honoured only while its process is ALIVE and it is recent. A
+# stale lock from a script that was interrupted must not block every future
+# start - a safety that latches on is a fault of its own.
+function Get-ActiveLock {
+    if (-not (Test-Path $LockFile)) { return $null }
+    try {
+        $raw = (Get-Content $LockFile -Raw).Trim() -split ','
+        $lockPid = [int]$raw[0]
+        $when    = [datetime]::Parse($raw[1])
+        if (((Get-Date) - $when).TotalMinutes -gt $LockMaxAgeMin) { Remove-Item $LockFile -Force; return $null }
+        $p = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+        if ($null -eq $p) { Remove-Item $LockFile -Force; return $null }
+        return [pscustomobject]@{ Pid = $lockPid; Started = $when }
+    } catch { Remove-Item $LockFile -Force -ErrorAction SilentlyContinue; return $null }
+}
+
+function Clear-Lock { Remove-Item $LockFile -Force -ErrorAction SilentlyContinue }
 
 function Get-PluginState {
     try {
@@ -132,8 +174,18 @@ function Show-Status {
 }
 
 function Stop-DevClient {
+    # THE BUILD GOES FIRST. Killing the client while a gradle run is still in
+    # flight gets you a client again a minute later, out of nowhere, with
+    # nothing to point at. Stop means stopped.
+    foreach ($g in Get-LaunchProcs) {
+        Write-Note "stop: killing in-flight launcher pid $($g.ProcessId)"
+        try { Stop-Process -Id $g.ProcessId -Force -ErrorAction Stop } catch { }
+    }
+    Clear-Lock
+
     $procs = Get-DevClient
     if ($procs.Count -eq 0) { Write-Note "stop: no dev client running"; return $true }
+    if ($procs.Count -gt 1) { Write-Note "stop: $($procs.Count) clients found - killing all of them" }
     foreach ($p in $procs) {
         # PRINT WHAT IS ABOUT TO DIE, BEFORE KILLING IT. A wrong match has to
         # be visible in the log afterwards, not inferred from what went
@@ -164,6 +216,21 @@ function Start-DevClient {
         Show-Status
         return $false
     }
+    # ...AND REFUSE WHILE ONE IS STILL BEING BUILT. This is the case that
+    # actually bit: the check above is false for the whole build window, so
+    # without this a second start during those thirty seconds produces two
+    # clients. Both the lock and a live gradle count, because either alone
+    # can be missing - the lock if the script was interrupted, the process
+    # match if gradle has handed off to a daemon.
+    $lock = Get-ActiveLock
+    $busy = Get-LaunchProcs
+    if ($lock -or $busy.Count -gt 0) {
+        $why = if ($lock) { "a launch started $($lock.Started.ToString('HH:mm:ss')) is still in flight (pid $($lock.Pid))" }
+               else       { "gradle is still building (pid $($busy[0].ProcessId))" }
+        Write-Note "start: REFUSING - $why"
+        Write-Note "start: wait for it, or 'stop' first to clear it"
+        return $false
+    }
 
     $argList = @('run')
     if ($Pinned) { $argList += "-PruneliteVersion=$PinnedVersion" }
@@ -180,6 +247,7 @@ function Start-DevClient {
     $gradle = Start-Process -FilePath $Gradlew -ArgumentList $argList -WorkingDirectory $Repo `
         -WindowStyle Minimized -RedirectStandardOutput $outLog `
         -RedirectStandardError (Join-Path $env:USERPROFILE 'ge-visual-aid-devclient.err.log') -PassThru
+    Set-Content -Path $LockFile -Value ("{0},{1}" -f $gradle.Id, (Get-Date).ToString('o')) -Encoding utf8
 
     # READY MEANS ANSWERING. Gradle has to resolve, compile and launch before
     # the HTTP server exists, which is routinely a minute from cold.
@@ -190,6 +258,11 @@ function Start-DevClient {
         if ($null -ne $s) {
             Write-Note ("start: UP - plugin {0}, {1}, RuneLite {2}" -f `
                 $s['plugin_output_version'], $s['game_state'], $s['runelite_version'])
+            # EVERY exit path clears the lock. A safety that latches on after
+            # one failure blocks every later start and becomes its own fault -
+            # which is worse than the thing it was guarding, because the
+            # guard looks like it is working.
+            Clear-Lock
             return $true
         }
         # ONLY GRADLE EXITING MEANS FAILURE. The first version of this checked
@@ -202,11 +275,13 @@ function Start-DevClient {
             Write-Note "start: FAILED - gradle exited ($($gradle.ExitCode)) and no client is running."
             Write-Note "start: see $outLog"
             if (Test-Path $outLog) { Get-Content $outLog -Tail 25 | ForEach-Object { Write-Host "   $_" } }
+            Clear-Lock
             return $false
         }
     }
     Write-Note "start: TIMED OUT after ${TimeoutSec}s - process is up but the feed never answered"
     Write-Note "start: check the HTTP Server setting in the plugin panel, and $outLog"
+    Clear-Lock
     return $false
 }
 
