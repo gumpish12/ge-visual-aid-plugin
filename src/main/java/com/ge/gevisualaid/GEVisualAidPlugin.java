@@ -15919,7 +15919,22 @@ public class GEVisualAidPlugin extends Plugin
             // its own name.
             if (b != null && b.width > 0 && b.height > 0)
             {
-                if (wtCanvasOk)
+                // A HIDDEN WIDGET'S BOUNDS ARE NOT WHERE IT WILL BE SHOWN.
+                // Measured 2026-10-19: high alch read 3370,1837 with the tab
+                // open and 91,42 with it shut - the shut figure is a position
+                // inside the spellbook panel's own layout, never laid out
+                // against the canvas. Printing it as "rect" puts a
+                // plausible, wrong click point beside the word HIDDEN, which
+                // is the canvas-vs-desktop trap one step further in.
+                // /widgets already answers -1 for exactly this; match it, and
+                // keep the SIZE, which is the part that stays useful.
+                if (hidden)
+                {
+                    out.append("  rect=hidden")
+                       .append("  size=").append((int) (b.width * (wtCanvasOk ? wtDsx : 1)))
+                       .append('x').append((int) (b.height * (wtCanvasOk ? wtDsy : 1)));
+                }
+                else if (wtCanvasOk)
                 {
                     out.append("  rect=")
                        .append(toScreenX(b.x, wtOx, wtDsx)).append(',')

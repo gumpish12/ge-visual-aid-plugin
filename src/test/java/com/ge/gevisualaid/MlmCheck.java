@@ -778,6 +778,26 @@ public class MlmCheck
         eq("a scrolled-out widget is named, not offered as a target",
                 slSrc.contains("OFFSCREEN-DO-NOT-CLICK"), true);
 
+        // A HIDDEN widget's bounds are not where it will be SHOWN. Measured
+        // on 2026-10-19 against the live client: high alch read
+        // 3733,1837,3769,1873 with the magic tab open and 91,42,127,78 with
+        // it shut - the shut figure is a position inside the spellbook
+        // panel's own layout and was never laid out against the canvas.
+        // Printed as "rect" it is a plausible wrong click point sitting
+        // beside the word HIDDEN. /widgets answers -1 for this case; the
+        // tree must not answer something that looks usable.
+        // Asserted on the GUARD, not on the string. The first version looked
+        // for out.append("  rect=hidden") and passed happily with the branch
+        // changed to if(false) - the dead code is still there to find. That
+        // is the 2.108d mistake exactly: testing that code EXISTS rather
+        // than that it RUNS.
+        int hidGuard = slSrc.indexOf("                if (hidden)");
+        int hidEmit  = slSrc.indexOf("out.append(\"  rect=hidden\")");
+        eq("a hidden widget offers no rect",
+                hidGuard > 0 && hidEmit > hidGuard && (hidEmit - hidGuard) < 700, true);
+        eq("...but keeps the size, which stays true",
+                slSrc.contains("  size=") && slSrc.contains("b.width * (wtCanvasOk ? wtDsx : 1)"), true);
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }
