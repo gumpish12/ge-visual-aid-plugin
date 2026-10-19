@@ -974,6 +974,18 @@ public class MlmCheck
         eq("the operator override is applied last, so it always wins",
                 heurAt > 0 && ovrAt > heurAt, true);
 
+        // 2.116: slayer_npc_filter published "<word>#Attack" from 2.108, and
+        // parseFilters is an if/else over the token - a leading '#' is an
+        // ACTION, all digits an ID, anything else a NAME. So that string was
+        // read as the name "gargoyle#attack" and matched nothing for ever,
+        // while looking exactly like a working filter. The field exists to be
+        // pasted somewhere, which makes a plausible-but-dead value the worst
+        // possible output.
+        eq("the npc filter is a bare name, not name#action",
+                slCode.contains("String filter = word;"), true);
+        eq("...and the dead form cannot come back",
+                slCode.contains("word + \"#Attack\""), false);
+
         eq("the item read runs on the client thread",
                 slSrc.contains("clientThread.invoke(() -> {"), true);
         eq("...and the handler waits for it rather than guessing",

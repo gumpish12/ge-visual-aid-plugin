@@ -1820,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.115";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.116";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -15391,7 +15391,19 @@ public class GEVisualAidPlugin extends Plugin
         int still = (slCountTick < 0 || tick < 0) ? -1 : (tick - slCountTick);
 
         String word   = slayerMatchWord(task);
-        String filter = word.isEmpty() ? "" : (word + "#Attack");
+        // 2.116: NAME ONLY. This published "<word>#Attack" from 2.108, which
+        // is not a thing the filter parser accepts: parseFilters is an
+        // if/else over the token - a leading '#' makes it an ACTION, all
+        // digits make it an ID, anything else is a NAME. So "Gargoyle#Attack"
+        // was read as the name "gargoyle#attack" and matched nothing, for
+        // ever, while looking exactly like a working filter. Mislabel rather
+        // than fail loudly, in a field whose whole job is to be pasted
+        // somewhere.
+        //
+        // The Attack test is not lost, only moved: slayer_seen_names already
+        // applies it when deciding what is a real target, which is where it
+        // can actually be combined with the name.
+        String filter = word;
 
         String seenSource = slayerCollectSeen(task, word);
         StringBuilder seen = new StringBuilder();
