@@ -1820,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.110";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.111";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -15528,7 +15528,25 @@ public class GEVisualAidPlugin extends Plugin
     // =======================================================================
     private void handleSlayerRequest(HttpExchange ex)
     {
-        try { sendPlain(ex, buildSlayerReport()); }
+        try
+        {
+            // 2.111: ?fields=1 RETURNS THE KEY=VALUE BLOCK INSTEAD OF THE
+            // REPORT. The report above is for a person and uses spaces and
+            // arrows as punctuation; parsing it is the exact mistake
+            // CLAUDE.md records against the /filter summary line, where an
+            // ordinary value contained the separator. /state carries these
+            // same fields and is tens of kilobytes, which is why the
+            // tracker was reaching for the report in the first place.
+            // Same split as /widgets: one door for eyes, one for parsers.
+            String q = ex.getRequestURI().getRawQuery();
+            if (q != null && q.contains("fields"))
+            {
+                sendPlain(ex, "plugin_output_version=" + PLUGIN_OUTPUT_VERSION + "\n"
+                        + spellbookBlock + slayerBlock);
+                return;
+            }
+            sendPlain(ex, buildSlayerReport());
+        }
         catch (Throwable t) { log.warn("GEVisualAid /slayer error: {}", t.getMessage()); }
     }
 
