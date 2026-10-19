@@ -798,6 +798,119 @@ public class MlmCheck
         eq("...but keeps the size, which stays true",
                 slSrc.contains("  size=") && slSrc.contains("b.width * (wtCanvasOk ? wtDsx : 1)"), true);
 
+        // ================================================================
+        // 2.110 - THE ALCH RULE
+        //
+        // Josh's words: "only alch unless the ge is 30% above". Alch is the
+        // DEFAULT; a high GE price is the exception. Calling the real
+        // compiled method, not a copy - the 2.105 reason.
+        // ================================================================
+        // Rune sq shield shape: alch 25600-ish, GE below it -> alch.
+        eq("GE below the alch value -> alch",
+                GEVisualAidPlugin.alchVerdict(25600, 22335, true, 30), "alch");
+        // Exactly at the threshold is NOT above it, so it still alchs. The
+        // boundary is stated rather than left to whoever reads > vs >=.
+        eq("exactly at the threshold -> alch",
+                GEVisualAidPlugin.alchVerdict(1000, 1300, true, 30), "alch");
+        eq("one gp over the threshold -> keep",
+                GEVisualAidPlugin.alchVerdict(1000, 1301, true, 30), "keep");
+        // A 0% margin means "alch whenever the GE does not beat the alch
+        // value", which must still work - a margin is not a minimum.
+        eq("a zero margin still decides",
+                GEVisualAidPlugin.alchVerdict(1000, 1001, true, 0), "keep");
+
+        // UNTRADEABLE CANNOT LOSE TO THE GE, because it has no GE price to
+        // lose to. This is the branch that keeps a Crystal shard from being
+        // compared against a meaningless number.
+        eq("an untradeable item alchs regardless of any price",
+                GEVisualAidPlugin.alchVerdict(1000, 999999, false, 30), "alch");
+
+        // UNKNOWN IS NEVER A VERDICT. An item whose price could not be read
+        // must not be alched on the strength of a missing number - the
+        // -1-versus-0 rule applied to a decision instead of a field.
+        eq("no alch value is not a reason to alch",
+                GEVisualAidPlugin.alchVerdict(0, 500, true, 30), "no_alch_value");
+        eq("an unreadable GE price is not a reason to alch",
+                GEVisualAidPlugin.alchVerdict(1000, -1, true, 30), "unknown_ge_price");
+
+        // The terms must travel WITH the verdict, or it cannot be checked -
+        // the 2.104 rule. A page that printed only "alch" would be asking to
+        // be trusted.
+        eq("/item publishes the margin it used",
+                slSrc.contains("alch_margin_pct="), true);
+        eq("/item publishes both terms beside the verdict",
+                slSrc.contains("_ha_price=") && slSrc.contains("_ge_price="), true);
+        // Both numbers come from the client, never from a table.
+        eq("the alch value is the game's own",
+                slSrc.contains("getHaPrice()"), true);
+        eq("the GE price is RuneLite's live one",
+                slSrc.contains("itemManager.getItemPrice(id)"), true);
+
+        // ================================================================
+        // 2.110 - /widgettree?save=
+        // ================================================================
+        // The label IS the annotation, so it has to come from the symbol.
+        eq("a symbolic name becomes the label",
+                GEVisualAidPlugin.widgetSaveLabel("MagicSpellbook.HIGH_ALCHEMY", 218, 47, -1),
+                "MagicSpellbook_HIGH_ALCHEMY");
+        eq("an unnamed widget still gets a usable label",
+                GEVisualAidPlugin.widgetSaveLabel(null, 218, 47, -1), "w218_47");
+        eq("an indexed child keeps its index",
+                GEVisualAidPlugin.widgetSaveLabel(null, 149, 0, 3), "w149_0_3");
+        // A label is used verbatim in a comma-separated config box, so a
+        // separator inside one would split an entry and silently shift
+        // everything after it.
+        eq("a label can never contain a separator",
+                GEVisualAidPlugin.widgetSaveLabel("Odd.Name With,Comma", 1, 2, -1)
+                        .matches("[A-Za-z0-9_]+"), true);
+
+        // IT MERGES. Overwriting the box destroys whatever another activity
+        // had and persists that to the RuneLite profile - the hazard
+        // CLAUDE.md records for /filter?scenery=.
+        eq("save merges by default",
+                slSrc.contains("if (!replace)"), true);
+        eq("replace has to be asked for",
+                slSrc.contains("boolean replace = \"1\".equals(p.get(\"replace\"))"), true);
+        // A duplicate label is dropped by parseWidgets, so one written here
+        // would match nothing for ever while looking configured.
+        eq("a label collision is reported, not written",
+                slSrc.contains("COLLIDED (kept what was there"), true);
+        eq("the save cap says when it bites",
+                slSrc.contains("NOT SAVED - cap "), true);
+        eq("an unknown save target is refused, not guessed",
+                slSrc.contains("SAVE REFUSED: unknown target"), true);
+        // Config writes go through the queue and land on the client thread,
+        // never straight from the HTTP handler.
+        int saveAt = slSrc.indexOf("SAVED to ");
+        int queueAt = slSrc.indexOf("synchronized (pendingConfig) { pendingConfig.add(new String[]{ key, spec.toString() }); }");
+        eq("the write is queued for the client thread",
+                queueAt > 0 && saveAt > queueAt, true);
+
+        // /state MUST CARRY THE VERSION FROM THE FIRST MILLISECOND. The HTTP
+        // server binds before the first state is built, and the placeholder
+        // used to be "status=starting" alone - 200 OK with no
+        // plugin_output_version, which 2.99 made the field machines compare.
+        // "Just started" and "a plugin too old to have the field" then read
+        // identically. Caught by the dev launcher printing "UP - plugin , ,".
+        eq("the placeholder state carries the version",
+                slSrc.contains("\"plugin_output_version=\" + PLUGIN_OUTPUT_VERSION + \"\\n\"\n            + \"game_state=STARTING\\n\""), true);
+
+        // AN UNKNOWN ITEM ID RETURNS A STUB NAMED "null" - the four-letter
+        // STRING. Observed live: id 99999999 published name=null, state=ok,
+        // ha_price=0, ge_price=0 - a row that reads as a real item worth
+        // nothing and would enter a drop list as one.
+        eq("the \"null\" stub name is caught",
+                slSrc.contains("name.equals(\"null\")"), true);
+        eq("an unknown item is -1, not a confident zero",
+                slSrc.contains("_ha_price=-1\\n") && slSrc.contains("_alch=unknown_item\\n"), true);
+        // ClientThread, not the HTTP thread: off-thread this read does not
+        // throw, it just yields nothing, which is how it shipped reading
+        // no_such_item for every id while getItemPrice beside it worked.
+        eq("the item read runs on the client thread",
+                slSrc.contains("clientThread.invoke(() -> {"), true);
+        eq("...and the handler waits for it rather than guessing",
+                slSrc.contains("done.await(3, java.util.concurrent.TimeUnit.SECONDS)"), true);
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }

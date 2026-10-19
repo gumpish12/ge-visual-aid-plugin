@@ -1440,6 +1440,18 @@ public interface GEVisualAidConfig extends Config
             section = entitySetSection, position = 106)
     default String set10Waypoints() { return ""; }
 
+    @ConfigItem(keyName = "alchMarginPercent", name = "Keep-instead-of-alch margin %",
+            description = "How far ABOVE an item's high alchemy value its live GE price "
+                    + "must be before the item is worth keeping rather than alching. "
+                    + "30 means: alch unless the GE price beats the alch value by 30%. "
+                    + "Alch is the DEFAULT and a high GE price is the exception - which "
+                    + "is right for slayer, where an inventory slot freed is another "
+                    + "drop you can pick up, and wrong for flipping. Published as "
+                    + "alch_margin_pct and used by /item, so the verdict and the number "
+                    + "that produced it are always visible together.",
+            section = skillSection, position = 90)
+    default int alchMarginPercent() { return 30; }
+
     @ConfigItem(keyName = "set10Widgets", name = "10. Widgets",
             description = "Widget ids for this set, merged into the always-on "
                     + "Widgets box while the set is enabled - so the general ones "

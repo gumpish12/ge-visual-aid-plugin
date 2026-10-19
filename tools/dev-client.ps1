@@ -267,7 +267,13 @@ function Start-DevClient {
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 3
         $s = Get-PluginState
-        if ($null -ne $s) {
+        # ANSWERING IS NOT THE SAME AS READY. The HTTP server binds before
+        # the first state is built, so for about a second /state returns 200
+        # with a placeholder. Waiting on the VERSION rather than on the
+        # response is what makes "UP" mean something - the first run of this
+        # reported "UP - plugin , , RuneLite" and was telling the truth about
+        # what it had been given.
+        if ($null -ne $s -and $s['plugin_output_version'] -and $s['game_state'] -ne 'STARTING') {
             Write-Note ("start: UP - plugin {0}, {1}, RuneLite {2}" -f `
                 $s['plugin_output_version'], $s['game_state'], $s['runelite_version'])
             # EVERY exit path clears the lock. A safety that latches on after

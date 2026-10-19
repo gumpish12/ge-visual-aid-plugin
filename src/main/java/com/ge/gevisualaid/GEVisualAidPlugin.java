@@ -55,6 +55,7 @@ import java.time.LocalDate;
 import net.runelite.api.widgets.ComponentID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.RuneLiteProperties;
+import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.game.WorldService;
 import net.runelite.client.util.WorldUtil;
@@ -115,6 +116,13 @@ import java.util.concurrent.TimeUnit;
 public class GEVisualAidPlugin extends Plugin
 {
     @Inject private Client             client;
+    // 2.110: ItemComposition is CLIENT STATE. Read from the HTTP thread it
+    // does not throw - it returns nothing, so /item answered with a full set
+    // of plausible rows reading no_such_item and -1, while getItemPrice
+    // beside it worked because a price map is not client state. A
+    // half-working read is worse than a failing one. ClientThread.invoke is
+    // the right pump and unlike onGameTick it runs at the login screen too.
+    @Inject private ClientThread       clientThread;
     @Inject private PluginManager      pluginManager;
     @Inject private GEVisualAidConfig  config;
     @Inject private OverlayManager     overlayManager;
@@ -1812,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.109";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.110";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2195,7 +2203,17 @@ public class GEVisualAidPlugin extends Plugin
     // the game/scheduler thread and read by the HTTP thread; volatile gives
     // safe publication so the endpoint never serves a half-written buffer.
     private HttpServer      httpServer  = null;
-    private volatile String latestState = "status=starting\n";
+    // 2.110: THE VERSION IS ON /state FROM THE FIRST MILLISECOND. This was
+    // "status=starting\n" and nothing else, so for the second or so between
+    // the HTTP server binding and the first write, /state answered 200 with
+    // no plugin_output_version in it - and 2.99 made that the field machines
+    // compare between builds. A reader could not tell "just started" from
+    // "a plugin so old it has no version field". Observed by the dev
+    // launcher, which reported "UP - plugin , , RuneLite" and meant it.
+    private volatile String latestState =
+            "plugin_output_version=" + PLUGIN_OUTPUT_VERSION + "\n"
+            + "game_state=STARTING\n"
+            + "status=starting\n";
 
     // Plugin v2.21 — Scene/tile/camera block. Computed on the client thread
     // in onGameTick and published here; buildUiState() and baseIdleHeader()
@@ -13348,6 +13366,7 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/geoffer", this::handleGeOfferRequest); // 2.102
             httpServer.createContext("/slayer",  this::handleSlayerRequest);  // 2.108
             httpServer.createContext("/widgettree", this::handleWidgetTreeRequest); // 2.109
+            httpServer.createContext("/item",    this::handleItemRequest);     // 2.110
             httpServer.createContext("/loadout", this::handleLoadoutRequest);   // 2.95
             httpServer.createContext("/hop",    this::handleHopRequest);
             httpServer.createContext("/agility", this::handleAgilityRequest);
@@ -15805,6 +15824,14 @@ public class GEVisualAidPlugin extends Plugin
          .append("  max=").append(max).append(nl);
         r.append("usage: /widgettree?group=218  ?find=alch  ?visible=1  ?max=800  ?all=1")
          .append(nl);
+        r.append("save : add the matches to a widget box, merged, keeping what is")
+         .append(nl)
+         .append("       already there:  &save=global  or  &save=set1 .. set10")
+         .append(nl)
+         .append("       &replace=1 overwrites instead. The LABEL is the annotation -")
+         .append(nl)
+         .append("       rename it in the settings box to say what it is.")
+         .append(nl);
         r.append("-----------------------------------------------------------------")
          .append(nl);
 
@@ -15825,6 +15852,10 @@ public class GEVisualAidPlugin extends Plugin
 
         java.util.Map<Integer, String> names = widgetNameMap();
         int[] counters = new int[]{ 0, 0 };   // [0] emitted, [1] visited
+        // Collected during the SAME walk that prints them, so what gets
+        // saved is exactly what you just looked at - not a second walk that
+        // could match differently.
+        java.util.List<String[]> found = new java.util.ArrayList<>();
 
         Widget[] roots;
         try { roots = client.getWidgetRoots(); }
@@ -15837,7 +15868,7 @@ public class GEVisualAidPlugin extends Plugin
 
         StringBuilder body = new StringBuilder(8192);
         for (Widget w : roots)
-            wtWalk(w, 0, group, find, visOnly, max, names, counters, body);
+            wtWalk(w, 0, group, find, visOnly, max, names, counters, body, found);
 
         r.append(body);
         r.append("-----------------------------------------------------------------")
@@ -15854,12 +15885,23 @@ public class GEVisualAidPlugin extends Plugin
              .append(nl)
              .append("all, so an empty result here is usually a closed tab, not a bad id.")
              .append(nl);
+
+        // 2.110: save what was just listed. AFTER the listing, deliberately -
+        // you see exactly what is about to be written, in the same response,
+        // before it is written.
+        String save = p.getOrDefault("save", "").trim();
+        if (!save.isEmpty())
+        {
+            boolean replace = "1".equals(p.get("replace")) || "true".equals(p.get("replace"));
+            r.append(nl);
+            r.append(widgetTreeSave(save, replace, found));
+        }
         return r.toString();
     }
 
     private void wtWalk(Widget w, int depth, int group, String find, boolean visOnly,
                         int max, java.util.Map<Integer, String> names,
-                        int[] counters, StringBuilder out)
+                        int[] counters, StringBuilder out, java.util.List<String[]> found)
     {
         if (w == null || depth > WT_DEPTH_MAX || counters[0] >= max) return;
         counters[1]++;
@@ -15970,27 +16012,360 @@ public class GEVisualAidPlugin extends Plugin
                    .append('"');
             out.append(System.lineSeparator());
             counters[0]++;
+            if (found != null)
+                found.add(new String[]{ widgetSaveLabel(name, g, c, -1), g + "." + c });
         }
 
-        try { wtWalkAll(w.getStaticChildren(),  depth + 1, group, find, visOnly, max, names, counters, out); }
+        try { wtWalkAll(w.getStaticChildren(),  depth + 1, group, find, visOnly, max, names, counters, out, found); }
         catch (Throwable ignored) { }
-        try { wtWalkAll(w.getDynamicChildren(), depth + 1, group, find, visOnly, max, names, counters, out); }
+        try { wtWalkAll(w.getDynamicChildren(), depth + 1, group, find, visOnly, max, names, counters, out, found); }
         catch (Throwable ignored) { }
-        try { wtWalkAll(w.getNestedChildren(),  depth + 1, group, find, visOnly, max, names, counters, out); }
+        try { wtWalkAll(w.getNestedChildren(),  depth + 1, group, find, visOnly, max, names, counters, out, found); }
         catch (Throwable ignored) { }
     }
 
     private void wtWalkAll(Widget[] kids, int depth, int group, String find, boolean visOnly,
                            int max, java.util.Map<Integer, String> names,
-                           int[] counters, StringBuilder out)
+                           int[] counters, StringBuilder out, java.util.List<String[]> found)
     {
         if (kids == null) return;
-        for (Widget k : kids) wtWalk(k, depth, group, find, visOnly, max, names, counters, out);
+        for (Widget k : kids) wtWalk(k, depth, group, find, visOnly, max, names, counters, out, found);
     }
 
     private static int intOr(String s, int dflt)
     {
         if (s == null || s.isEmpty()) return dflt;
         try { return Integer.parseInt(s.trim()); } catch (Exception e) { return dflt; }
+    }
+
+    // =======================================================================
+    // 2.110 - ALCH VALUES, AND THE RULE THAT USES THEM
+    //
+    // Josh's rule, 2026-10-18: "only alch unless the ge is 30% above...
+    // holding 1 rune square shield isnt as good as high alching 3." So alch
+    // is the DEFAULT and a high GE price is the exception, which is the
+    // right way round for slayer and the wrong way round for flipping - the
+    // threshold is published so it is obvious which is in force.
+    //
+    // BOTH NUMBERS COME FROM THE CLIENT, NOT A TABLE. getHaPrice() is the
+    // game's own alch value and itemManager.getItemPrice() is RuneLite's
+    // live price. An alch-value table would be ~30,000 rows that rot.
+    //
+    // THE VERDICT IS PUBLISHED WITH ITS TERMS BESIDE IT, the 2.104 rule: a
+    // consumer can check alch_verdict against ha_price, ge_price and
+    // alch_margin_pct and see the arithmetic, instead of trusting a word.
+    // =======================================================================
+
+    private static final int ITEM_LOOKUP_CAP = 60;   // runaway stop; says when it bites
+
+    // ALCH WHEN THE GE PRICE DOES NOT BEAT THE ALCH VALUE BY THE MARGIN.
+    // Static and package-visible so mlmCheck calls the real one rather than
+    // a copy - the 2.105 reason.
+    //
+    // -1 in means unknown, and unknown is never a verdict: an item whose
+    // price could not be read must not be alched on the strength of a
+    // missing number. That is the -1-versus-0 rule applied to a decision
+    // rather than to a field.
+    static String alchVerdict(long haPrice, long gePrice, boolean geTradeable, int marginPct)
+    {
+        if (haPrice <= 0)        return "no_alch_value";
+        if (!geTradeable)        return "alch";          // cannot be sold, so the GE side cannot win
+        if (gePrice < 0)         return "unknown_ge_price";
+        long threshold = haPrice + (haPrice * marginPct) / 100L;
+        return gePrice > threshold ? "keep" : "alch";
+    }
+
+    private long safeHaPrice(int id)
+    {
+        try { return itemManager.getItemComposition(id).getHaPrice(); }
+        catch (Throwable t) { return -1; }
+    }
+
+    private boolean safeGeTradeable(int id)
+    {
+        try { return itemManager.getItemComposition(id).isGeTradeable(); }
+        catch (Throwable t) { return false; }
+    }
+
+    private long safeGePrice(int id)
+    {
+        try { return itemManager.getItemPrice(id); }
+        catch (Throwable t) { return -1; }
+    }
+
+    private int alchMarginPct()
+    {
+        try { return Math.max(0, config.alchMarginPercent()); }
+        catch (Throwable t) { return 30; }
+    }
+
+    // ---- /item?ids=1113,1127 ----------------------------------------------
+    //
+    // THE DROP-LIST UI NEEDS VALUES FOR ITEMS THE PLAYER DOES NOT OWN, which
+    // per-inventory-slot fields can never answer. Lookup by ID, not by name:
+    // a name lookup means scanning ~30,000 compositions on the client thread
+    // the first time anyone asks, and the suite already resolves names to
+    // ids through the wiki mapping it fetches for the tracker.
+    private void handleItemRequest(HttpExchange ex)
+    {
+        try
+        {
+            String q = ex.getRequestURI().getRawQuery();
+            if (q == null) q = "";
+            String ids = "";
+            for (String kv : q.split("&"))
+            {
+                int eq = kv.indexOf('=');
+                if (eq > 0 && kv.substring(0, eq).equalsIgnoreCase("ids"))
+                {
+                    ids = kv.substring(eq + 1);
+                    try { ids = java.net.URLDecoder.decode(ids, "UTF-8"); } catch (Throwable ignored) { }
+                }
+            }
+
+            StringBuilder r = new StringBuilder(2048);
+            r.append("plugin_output_version=").append(PLUGIN_OUTPUT_VERSION).append("\n");
+            r.append("alch_margin_pct=").append(alchMarginPct()).append("\n");
+            r.append("# keep when ge_price > ha_price * (1 + margin/100), else alch\n");
+            r.append("# ids=<comma separated item ids>. Names are not accepted: resolve\n");
+            r.append("# them through the wiki mapping, as the tracker already does.\n");
+
+            if (ids.trim().isEmpty())
+            {
+                r.append("item_state=no_ids\n");
+                sendPlain(ex, r.toString());
+                return;
+            }
+
+            // ON THE CLIENT THREAD, and WAITED FOR. The rows below read
+            // ItemComposition, which is client state; off-thread it quietly
+            // yields nothing rather than throwing.
+            final String idsFinal = ids;
+            final StringBuilder rows = new StringBuilder(2048);
+            final java.util.concurrent.CountDownLatch done =
+                    new java.util.concurrent.CountDownLatch(1);
+            clientThread.invoke(() -> {
+                try { buildItemRows(idsFinal, rows); }
+                catch (Throwable t) { rows.append("item_state=read_error:")
+                        .append(t.getClass().getSimpleName()).append("\n"); }
+                finally { done.countDown(); }
+            });
+            if (!done.await(3, java.util.concurrent.TimeUnit.SECONDS))
+            {
+                r.append("item_state=timeout\n");
+                r.append("# the client thread did not answer in 3s\n");
+                sendPlain(ex, r.toString());
+                return;
+            }
+            r.append(rows);
+            sendPlain(ex, r.toString());
+        }
+        catch (Throwable t) { log.warn("GEVisualAid /item error: {}", t.getMessage()); }
+    }
+
+    private void buildItemRows(String ids, StringBuilder r)
+    {
+        {
+            int margin = alchMarginPct();
+            int n = 0, skipped = 0;
+            for (String tok : ids.split("[,;\\s]+"))
+            {
+                if (tok.isEmpty()) continue;
+                if (n >= ITEM_LOOKUP_CAP) { skipped++; continue; }
+                int id;
+                try { id = Integer.parseInt(tok.trim()); }
+                catch (Exception e)
+                {
+                    r.append("item_").append(n).append("_id=-1\n");
+                    r.append("item_").append(n).append("_state=not_a_number:").append(tok).append("\n");
+                    n++;
+                    continue;
+                }
+
+                String name = "";
+                try { name = itemManager.getItemComposition(id).getName(); }
+                catch (Throwable ignored) { }
+
+                // AN UNKNOWN ID RETURNS A STUB NAMED "null" - the four-letter
+                // STRING, not a Java null - so an isEmpty() test never fires
+                // and id 99999999 published name=null, state=ok and two
+                // zeroes. A consumer puts that in a drop list as a real item
+                // worth nothing. Observed live before this line existed.
+                boolean real = !(name == null || name.isEmpty() || name.equals("null"));
+                if (!real)
+                {
+                    r.append("item_").append(n).append("_id=").append(id).append("\n");
+                    r.append("item_").append(n).append("_name=\n");
+                    // -1 and not 0: 0 is a real alch value (coins have one)
+                    // and would read as "known, and worthless".
+                    r.append("item_").append(n).append("_ha_price=-1\n");
+                    r.append("item_").append(n).append("_ge_price=-1\n");
+                    r.append("item_").append(n).append("_ge_tradeable=false\n");
+                    r.append("item_").append(n).append("_alch=unknown_item\n");
+                    r.append("item_").append(n).append("_state=no_such_item\n");
+                    n++;
+                    continue;
+                }
+
+                long ha = safeHaPrice(id);
+                long ge = safeGePrice(id);
+                boolean tr = safeGeTradeable(id);
+
+                r.append("item_").append(n).append("_id=").append(id).append("\n");
+                r.append("item_").append(n).append("_name=").append(sanitiseValue(name)).append("\n");
+                r.append("item_").append(n).append("_ha_price=").append(ha).append("\n");
+                r.append("item_").append(n).append("_ge_price=").append(ge).append("\n");
+                r.append("item_").append(n).append("_ge_tradeable=").append(tr).append("\n");
+                r.append("item_").append(n).append("_alch=")
+                 .append(alchVerdict(ha, ge, tr, margin)).append("\n");
+                r.append("item_").append(n).append("_state=ok\n");
+                n++;
+            }
+            r.append("item_count=").append(n).append("\n");
+            // THE CAP SAYS WHEN IT BITES, like every other cap here.
+            if (skipped > 0)
+                r.append("item_skipped=").append(skipped)
+                 .append("\nitem_state=capped_at_").append(ITEM_LOOKUP_CAP).append("\n");
+        }
+    }
+
+    // =======================================================================
+    // 2.110 - /widgettree?save= : CAPTURE WHAT YOU JUST FOUND
+    //
+    // Josh: "I could highlight all of the spellbook spells if i wanted and
+    // just save them so you can see. Then maybe let me annotate next to them
+    // what they are."
+    //
+    // THE LABEL IS THE ANNOTATION. There is no separate notes field, on
+    // purpose: the symbolic name already says what a widget is
+    // (MagicSpellbook.HIGH_ALCHEMY -> MagicSpellbook_HIGH_ALCHEMY), and
+    // renaming the left-hand side in the settings box is the annotation. A
+    // parallel notes store would be a second place to keep the same fact,
+    // and the two would disagree the first time one was edited.
+    //
+    // IT MERGES, IT DOES NOT CLOBBER. Overwriting the widget box destroys
+    // whatever another activity had configured and persists that to the
+    // RuneLite profile - the hazard CLAUDE.md records for /filter?scenery=.
+    // Existing labels are kept and only genuinely new ones are added, unless
+    // replace=1 is passed, which has to be meant.
+    // =======================================================================
+
+    private static final int WT_SAVE_CAP = 120;   // just under the 128 widget cap
+
+    // Returns a report, or "" when no save was asked for.
+    private String widgetTreeSave(String target, boolean replace,
+                                  java.util.List<String[]> found)
+    {
+        String nl = System.lineSeparator();
+        StringBuilder r = new StringBuilder(512);
+
+        // Which config key. Same set<N><field> pattern /filter already uses
+        // (2.78), so there is no second spelling of something
+        // GEVisualAidConfig spells once.
+        String key;
+        if (target.equalsIgnoreCase("global") || target.equalsIgnoreCase("widgets"))
+            key = "widgetList";
+        else if (target.toLowerCase(java.util.Locale.ROOT).matches("set([1-9]|10)"))
+            key = "set" + target.substring(3) + "Widgets";
+        else
+        {
+            r.append("SAVE REFUSED: unknown target \"").append(target).append("\"").append(nl);
+            r.append("  use save=global, or save=set1 .. save=set10").append(nl);
+            return r.toString();
+        }
+
+        String existing = "";
+        try
+        {
+            String cur = configManager.getConfiguration("ge-visual-aid", key);
+            if (cur != null) existing = cur;
+        }
+        catch (Throwable ignored) { }
+
+        java.util.LinkedHashMap<String, String> merged = new java.util.LinkedHashMap<>();
+        if (!replace)
+        {
+            for (String tok : existing.split("[,;\r\n]+"))
+            {
+                tok = tok.trim();
+                if (tok.isEmpty()) continue;
+                int eq = tok.indexOf('=');
+                if (eq > 0) merged.put(tok.substring(0, eq).trim(), tok.substring(eq + 1).trim());
+            }
+        }
+        int before = merged.size();
+
+        int added = 0, already = 0, collided = 0, overCap = 0;
+        StringBuilder collisions = new StringBuilder();
+        for (String[] f : found)
+        {
+            String label = f[0], id = f[1];
+            if (merged.size() >= WT_SAVE_CAP) { overCap++; continue; }
+            String prev = merged.get(label);
+            if (prev == null)              { merged.put(label, id); added++; }
+            else if (prev.equals(id))      { already++; }
+            else
+            {
+                // A DUPLICATE LABEL IS SILENTLY DROPPED BY parseWidgets, so a
+                // collision written here would match nothing for ever while
+                // looking configured. Name it and keep what was there.
+                collided++;
+                if (collisions.length() > 0) collisions.append(", ");
+                collisions.append(label).append(" (have ").append(prev)
+                          .append(", found ").append(id).append(")");
+            }
+        }
+
+        StringBuilder spec = new StringBuilder();
+        for (java.util.Map.Entry<String, String> e : merged.entrySet())
+        {
+            if (spec.length() > 0) spec.append(",");
+            spec.append(e.getKey()).append("=").append(e.getValue());
+        }
+
+        synchronized (pendingConfig) { pendingConfig.add(new String[]{ key, spec.toString() }); }
+
+        r.append("SAVED to ").append(key).append(replace ? "  (REPLACED)" : "  (merged)").append(nl);
+        r.append("  was ").append(before).append(" entries, now ").append(merged.size()).append(nl);
+        r.append("  added ").append(added)
+         .append(", already present ").append(already)
+         .append(", collisions ").append(collided).append(nl);
+        if (collided > 0)
+        {
+            r.append("  COLLIDED (kept what was there - a duplicate label matches").append(nl);
+            r.append("  nothing for ever while looking configured):").append(nl);
+            r.append("    ").append(collisions).append(nl);
+        }
+        if (overCap > 0)
+            r.append("  *** ").append(overCap).append(" NOT SAVED - cap ")
+             .append(WT_SAVE_CAP).append(" reached. Narrow the filter.").append(nl);
+        r.append("  the write is queued and applies on the next game tick;").append(nl);
+        r.append("  rename any label in the settings box - the label IS the note.").append(nl);
+        return r.toString();
+    }
+
+    // group.child[.index] -> a label. The symbolic name when the api has one,
+    // because that is already the annotation anyone would write by hand.
+    static String widgetSaveLabel(String symbolicName, int g, int c, int idx)
+    {
+        String base;
+        if (symbolicName != null && !symbolicName.isEmpty())
+            base = symbolicName.replace('.', '_');
+        else
+            base = "w" + g + "_" + c;
+        if (idx >= 0) base = base + "_" + idx;
+        // Its own sanitiser rather than sanitiseKey, which is an instance
+        // method: this one has to be static so mlmCheck calls the real thing
+        // instead of a copy. The input is already a symbol, so the rule is
+        // only "keep what a label may contain".
+        StringBuilder out = new StringBuilder(base.length());
+        for (int i = 0; i < base.length(); i++)
+        {
+            char ch = base.charAt(i);
+            boolean ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+                      || (ch >= '0' && ch <= '9') || ch == '_';
+            out.append(ok ? ch : '_');
+        }
+        return out.toString();
     }
 }
