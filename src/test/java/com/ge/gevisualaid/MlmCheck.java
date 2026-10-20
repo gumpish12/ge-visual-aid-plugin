@@ -1014,6 +1014,112 @@ public class MlmCheck
         eq("...and the handler waits for it rather than guessing",
                 slSrc.contains("done.await(3, java.util.concurrent.TimeUnit.SECONDS)"), true);
 
+        // ================================================================
+        // 2.118 - THE GAME UPDATE COUNTDOWN
+        //
+        // Calling the real compiled parser, not a copy of it. -1 is the
+        // only "no" answer: 0 is a real countdown value meaning the
+        // shutdown is now, and a consumer that cannot tell those apart
+        // stops flipping for ever on a client that never saw a warning.
+        // ================================================================
+        eq("the observed line parses",
+                GEVisualAidPlugin.parseSystemUpdateSeconds("System update in: 40:35"), 2435);
+        eq("a single-digit minute parses",
+                GEVisualAidPlugin.parseSystemUpdateSeconds("System update in: 0:59"), 59);
+        eq("one minute out - the number the flipper acts on",
+                GEVisualAidPlugin.parseSystemUpdateSeconds("System update in: 1:00"), 60);
+        eq("zero is a real reading, not a failure",
+                GEVisualAidPlugin.parseSystemUpdateSeconds("System update in: 0:00"), 0);
+        eq("an hours field is handled rather than misread",
+                GEVisualAidPlugin.parseSystemUpdateSeconds("System update in: 1:02:03"), 3723);
+        // The chat area is full of other people's text. Anything that is
+        // not the game's own line must read as -1, not as a number.
+        eq("an unrelated chat line is not a countdown",
+                GEVisualAidPlugin.parseSystemUpdateSeconds("Bob: whats the system update in a bit?"), -1);
+        eq("the prefix with no clock after it",
+                GEVisualAidPlugin.parseSystemUpdateSeconds("System update in: soon"), -1);
+        eq("null is handled",
+                GEVisualAidPlugin.parseSystemUpdateSeconds(null), -1);
+        eq("a single number is not a clock",
+                GEVisualAidPlugin.parseSystemUpdateSeconds("System update in: 40"), -1);
+        eq("three-digit parts are refused rather than guessed at",
+                GEVisualAidPlugin.parseSystemUpdateSeconds("System update in: 400:35"), -1);
+        // Trailing markup or punctuation must not take the whole line down.
+        eq("trailing text after the clock is ignored",
+                GEVisualAidPlugin.parseSystemUpdateSeconds("System update in: 12:34 </col>"), 754);
+
+        // SCANNED, NOT INDEXED. It sat on child [0] the day it was seen and
+        // it is a PM chat line, so traffic moves it. A fixed index would
+        // quietly read somebody else's message - the go_<label>_0 trap.
+        eq("the PM container is reached by its SYMBOL, not a bare 163",
+                slSrc.contains("InterfaceID.PmChat.CONTAINER"), true);
+        // SCOPED TO THE FUNCTION. A bare contains() passed with this very
+        // loop gutted, because an identical "for (int i = 0; i < kids.length"
+        // lives elsewhere in the plugin - an assertion matched on text that
+        // exists in more than one place is an assertion about the file, not
+        // about the thing. Proved by the mutation going green the first time.
+        int suAt = slCode.indexOf("private String buildSystemUpdateBlock");
+        String suBody = (suAt < 0) ? ""
+                : slCode.substring(suAt, Math.min(slCode.length(), suAt + 3000));
+        eq("the system-update block was found at all", suAt >= 0, true);
+        eq("the children are scanned rather than indexed",
+                suBody.contains("for (int i = 0; i < kids.length; i++)"), true);
+        eq("and \"nothing to report\" is told apart from \"could not look\"",
+                slCode.contains("system_update_state=none") && slCode.contains("system_update_state=unreadable"), true);
+
+        // ================================================================
+        // 2.118 - THE LOGIN SCREEN OK BOX
+        //
+        // There is no widget for it - /widgettree returns nothing at all
+        // while logged out - so it is computed. The real arithmetic, not a
+        // copy.
+        // ================================================================
+        int[] okBox = GEVisualAidPlugin.loginOkRect(2288, 1370);
+        eq("the box exists on the measured canvas", okBox != null, true);
+        if (okBox != null)
+        {
+            // RULE ZERO: a RECT, never a point. Width and height both real.
+            eq("it is a rectangle, not a point", okBox[2] > okBox[0] && okBox[3] > okBox[1], true);
+            // Measured: the button centre sat on the canvas centre.
+            eq("it is centred on the canvas horizontally",
+                    (okBox[0] + okBox[2]) / 2, 2288 / 2);
+            eq("it is the measured width", okBox[2] - okBox[0], 147);
+            eq("it is the measured height", okBox[3] - okBox[1], 41);
+            // The hover Josh gave: desktop 1689,482 -> canvas 1127,299.
+            // Two independent measurements, and the box has to contain it.
+            eq("it contains the point Josh hovered",
+                    okBox[0] <= 1127 && 1127 <= okBox[2]
+                 && okBox[1] <= 299  && 299  <= okBox[3], true);
+        }
+        // A canvas that cannot hold the dialog gets NOTHING, not a
+        // plausible rectangle off the top of the screen.
+        eq("a canvas too short returns null", GEVisualAidPlugin.loginOkRect(2288, 100), null);
+        eq("a canvas too narrow returns null", GEVisualAidPlugin.loginOkRect(10, 1370), null);
+        eq("a zero canvas returns null", GEVisualAidPlugin.loginOkRect(0, 0), null);
+        eq("a negative canvas returns null", GEVisualAidPlugin.loginOkRect(-1, -1), null);
+        // It must be computed from a LIVE canvas read. The cached figures
+        // are frozen while logged out - measured 2026-10-20, the feed still
+        // said 2288x1370 after the window had been shrunk - and a click
+        // built from those aims at a window that is no longer there.
+        eq("the box reads the canvas live rather than the tick cache",
+                slCode.contains("client.getCanvas()") && slCode.contains("buildLoginGeometryState"), true);
+        eq("the feed says what the box is based on",
+                slCode.contains("login_ok_basis="), true);
+
+        // ================================================================
+        // 2.118 - update_required CAN SEE THE LOGIN SCREEN AT LAST
+        //
+        // It was a text match over getLoginScreenMessage(), which is ALWAYS
+        // EMPTY - there is no API for the login screen text. Measured on
+        // 2026-10-20 it published false while the screen said "please
+        // restart your client". A field that cannot see the thing it is
+        // named after still answers, confidently.
+        // ================================================================
+        eq("update_required asks the client, not only a string",
+                slCode.contains("safeLoginIndex() == 9"), true);
+        eq("...and only while logged out, where that index means anything",
+                slCode.contains("lastGameState != GameState.LOGGED_IN && safeLoginIndex() == 9"), true);
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }

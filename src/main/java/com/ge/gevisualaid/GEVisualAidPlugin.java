@@ -1820,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.117";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.118";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -3971,6 +3971,17 @@ public class GEVisualAidPlugin extends Plugin
     // before the connection drops).
     private boolean isUpdateRequired()
     {
+        // 2.118 - ASK THE CLIENT FIRST. This used to be only the text match
+        // below, over getLoginScreenMessage() + lastSystemMessage. But
+        // getLoginScreenMessage() is ALWAYS EMPTY: the login screen is
+        // painted on the canvas and there is no API for its text (javap,
+        // runelite-api 1.13.2). So on the login screen the haystack held
+        // nothing but in-game chat, and this field published
+        // update_required=false while the screen said "RuneScape has been
+        // updated, please restart your client" - measured 2026-10-20, with
+        // login_index=9 beside it. A field that cannot see the thing it is
+        // named after still answers confidently, which is the worst kind.
+        if (lastGameState != GameState.LOGGED_IN && safeLoginIndex() == 9) return true;
         String haystack = (getLoginScreenMessage() + " " + lastSystemMessage).toLowerCase();
         if (haystack.contains("update") && (haystack.contains("client") || haystack.contains("reload"))) return true;
         if (haystack.contains("revision") && haystack.contains("change")) return true;
@@ -4283,7 +4294,9 @@ public class GEVisualAidPlugin extends Plugin
                 + buildApmAndMembershipState()
                 + buildSceneState()
                 + buildSpellbookState()                      // 2.108
-                + buildSlayerState();                        // 2.108
+                + buildSlayerState()                         // 2.108
+                + buildSystemUpdateState()                   // 2.118
+                + buildLoginGeometryState();                 // 2.118
     }
 
     private String buildSlotState()
@@ -4410,7 +4423,9 @@ public class GEVisualAidPlugin extends Plugin
                 + buildApmAndMembershipState()
                 + buildSceneState()
                 + buildSpellbookState()                      // 2.108
-                + buildSlayerState();                        // 2.108
+                + buildSlayerState()                         // 2.108
+                + buildSystemUpdateState()                   // 2.118
+                + buildLoginGeometryState();                 // 2.118
     }
 
     private String buildClerkState()
@@ -15273,6 +15288,7 @@ public class GEVisualAidPlugin extends Plugin
 
     private volatile String spellbookBlock = "spellbook_state=no_reading_yet\n";
     private volatile String slayerBlock    = "slayer_state=no_reading_yet\n";
+    private volatile String systemUpdateBlock = "system_update_state=no_reading_yet\n";   // 2.118
 
     private int    slLastCount  = -1;
     private int    slCountTick  = -1;
@@ -15295,10 +15311,189 @@ public class GEVisualAidPlugin extends Plugin
         try   { slayerBlock = buildSlayerBlock(online); }
         catch (Throwable t)
         { slayerBlock = "slayer_state=read_error:" + t.getClass().getSimpleName() + "\n"; }
+
+        try   { systemUpdateBlock = buildSystemUpdateBlock(online); }
+        catch (Throwable t)
+        { systemUpdateBlock = "system_update_state=read_error:" + t.getClass().getSimpleName() + "\n"
+                            + "system_update_secs=-1\n"; }
+    }
+
+    // ---- the login screen's Ok button (2.118) -----------------------------
+    //
+    // THERE IS NO WIDGET FOR IT, and that is not a guess: asked with the
+    // notice on screen, /widgettree answered "No interface tree exists while
+    // logged out". The login screen is painted straight onto the canvas, so
+    // the box can only ever come from geometry.
+    //
+    // The rule was MEASURED on 2026-10-20 at two very different window sizes
+    // (3862x2110 and 2430x1218). The button came out 220x62 PHYSICAL pixels
+    // in BOTH, so the dialog does not scale with the window, and its centre
+    // sat on the canvas centre horizontally (predicted 1726, measured 1725).
+    // Cross-checked against Josh hovering it: the cursor landed inside the
+    // box found by the pixel scan.
+    //
+    // Published in CANVAS-LOGICAL units. Both measurements were taken at the
+    // same DPI (1.5), so whether the dialog is fixed in logical or physical
+    // pixels is NOT settled - login_ok_basis says so, and the canvas figures
+    // used go out beside it so a reader on another DPI can check rather than
+    // trust. A box that is wrong on an unwatched machine clicks the game
+    // world, so this must not be quietly presented as universal.
+    static final int LOGIN_OK_W   = 147;
+    static final int LOGIN_OK_H   = 41;
+    static final int LOGIN_OK_TOP = 281;
+
+    // Static and package-visible so the checker calls the real arithmetic.
+    // Returns null when the canvas cannot hold the dialog, rather than a
+    // plausible rectangle off the top of the screen.
+    static int[] loginOkRect(int canvasW, int canvasH)
+    {
+        if (canvasW <= 0 || canvasH <= 0) return null;
+        if (canvasH < LOGIN_OK_TOP + LOGIN_OK_H) return null;
+        if (canvasW < LOGIN_OK_W) return null;
+        int x1 = (canvasW / 2) - (LOGIN_OK_W / 2);
+        return new int[]{ x1, LOGIN_OK_TOP, x1 + LOGIN_OK_W, LOGIN_OK_TOP + LOGIN_OK_H };
+    }
+
+    private String buildLoginGeometryState()
+    {
+        int cw = 0, ch = 0;
+        String src = "canvas";
+        try
+        {
+            java.awt.Canvas cv = client.getCanvas();
+            if (cv != null) { cw = cv.getWidth(); ch = cv.getHeight(); }
+            else src = "no_canvas";
+        }
+        catch (Throwable t) { src = "read_error:" + t.getClass().getSimpleName(); }
+
+        // Read LIVE here, not from the per-tick cache. GameTick does not fire
+        // while logged out, so every cached canvas figure is frozen at
+        // whatever it was when the session ended - measured 2026-10-20, the
+        // feed still said 2288x1370 after the window had been shrunk. A click
+        // computed from those would aim at a window that is no longer there.
+        int[] r = (cw > 0 && ch > 0) ? loginOkRect(cw, ch) : null;
+        if (r == null)
+        {
+            return "login_ok_state=" + (src.startsWith("read_error") ? src
+                                        : (cw > 0 ? "canvas_too_small" : src)) + "\n"
+                 + "login_ok_x1=-1\nlogin_ok_y1=-1\nlogin_ok_x2=-1\nlogin_ok_y2=-1\n"
+                 + "login_ok_canvas_w=" + cw + "\n"
+                 + "login_ok_canvas_h=" + ch + "\n"
+                 + "login_ok_basis=none\n";
+        }
+        return "login_ok_state=ok\n"
+             + "login_ok_x1=" + r[0] + "\n"
+             + "login_ok_y1=" + r[1] + "\n"
+             + "login_ok_x2=" + r[2] + "\n"
+             + "login_ok_y2=" + r[3] + "\n"
+             + "login_ok_canvas_w=" + cw + "\n"
+             + "login_ok_canvas_h=" + ch + "\n"
+             + "login_ok_basis=measured_2026_10_20_two_window_sizes_same_dpi\n";
     }
 
     private String buildSpellbookState() { return spellbookBlock; }
     private String buildSlayerState()    { return slayerBlock; }
+    private String buildSystemUpdateState() { return systemUpdateBlock; }
+
+    // ---- the game's own shutdown warning (2.118) --------------------------
+    //
+    // Before a server update the game writes "System update in: MM:SS" into
+    // the private-message chat area, in yellow, counting down to a forced
+    // disconnect. Observed live 2026-10-20 at 163.0[0] with text
+    // "System update in: 40:35" and colour ffff00.
+    //
+    // SCANNED, NOT INDEXED. [0] is where it landed that day; it is a PM CHAT
+    // LINE, so ordinary traffic moves it. Reading a fixed child index is the
+    // go_<label>_0 trap at the Blast Furnace in a different costume - it
+    // would quietly read somebody's message instead.
+    private static final String SU_PREFIX = "System update in:";
+
+    private String buildSystemUpdateBlock(boolean online)
+    {
+        if (!online)
+        {
+            return "system_update_state=offline\n"
+                 + "system_update_secs=-1\n"
+                 + "system_update_text=\n"
+                 + "system_update_source=offline\n";
+        }
+
+        net.runelite.api.widgets.Widget c =
+                client.getWidget(net.runelite.api.gameval.InterfaceID.PmChat.CONTAINER);
+        if (c == null)
+        {
+            // Not "no update pending" - we could not look. Those need
+            // different repairs and read identically as a missing number.
+            return "system_update_state=unreadable\n"
+                 + "system_update_secs=-1\n"
+                 + "system_update_text=\n"
+                 + "system_update_source=pmchat_not_loaded\n";
+        }
+
+        String found = null;
+        String where = "";
+        for (int pass = 0; pass < 2 && found == null; pass++)
+        {
+            net.runelite.api.widgets.Widget[] kids =
+                    (pass == 0) ? c.getDynamicChildren() : c.getChildren();
+            if (kids == null) continue;
+            for (int i = 0; i < kids.length; i++)
+            {
+                if (kids[i] == null) continue;
+                String t = kids[i].getText();
+                if (t == null || t.indexOf(SU_PREFIX) < 0) continue;
+                found = t;
+                where = (pass == 0 ? "pmchat_dynamic_" : "pmchat_child_") + i;
+                break;
+            }
+        }
+
+        if (found == null)
+        {
+            // The ordinary state: no update announced. Distinct from
+            // unreadable above, and it is the only one of the two that means
+            // "carry on".
+            return "system_update_state=none\n"
+                 + "system_update_secs=-1\n"
+                 + "system_update_text=\n"
+                 + "system_update_source=no_match\n";
+        }
+
+        int secs = parseSystemUpdateSeconds(found);
+        return "system_update_state=" + (secs >= 0 ? "counting" : "unparsed") + "\n"
+             + "system_update_secs=" + secs + "\n"
+             + "system_update_text=" + sanitiseValue(found) + "\n"
+             + "system_update_source=" + where + "\n";
+    }
+
+    // Static and package-visible so the checker drives THIS parser rather
+    // than a second copy of it. Returns -1 for anything it cannot read -
+    // never 0, which is a real countdown value meaning "now".
+    static int parseSystemUpdateSeconds(String text)
+    {
+        if (text == null) return -1;
+        int at = text.indexOf(SU_PREFIX);
+        if (at < 0) return -1;
+        String rest = text.substring(at + SU_PREFIX.length()).trim();
+        int end = 0;
+        while (end < rest.length()
+               && (Character.isDigit(rest.charAt(end)) || rest.charAt(end) == ':'))
+        {
+            end++;
+        }
+        rest = rest.substring(0, end);
+        if (rest.isEmpty()) return -1;
+        String[] parts = rest.split(":");
+        if (parts.length < 2 || parts.length > 3) return -1;
+        int total = 0;
+        for (String p : parts)
+        {
+            if (p.isEmpty() || p.length() > 2) return -1;
+            try { total = total * 60 + Integer.parseInt(p); }
+            catch (NumberFormatException e) { return -1; }
+        }
+        return total;
+    }
 
     // ---- spellbook ---------------------------------------------------------
     //
