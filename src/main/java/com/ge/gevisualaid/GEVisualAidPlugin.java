@@ -1820,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.118";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.119";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -4296,6 +4296,7 @@ public class GEVisualAidPlugin extends Plugin
                 + buildSpellbookState()                      // 2.108
                 + buildSlayerState()                         // 2.108
                 + buildSystemUpdateState()                   // 2.118
+                + buildCombatState()                         // 2.119
                 + buildLoginGeometryState();                 // 2.118
     }
 
@@ -4425,6 +4426,7 @@ public class GEVisualAidPlugin extends Plugin
                 + buildSpellbookState()                      // 2.108
                 + buildSlayerState()                         // 2.108
                 + buildSystemUpdateState()                   // 2.118
+                + buildCombatState()                         // 2.119
                 + buildLoginGeometryState();                 // 2.118
     }
 
@@ -15289,6 +15291,10 @@ public class GEVisualAidPlugin extends Plugin
     private volatile String spellbookBlock = "spellbook_state=no_reading_yet\n";
     private volatile String slayerBlock    = "slayer_state=no_reading_yet\n";
     private volatile String systemUpdateBlock = "system_update_state=no_reading_yet\n";   // 2.118
+    private volatile String combatBlock = "player_combat_state=no_reading_yet\n";         // 2.119
+    private long combatLastMs = 0;
+    private String combatLastTarget = "";
+    private String combatLastSource = "";
 
     private int    slLastCount  = -1;
     private int    slCountTick  = -1;
@@ -15316,6 +15322,11 @@ public class GEVisualAidPlugin extends Plugin
         catch (Throwable t)
         { systemUpdateBlock = "system_update_state=read_error:" + t.getClass().getSimpleName() + "\n"
                             + "system_update_secs=-1\n"; }
+
+        try   { combatBlock = buildCombatBlock(online); }
+        catch (Throwable t)
+        { combatBlock = "player_combat_state=read_error:" + t.getClass().getSimpleName() + "\n"
+                      + "player_in_combat=false\n"; }
     }
 
     // ---- the login screen's Ok button (2.118) -----------------------------
@@ -15394,6 +15405,109 @@ public class GEVisualAidPlugin extends Plugin
     private String buildSpellbookState() { return spellbookBlock; }
     private String buildSlayerState()    { return slayerBlock; }
     private String buildSystemUpdateState() { return systemUpdateBlock; }
+    private String buildCombatState()       { return combatBlock; }
+
+    // ---- am I in combat? (2.119) -----------------------------------------
+    //
+    // Josh: "if im in the middle of combat, dont click on a new slayer npc.
+    // because some are naturally aggressive and i have auto retaliation on.
+    // as it wont let me attack a different one if im in the middle of
+    // combat." A click that the game refuses is worse than no click: the
+    // module believes it switched target and carries on against an NPC it is
+    // not actually fighting.
+    //
+    // IT HAS TO BE A TIMER, NOT AN INSTANT READ. getInteracting() goes NULL
+    // between attacks while a fight is plainly still going on, so a bare
+    // "interacting != null" answers "not in combat" several times a fight -
+    // which is precisely the moment the module would click something else.
+    // The last moment EVIDENCE was seen is stamped, and the age published.
+    //
+    // Two kinds of evidence, because either one locks the fight:
+    //   interacting  - I am engaged with something
+    //   attacked_by  - something is engaged with ME (the aggressive case
+    //                  Josh named, which auto-retaliate turns into a fight
+    //                  without any click of ours)
+    //
+    // COMBAT_TIMEOUT_MS is 8 game ticks, the usual figure for the combat
+    // flag clearing. It is published beside the age and labelled UNMEASURED
+    // - a consumer that wants a different margin has the raw age and does
+    // not need a new build. Same call as MLM_SETTLE_TICKS.
+    static final long COMBAT_TIMEOUT_MS = 4800;
+
+    // Static and package-visible so the checker drives the real rule.
+    static boolean combatFromAge(long ageMs)
+    {
+        if (ageMs < 0) return false;          // never seen: not "in combat"
+        return ageMs <= COMBAT_TIMEOUT_MS;
+    }
+
+    private String buildCombatBlock(boolean online)
+    {
+        if (!online)
+        {
+            // Logged out is NOT "out of combat" in the sense a consumer
+            // wants - there is nothing to be in combat with, and acting on
+            // a confident false here would be acting while logged out.
+            return "player_combat_state=offline\n"
+                 + "player_in_combat=false\n"
+                 + "player_combat_source=offline\n"
+                 + "player_combat_target=\n"
+                 + "player_combat_idle_ms=-1\n"
+                 + "player_combat_timeout_ms=" + COMBAT_TIMEOUT_MS + "\n";
+        }
+
+        Player me = client.getLocalPlayer();
+        if (me == null)
+        {
+            return "player_combat_state=no_player\n"
+                 + "player_in_combat=false\n"
+                 + "player_combat_source=no_player\n"
+                 + "player_combat_target=\n"
+                 + "player_combat_idle_ms=-1\n"
+                 + "player_combat_timeout_ms=" + COMBAT_TIMEOUT_MS + "\n";
+        }
+
+        long now = System.currentTimeMillis();
+        String src = "", target = "";
+
+        Actor mine = me.getInteracting();
+        if (mine != null)
+        {
+            src = "interacting";
+            target = mine.getName() == null ? "" : mine.getName();
+        }
+        else
+        {
+            // Something attacking ME. This is the half that matters for an
+            // aggressive slayer task - no click of ours starts it.
+            for (NPC n : client.getNpcs())
+            {
+                if (n == null) continue;
+                if (n.getInteracting() != me) continue;
+                src = "attacked_by";
+                target = n.getName() == null ? "" : n.getName();
+                break;
+            }
+        }
+
+        if (!src.isEmpty())
+        {
+            combatLastMs = now;
+            combatLastTarget = target;
+            combatLastSource = src;
+        }
+
+        long age = (combatLastMs == 0) ? -1 : (now - combatLastMs);
+        boolean inCombat = combatFromAge(age);
+        String state = (age < 0) ? "never_seen" : (inCombat ? "in_combat" : "clear");
+
+        return "player_combat_state=" + state + "\n"
+             + "player_in_combat=" + inCombat + "\n"
+             + "player_combat_source=" + (src.isEmpty() ? (inCombat ? "recent:" + combatLastSource : "none") : src) + "\n"
+             + "player_combat_target=" + sanitiseValue(inCombat ? combatLastTarget : "") + "\n"
+             + "player_combat_idle_ms=" + age + "\n"
+             + "player_combat_timeout_ms=" + COMBAT_TIMEOUT_MS + "\n";
+    }
 
     // ---- the game's own shutdown warning (2.118) --------------------------
     //

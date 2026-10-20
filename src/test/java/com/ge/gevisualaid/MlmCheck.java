@@ -1138,6 +1138,48 @@ public class MlmCheck
                 slCode.contains("return parseSystemUpdateSeconds(findSystemUpdateLine(c)[0]);"), true);
         eq("and the scan exists in exactly one place",
                 countOccurrences(slCode, "String[] findSystemUpdateLine"), 1);
+        // ================================================================
+        // 2.119 - AM I IN COMBAT (the slayer in-combat gate)
+        //
+        // Josh: "it wont let me attack a different one if im in the middle
+        // of combat". A click the game refuses is worse than no click - the
+        // module believes it switched target and fights the wrong thing.
+        //
+        // IT MUST BE A TIMER. getInteracting() goes null between attacks
+        // while the fight is plainly still on, so an instant read says
+        // "clear" several times a fight - exactly when a click would be
+        // wrong. Driving the real compiled rule.
+        // ================================================================
+        eq("mid-fight, a fresh reading is in combat",
+                GEVisualAidPlugin.combatFromAge(0), true);
+        eq("a gap between attacks is still in combat",
+                GEVisualAidPlugin.combatFromAge(2400), true);
+        eq("exactly at the timeout is still in combat - the boundary is stated",
+                GEVisualAidPlugin.combatFromAge(GEVisualAidPlugin.COMBAT_TIMEOUT_MS), true);
+        eq("one ms past it is clear",
+                GEVisualAidPlugin.combatFromAge(GEVisualAidPlugin.COMBAT_TIMEOUT_MS + 1), false);
+        // NEVER SEEN is not IN COMBAT. -1 must not read as a tiny age and
+        // lock the module out of ever attacking anything.
+        eq("never having seen combat is not being in combat",
+                GEVisualAidPlugin.combatFromAge(-1), false);
+        // The timeout must clear a real between-attack gap. 4 ticks is a
+        // normal weapon speed, so anything under that would unlock mid-fight.
+        eq("the timeout clears an ordinary attack gap",
+                GEVisualAidPlugin.COMBAT_TIMEOUT_MS >= 2400, true);
+
+        // Both kinds of evidence. The aggressive case starts with NO click
+        // of ours, which is the one Josh actually described.
+        eq("it counts being attacked, not only attacking",
+                slCode.contains("n.getInteracting() != me"), true);
+        eq("...and says which kind of evidence it saw",
+                slCode.contains("player_combat_source="), true);
+        eq("the raw age is published so a consumer can pick its own margin",
+                slCode.contains("player_combat_idle_ms="), true);
+        eq("and the threshold itself goes out, like MLM_SETTLE_TICKS",
+                slCode.contains("player_combat_timeout_ms="), true);
+        // Logged out must not publish a confident "not in combat".
+        eq("logged out says offline rather than clear",
+                slCode.contains("player_combat_state=offline"), true);
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }
