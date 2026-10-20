@@ -4098,29 +4098,29 @@ public class GEVisualAidPlugin extends Plugin
 
     private int getServerRestartSeconds()
     {
-        // Widget 229,1 contains the server restart countdown text
-        Widget w = client.getWidget(229, 1);
-        if (w == null || w.isHidden()) return -1;
-        try
-        {
-            String text = w.getText();
-            if (text == null) return -1;
-            // Text format is typically "System update in: X minutes, Y seconds"
-            text = text.replaceAll("[^0-9:]", " ").trim();
-            String[] parts = text.trim().split("\\s+");
-            if (parts.length >= 2)
-            {
-                int mins = Integer.parseInt(parts[0]);
-                int secs = Integer.parseInt(parts[1]);
-                return mins * 60 + secs;
-            }
-            else if (parts.length == 1)
-            {
-                return Integer.parseInt(parts[0]);
-            }
-        }
-        catch (Exception e) { /* ignore parse errors */ }
-        return -1;
+        // 2.118 - THIS FIELD WAS DEAD, AND THE FLIPPER WAS WAITING ON IT.
+        //
+        // Flipping.ahk has had the whole behaviour since V9.04: Pushover on
+        // detection, and "no new actions" once the countdown is under 120s.
+        // It never fired once, because this returned -1 every time, for two
+        // independent reasons:
+        //
+        //   1. It read widget 229,1. The countdown is at 163.0[0] -
+        //      InterfaceID.PmChat.CONTAINER - confirmed on Josh's own Widget
+        //      Inspector on 2026-10-20, text "System update in: 40:35".
+        //   2. Even given the right widget the parse could not work. The
+        //      regex [^0-9:] KEEPS the colon, so "System update in: 40:35"
+        //      became the single token "40:35", and Integer.parseInt threw
+        //      straight into an empty catch. A comment claiming the format
+        //      was "X minutes, Y seconds" was the only evidence for it.
+        //
+        // Both halves silent, and -1 reads exactly like "no restart
+        // scheduled", so nothing ever looked wrong. It shares the scan and
+        // the parser with system_update_secs now - one reading, not two.
+        net.runelite.api.widgets.Widget c =
+                client.getWidget(net.runelite.api.gameval.InterfaceID.PmChat.CONTAINER);
+        if (c == null) return -1;
+        return parseSystemUpdateSeconds(findSystemUpdateLine(c)[0]);
     }
 
     private String buildUiState()
@@ -15430,23 +15430,9 @@ public class GEVisualAidPlugin extends Plugin
                  + "system_update_source=pmchat_not_loaded\n";
         }
 
-        String found = null;
-        String where = "";
-        for (int pass = 0; pass < 2 && found == null; pass++)
-        {
-            net.runelite.api.widgets.Widget[] kids =
-                    (pass == 0) ? c.getDynamicChildren() : c.getChildren();
-            if (kids == null) continue;
-            for (int i = 0; i < kids.length; i++)
-            {
-                if (kids[i] == null) continue;
-                String t = kids[i].getText();
-                if (t == null || t.indexOf(SU_PREFIX) < 0) continue;
-                found = t;
-                where = (pass == 0 ? "pmchat_dynamic_" : "pmchat_child_") + i;
-                break;
-            }
-        }
+        String[] hit = findSystemUpdateLine(c);
+        String found = hit[0];
+        String where = hit[1];
 
         if (found == null)
         {
@@ -15464,6 +15450,28 @@ public class GEVisualAidPlugin extends Plugin
              + "system_update_secs=" + secs + "\n"
              + "system_update_text=" + sanitiseValue(found) + "\n"
              + "system_update_source=" + where + "\n";
+    }
+
+    // The scan itself, shared by the published block and by
+    // getServerRestartSeconds. ONE source, because two readings of one
+    // quantity is how two numbers drift apart in silence - the 2.104
+    // reason. Returns {text, where}; text is null when nothing matched.
+    private String[] findSystemUpdateLine(net.runelite.api.widgets.Widget c)
+    {
+        for (int pass = 0; pass < 2; pass++)
+        {
+            net.runelite.api.widgets.Widget[] kids =
+                    (pass == 0) ? c.getDynamicChildren() : c.getChildren();
+            if (kids == null) continue;
+            for (int i = 0; i < kids.length; i++)
+            {
+                if (kids[i] == null) continue;
+                String t = kids[i].getText();
+                if (t == null || t.indexOf(SU_PREFIX) < 0) continue;
+                return new String[]{ t, (pass == 0 ? "pmchat_dynamic_" : "pmchat_child_") + i };
+            }
+        }
+        return new String[]{ null, "no_match" };
     }
 
     // Static and package-visible so the checker drives THIS parser rather

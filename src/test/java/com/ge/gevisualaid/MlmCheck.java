@@ -49,6 +49,13 @@ public class MlmCheck
         return major * 1000000L + minor;
     }
 
+    private static int countOccurrences(String hay, String needle)
+    {
+        int n = 0, i = 0;
+        while ((i = hay.indexOf(needle, i)) >= 0) { n++; i += needle.length(); }
+        return n;
+    }
+
     private static void eq(String what, Object got, Object want)
     {
         boolean ok = (got == null) ? want == null : got.equals(want);
@@ -1120,6 +1127,17 @@ public class MlmCheck
         eq("...and only while logged out, where that index means anything",
                 slCode.contains("lastGameState != GameState.LOGGED_IN && safeLoginIndex() == 9"), true);
 
+        // 2.118 - server_restart_seconds was DEAD and the flipper waited on it.
+        // Flipping.ahk has had the behaviour since V9.04 and it never fired:
+        // the old reader asked widget 229,1 (the countdown is at 163.0[0]) and
+        // its regex kept the colon, so parseInt("40:35") threw into an empty
+        // catch. Both silent, and -1 reads as "no restart scheduled".
+        eq("the restart countdown no longer asks widget 229",
+                slCode.contains("client.getWidget(229, 1)"), false);
+        eq("it shares the one scan and the one parser",
+                slCode.contains("return parseSystemUpdateSeconds(findSystemUpdateLine(c)[0]);"), true);
+        eq("and the scan exists in exactly one place",
+                countOccurrences(slCode, "String[] findSystemUpdateLine"), 1);
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }
