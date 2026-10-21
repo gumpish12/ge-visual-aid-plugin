@@ -221,6 +221,32 @@ function is one new reader away from being lost.
   (`Bank booth|#Bank,Bank chest[1]`). 2.78 emits one line per field beside it:
   the summary is for a person reading `/filter` in a browser, the fields are
   for machines. Parse the fields.
+- **A TRAILING `*` IS A PREFIX MATCH, AND ONE DROP WITH TWELVE NAMES IS WHY**
+  (2.122). Josh, 2026-10-21: *"just make all clues act the same way."* A clue
+  arrives as `Clue scroll (<tier>)`, or as `Scroll box (<tier>)` if you
+  already hold one of that tier — six tiers, two spellings, **twelve exact
+  names for one thing a module wants**. Enumerating those twelve in the
+  consumer is a lookup table of exactly the kind this file forbids: the day
+  Jagex adds a seventh tier it matches nothing and says nothing.
+  `Clue scroll*` cannot rot.
+  - **IT IS A PREFIX, NEVER A SUBSTRING.** A substring match would make `bar`
+    start finding `Bar dispenser` — a filter live in set 2 today — and would
+    quietly widen every filter already written. Widening a filter that
+    already works is the one change nobody goes looking for.
+  - **`*` ALONE KEEPS ITS OLD MEANING** (any named entity), because that
+    branch is tested first. An unnamed entity still matches nothing at all,
+    wildcard included.
+  - **THE RULE IS A STATIC, `filterNameMatches`, FOR THE SAME REASON AS
+    `portfolioGeShare`**: `mlmCheck` calls the real compiled rule instead of
+    a second copy of it. Proved red 4/4 — substring instead of prefix, the
+    unnamed guard removed, the prefix branch deleted, and **the plugin no
+    longer calling the helper at all**. That last one passed every other
+    assertion, because a correct rule nobody consults is the same as no rule;
+    the checker now reads the call site too.
+  - The consumer side is the mirror: the tracker pushes `Clue scroll*` and
+    `Scroll box*` into the item filter, and the skilling script treats the
+    family as one wanted thing ranked where the clue row was dragged to. See
+    `osrs-suite/tools/test_scroll_box_pairing.js`.
 - **THE HTTP SERVER BINDS TO 127.0.0.1 DELIBERATELY.** `/filter` and `/config`
   write RuneLite config and start and stop plugins with **no authentication**.
   Do not "fix" this by binding `0.0.0.0`. The skilling script forwards from its

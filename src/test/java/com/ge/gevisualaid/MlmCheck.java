@@ -1200,6 +1200,80 @@ public class MlmCheck
         eq("no slot is numbered 0 - the game counts from 1",
                 inv.contains("inv_0="), false);
 
+        // 2.122 - A TRAILING * IS A PREFIX MATCH, BECAUSE ONE DROP HAS
+        // TWELVE NAMES. Josh, 2026-10-21: "just make all clues act the same
+        // way." A clue is "Clue scroll (<tier>)", or "Scroll box (<tier>)" if
+        // you already hold one of that tier: six tiers, two spellings.
+        //
+        // The real compiled rule is called here, not a copy of it. Filter
+        // names are lowercased at parse time (parseEntityFilter does
+        // tok.toLowerCase()), so every filter argument below is lowercase -
+        // writing it any other way would test a string the plugin can never
+        // actually hold.
+        Method fnm = c.getDeclaredMethod("filterNameMatches", String.class, String.class);
+        fnm.setAccessible(true);
+
+        // THE WHOLE POINT: one entry, every tier, both spellings, for ever.
+        for (String tier : new String[]{ "beginner", "easy", "medium", "hard",
+                                         "elite", "master" })
+        {
+            eq("clue scroll* finds the " + tier + " clue",
+                    fnm.invoke(null, "clue scroll*", "clue scroll (" + tier + ")"), true);
+            eq("scroll box* finds the " + tier + " box",
+                    fnm.invoke(null, "scroll box*", "scroll box (" + tier + ")"), true);
+        }
+        // A tier nobody has heard of yet. This is the assertion that makes
+        // the prefix worth having over twelve exact names: a lookup table
+        // would match nothing here and say nothing about it.
+        eq("and a tier that does not exist yet",
+                fnm.invoke(null, "clue scroll*", "clue scroll (impossible)"), true);
+
+        // IT IS A PREFIX, NEVER A SUBSTRING. A substring match would widen
+        // every filter already written - "bar" would start finding the Blast
+        // Furnace bar dispenser, which is a live filter in set 2 today.
+        eq("a prefix does not match in the middle",
+                fnm.invoke(null, "bar*", "bar dispenser"), true);
+        eq("and does not match a name that merely CONTAINS it",
+                fnm.invoke(null, "dispenser*", "bar dispenser"), false);
+        eq("scroll box* does not pick up a clue scroll",
+                fnm.invoke(null, "scroll box*", "clue scroll (hard)"), false);
+
+        // The two older behaviours must survive untouched: this branch sits
+        // on the path every scenery, NPC and item filter already takes.
+        eq("a bare * still means any named entity",
+                fnm.invoke(null, "*", "anything at all"), true);
+        eq("an exact name still matches exactly",
+                fnm.invoke(null, "gold ore", "gold ore"), true);
+        eq("and an exact name is still not a prefix",
+                fnm.invoke(null, "gold ore", "gold ore stack"), false);
+        eq("nor a suffix",
+                fnm.invoke(null, "ore", "gold ore"), false);
+
+        // An unnamed entity matches NOTHING, wildcard included - that was the
+        // "wildcards skip unnamed objects" guard, and losing it would make a
+        // bare * match every unnamed object in the scene.
+        eq("an unnamed entity does not match *",
+                fnm.invoke(null, "*", ""), false);
+        eq("nor a prefix",
+                fnm.invoke(null, "clue scroll*", ""), false);
+        eq("a null name is safe",
+                fnm.invoke(null, "clue scroll*", (Object) null), false);
+
+        // AND THE PLUGIN HAS TO ACTUALLY CALL IT. Every assertion above tests
+        // the helper; none of them tests that matchFilter still asks it.
+        // Proved by mutation: the call site was reverted to its old inline
+        // compare and all twenty-odd assertions stayed green, because a
+        // correct rule nobody consults is the same as no rule. This suite has
+        // made exactly this mistake before - checking a hand-over and never
+        // the read.
+        String fSrc = new String(java.nio.file.Files.readAllBytes(
+                java.nio.file.Paths.get("src/main/java/com/ge/gevisualaid/GEVisualAidPlugin.java")),
+                java.nio.charset.StandardCharsets.UTF_8);
+        eq("matchFilter delegates the name rule",
+                fSrc.contains("if (!filterNameMatches(f.name, lower)) continue;"), true);
+        eq("and keeps no inline name compare of its own",
+                fSrc.contains("!lower.equals(f.name)"), false);
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }

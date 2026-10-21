@@ -1820,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.121";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.122";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -12791,6 +12791,38 @@ public class GEVisualAidPlugin extends Plugin
         return matchFilter(filters, id, name, "", wx, wy, plane, tol, -1, 52);
     }
 
+    // 2.122 - THE NAME RULE, LIFTED OUT SO A CHECKER CAN REACH IT.
+    //
+    // A TRAILING * IS A PREFIX MATCH, AND IT EXISTS BECAUSE ONE DROP HAS
+    // TWELVE NAMES. Josh, 2026-10-21: "just make all clues act the same
+    // way." A clue arrives as "Clue scroll (<tier>)", or as
+    // "Scroll box (<tier>)" if you already hold one of that tier - six
+    // tiers, two spellings, twelve exact names for one thing a module wants.
+    //
+    // Enumerating those twelve in the consumer would be a LOOKUP TABLE of
+    // exactly the kind that rots: the day Jagex adds a seventh tier it
+    // matches nothing and says nothing, which is the mislabel-rather-than-
+    // fail-loudly trap this repo keeps paying for. "Clue scroll*" cannot rot.
+    //
+    // IT IS A PREFIX, NEVER A SUBSTRING. A substring match would make "bar"
+    // find "Bar dispenser" and quietly widen every filter already written -
+    // and widening a filter that already works is the one change nobody
+    // would go looking for.
+    //
+    // Static and package-visible for the same reason as portfolioGeShare:
+    // mlmCheck calls the REAL compiled rule rather than a second copy of it.
+    static boolean filterNameMatches(String filterName, String lowerName)
+    {
+        // An unnamed entity matches no name filter, wildcard included. That
+        // was the old "wildcards skip unnamed objects" guard.
+        if (lowerName == null || lowerName.isEmpty()) return false;
+        if (filterName == null) return false;
+        if ("*".equals(filterName)) return true;
+        if (filterName.length() > 1 && filterName.endsWith("*"))
+            return lowerName.startsWith(filterName.substring(0, filterName.length() - 1));
+        return lowerName.equals(filterName);
+    }
+
     private EntityFilter matchFilter(List<EntityFilter> filters, int id, String name,
                                      String actions, int wx, int wy, int plane, int tol)
     {
@@ -12818,13 +12850,9 @@ public class GEVisualAidPlugin extends Plugin
             {
                 if (f.id != id) continue;
             }
-            else if ("*".equals(f.name))
-            {
-                if (lower.isEmpty()) continue;      // wildcards skip unnamed objects
-            }
             else
             {
-                if (lower.isEmpty() || !lower.equals(f.name)) continue;
+                if (!filterNameMatches(f.name, lower)) continue;
             }
             return f;
         }
