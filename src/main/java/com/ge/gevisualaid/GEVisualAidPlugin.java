@@ -1820,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.120";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.121";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -5437,6 +5437,14 @@ public class GEVisualAidPlugin extends Plugin
         {
             if (wgts.length() > 0) wgts.append(",");
             wgts.append(WG_BUILTIN_HIGH_ALCH);
+        }
+        // 2.121 - and the 28 inventory slots, on the same terms: appended
+        // last, skipped if the operator has written inv_1 themselves, so a
+        // hand-written label still wins and is not reported as a duplicate.
+        if (wgts.indexOf("inv_1=") < 0)
+        {
+            if (wgts.length() > 0) wgts.append(",");
+            wgts.append(wgBuiltinInventory());
         }
         esWidgets   = wgts.toString();
         esActive    = act.toString();
@@ -15320,6 +15328,43 @@ public class GEVisualAidPlugin extends Plugin
     // implementation computing its own coordinates is exactly how two numbers
     // that mean the same thing drift apart. Spelled FROM the symbol, so if
     // the component ever moves this string moves with it.
+    // 2.121 - THE 28 INVENTORY SLOTS, ALWAYS PUBLISHED. Josh: "use widget
+    // coordinates for everything going forwards if we have them with pixel
+    // backups." The skiller has been clicking inventory slots off hardcoded
+    // INVENTORY_SLOTS literals, which are only right at the resolution they
+    // were measured at - and a widget id is durable across RESOLUTIONS,
+    // which is exactly the axis a literal cannot cover.
+    //
+    // EACH SLOT IS A CHAIN, because the same slot lives in a different
+    // interface depending on what is open: the inventory panel normally,
+    // the bank side panel with the bank up, the GE side panel at the
+    // exchange. First link with a real rectangle wins, and _resolved_by
+    // says which - the only thing separating "the bank is open" from "the
+    // id has moved".
+    //
+    // Spelled FROM the symbols, so a renamed component fails the BUILD
+    // rather than matching nothing for ever.
+    static String wgBuiltinInventory()
+    {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < 28; i++)
+        {
+            if (b.length() > 0) b.append(",");
+            b.append("inv_").append(i + 1).append("=")
+             .append(idPath(InterfaceID.Inventory.ITEMS)).append(".").append(i)
+             .append("|")
+             .append(idPath(InterfaceID.Bankside.ITEMS)).append(".").append(i)
+             .append("|")
+             .append(idPath(InterfaceID.GeOffersSide.ITEMS)).append(".").append(i);
+        }
+        return b.toString();
+    }
+
+    private static String idPath(int id)
+    {
+        return (id >>> 16) + "." + (id & 0xFFFF);
+    }
+
     static final String WG_BUILTIN_HIGH_ALCH =
             "high_alch=" + (InterfaceID.MagicSpellbook.HIGH_ALCHEMY >>> 16)
                     + "." + (InterfaceID.MagicSpellbook.HIGH_ALCHEMY & 0xFFFF);

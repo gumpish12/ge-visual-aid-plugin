@@ -1180,6 +1180,26 @@ public class MlmCheck
         // Logged out must not publish a confident "not in combat".
         eq("logged out says offline rather than clear",
                 slCode.contains("player_combat_state=offline"), true);
+        // 2.121 - THE 28 INVENTORY SLOTS, ALWAYS PUBLISHED.
+        // Josh: "use widget coordinates for everything going forwards if
+        // we have them with pixel backups." A measured literal is right
+        // on one machine and silently wrong elsewhere; a widget id is
+        // durable across RESOLUTIONS, the one axis a literal cannot cover.
+        String inv = GEVisualAidPlugin.wgBuiltinInventory();
+        eq("all 28 slots are published", countOccurrences(inv, "inv_"), 28);
+        eq("slot 1 is the first index, not the second",
+                inv.startsWith("inv_1=149.0.0|15.3.0|467.0.0"), true);
+        eq("and slot 28 is index 27",
+                inv.contains("inv_28=149.0.27|15.3.27|467.0.27"), true);
+        // EACH SLOT IS A CHAIN. The same slot lives in a different
+        // interface depending on what is open, and only the bank one has a
+        // rectangle for an EMPTY slot - so a single id would go blind the
+        // moment the bank opened.
+        eq("every slot carries all three interfaces",
+                countOccurrences(inv, "|"), 56);
+        eq("no slot is numbered 0 - the game counts from 1",
+                inv.contains("inv_0="), false);
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }

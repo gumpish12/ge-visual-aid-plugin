@@ -227,6 +227,31 @@ function is one new reader away from being lost.
   own already-LAN-reachable port instead — see `GET /plugin/config` there.
   Josh chose this knowingly on 2026-08-26.
 
+- **🔴 WIDGETS FIRST, PIXELS AS BACKUP — FOR EVERY CLICK, FROM NOW ON.**
+  Josh, 2026-10-21: *"use widget coordinates for everything going forwards
+  if we have them with pixel backups"*. A measured literal is right on the
+  machine it was measured on and silently wrong anywhere else; a widget id
+  is durable across RESOLUTIONS, which is the one axis a literal cannot
+  cover. So any new clickable thing resolves `WGX_Box(name)` first and
+  falls back to its literal, the way `ClickSlot` and the high alch button
+  now do.
+  - **The literal is never deleted.** `WGX_Box` returns false for a dozen
+    honest reasons — widgets off in the script, off in the plugin, the
+    plugin not answering, the interface closed — and none of them should
+    stop a click that worked yesterday.
+  - **A thing clicked from more than one interface takes a CHAIN.** The 28
+    inventory slots are `149.0.N|15.3.N|467.0.N` — inventory panel, bank
+    side panel, GE side panel — so a slot click keeps working with the
+    bank open, which the literals never did. `_resolved_by` names the link
+    that answered.
+  - **Built-ins beat asking the operator to type ids.** `high_alch` (2.108)
+    and `inv_1..inv_28` (2.121) are appended to the merged widget list
+    automatically, last, and only if absent — so a hand-written label still
+    wins and is not reported as a duplicate rejection.
+  - Spelled **from the symbols** (`InterfaceID.Inventory.ITEMS`,
+    `InterfaceID.Bankside.ITEMS`, `InterfaceID.GeOffersSide.ITEMS`), so a
+    renamed component fails the BUILD rather than matching nothing for ever.
+
 - **WIDGET COORDINATES ARE THE THIRD COORDINATE SOURCE** (2.80-2.84), beside
   the suite's 4K and measured-1080p literals. `widgetList` maps a label to
   one or more ids; `appendWidgets` resolves them every tick and publishes
