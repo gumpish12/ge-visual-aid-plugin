@@ -1820,7 +1820,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.119";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.120";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -12136,6 +12136,21 @@ public class GEVisualAidPlugin extends Plugin
             sb.append(k).append("id=").append(f[1]).append("\n");
             sb.append(k).append("name=").append(f[2]).append("\n");
             sb.append(k).append("qty=").append(f[3]).append("\n");
+            // 2.120 - DOES IT STACK? Josh, inventory full on gargoyles:
+            // "its not picking up the gold ore, im full but its stackable
+            // and i have it in my inventory." A stackable or NOTED item
+            // joins a stack you already carry and needs no free slot, so a
+            // bare free-slot test walks away from it. The consumer cannot
+            // work this out from the feed: qty is what is ON THE FLOOR, and
+            // a single noted ore is qty 1 exactly like an unnoted one.
+            //
+            // Read off the ItemComposition, which the name already comes
+            // from - no second lookup and no table to rot. getNote() is -1
+            // for an ordinary item and 799 for a note, which is why NOTED
+            // is reported separately rather than folded into stacks: they
+            // are different facts and only one of them is about stacking.
+            sb.append(k).append("stacks=").append(giStacks(f[1])).append("\n");
+            sb.append(k).append("noted=").append(giNoted(f[1])).append("\n");
             sb.append(k).append("world_x=").append(wx).append("\n");
             sb.append(k).append("world_y=").append(wy).append("\n");
             sb.append(k).append("plane=").append(pl).append("\n");
@@ -12299,6 +12314,32 @@ public class GEVisualAidPlugin extends Plugin
     // Covers all four scenery layers. Deduplicated on TileObject.getHash()
     // because a multi-tile object is reported by every tile it covers.
     // -----------------------------------------------------------------------
+    // 2.120 - both guarded: an id the cache does not know must not take
+    // the whole ground-item block down, and "I could not tell" has to
+    // read as "does not stack" so a full inventory is never ignored on a
+    // guess. Same -1-is-not-a-number rule as everywhere else here.
+    private boolean giStacks(Object id)
+    {
+        try
+        {
+            if (!(id instanceof Integer)) return false;
+            net.runelite.api.ItemComposition c = itemManager.getItemComposition((Integer) id);
+            return c != null && (c.isStackable() || c.getNote() != -1);
+        }
+        catch (Throwable t) { return false; }
+    }
+
+    private boolean giNoted(Object id)
+    {
+        try
+        {
+            if (!(id instanceof Integer)) return false;
+            net.runelite.api.ItemComposition c = itemManager.getItemComposition((Integer) id);
+            return c != null && c.getNote() != -1;
+        }
+        catch (Throwable t) { return false; }
+    }
+
     private void appendGameObjects(StringBuilder sb, WorldView wv, WorldPoint playerLoc,
                                    int playerYaw, int scenePlane, boolean canvasOk,
                                    int ox, int oy, double dsx, double dsy, Rectangle clip)
