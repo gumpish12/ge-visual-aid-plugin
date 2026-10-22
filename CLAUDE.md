@@ -35,6 +35,12 @@ happen in one session.
 `../osrs-suite/CLAUDE.md` and `../osrs-suite/docs/LEARNINGS.md` before making any
 non-trivial change.
 
+**Building a new module, filter family or checker?** Read
+`../osrs-suite/docs/ADDING_A_SKILL.md` FIRST. It is the step-by-step for a
+change that spans this repo, the skiller and the tracker — written after the
+slayer module needed correcting repeatedly *despite* both CLAUDE.md files, and
+it names the deploy-cadence trap that decides what may land together.
+
 ---
 
 ## 🔴 RULE ZERO — EVERY CLICK IS A BOX, RANDOMISED. NO EXCEPTIONS.
