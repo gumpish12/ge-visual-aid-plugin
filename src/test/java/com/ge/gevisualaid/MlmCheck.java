@@ -1520,6 +1520,47 @@ public class MlmCheck
         eq("no eta from a first-sight age",
                 tSrc.contains("!cannonSeenFromStart && stage > 0"), true);
 
+        // 2.126 - the three that were genuinely missing, after checking first
+        // killed the rest of the list: vit_run_percent and vit_spec_percent
+        // already existed, and the rune pouch was already merged into the
+        // inventory tally. I searched for the wrong prefix and nearly
+        // reported three gaps that were not there.
+        eq("the selected attack style is published",
+                tSrc.contains("attack_style_index="), true);
+        // THE INDEX, NOT A NAME. What 0..3 means depends on the weapon, so a
+        // name would be a lookup table of every weapon class.
+        eq("as an index rather than a guessed name",
+                tSrc.contains("attack_style_name"), false);
+        eq("and it names the varp it came from",
+                tSrc.contains("attack_style_source=varp:"), true);
+
+        // -1 means NOT YET KNOWN, because getHealthRatio() is -1 until the
+        // target takes a hit. A consumer reading 0 for unknown would switch
+        // target off a monster at full health.
+        eq("the target health is published", tSrc.contains("target_hp_percent="), true);
+        eq("with the raw ratio and scale beside it",
+                tSrc.contains("target_hp_ratio=") && tSrc.contains("target_hp_scale="), true);
+        eq("and a percent is only computed when both are real",
+                tSrc.contains("if (ratio >= 0 && scale > 0)"), true);
+
+        // A COPIED TABLE THAT ROTS, AND THE FEED SAYS SO. The ids came from
+        // RandomEventPlugin bytecode, not a wiki page, and the NAME goes out
+        // beside them so a human can see an event the list has never heard of.
+        eq("random events are detected", tSrc.contains("random_event_active="), true);
+        eq("the id list names its provenance",
+                tSrc.contains("random_event_list_source=runelite_randomeventplugin_1.13.3"), true);
+        eq("and the NPC name goes out beside the id",
+                tSrc.contains("random_event_npc="), true);
+        // The INTERACTION half matters: these ids also appear as ordinary
+        // scenery NPCs, so an id-only test would cry wolf every pass.
+        // COUNTED. The same test exists in buildCombatBlock (the attacked_by
+        // half), so contains() stayed true with the extras one deleted - the
+        // SEVENTH time in this session that a pattern matched past the thing
+        // it was about. If a line could plausibly appear twice, count it.
+        eq("only an NPC interacting with US counts, in both places",
+                countOccurrences(tSrc, "n.getInteracting() != me"), 2);
+        eq("offline is its own state", tSrc.contains("extras_state=offline"), true);
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }

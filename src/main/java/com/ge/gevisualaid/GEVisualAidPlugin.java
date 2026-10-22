@@ -1821,7 +1821,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.125";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.126";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -4299,6 +4299,7 @@ public class GEVisualAidPlugin extends Plugin
                 + buildSystemUpdateState()                   // 2.118
                 + buildCombatState()                         // 2.119
                 + buildTimersState()                         // 2.123
+                + buildExtrasState()                         // 2.126
                 + buildLoginGeometryState();                 // 2.118
     }
 
@@ -4430,6 +4431,7 @@ public class GEVisualAidPlugin extends Plugin
                 + buildSystemUpdateState()                   // 2.118
                 + buildCombatState()                         // 2.119
                 + buildTimersState()                         // 2.123
+                + buildExtrasState()                         // 2.126
                 + buildLoginGeometryState();                 // 2.118
     }
 
@@ -15513,6 +15515,10 @@ public class GEVisualAidPlugin extends Plugin
         try   { timersBlock = buildTimersBlock(online); }
         catch (Throwable t)
         { timersBlock = "timers_state=read_error:" + t.getClass().getSimpleName() + "\n"; }
+
+        try   { extrasBlock = buildExtrasBlock(online); }
+        catch (Throwable t)
+        { extrasBlock = "extras_state=read_error:" + t.getClass().getSimpleName() + "\n"; }
     }
 
     // ---- the login screen's Ok button (2.118) -----------------------------
@@ -16086,9 +16092,120 @@ public class GEVisualAidPlugin extends Plugin
         sb.append("pickpocket_stun_source=spotanim:STUNNED_THIEVING\n");
     }
 
+    // ===================================================================
+    // 2.126 - THE THREE THINGS THAT WERE GENUINELY MISSING
+    //
+    // Josh asked which built-in RuneLite plugins were worth having. Checking
+    // first killed most of the list: the VITALS block already covers run
+    // energy and special attack (vit_run_percent, vit_spec_percent), and the
+    // rune pouch is already merged into the inventory tally, so nature runes
+    // inside a pouch have always counted for high alch. I was about to report
+    // three gaps that did not exist, having searched for "run_energy" instead
+    // of the "vit_" prefix the feed actually uses.
+    //
+    // These three are real:
+    //   1. the SELECTED attack style - nothing published it, so a module
+    //      that sets the style could never confirm it took;
+    //   2. the TARGET'S health - the slayer gate cannot decide "finish this
+    //      one or switch" without it;
+    //   3. a RANDOM EVENT standing next to an unattended account.
+    private volatile String extrasBlock = "extras_state=no_reading_yet\n";
+
+    // RuneLite's own random-event NPC ids, read out of
+    // RandomEventPlugin's bytecode (client-1.13.3.jar) rather than a wiki
+    // page. THIS IS A COPIED TABLE AND THEREFORE ROTS - the feed names the
+    // client version it came from so a reader can tell how stale it may be,
+    // and random_event_npc carries the NAME so a human can see an event this
+    // list has never heard of even when the id check misses it.
+    private static final java.util.Set<Integer> RANDOM_EVENT_NPCS =
+        new java.util.HashSet<>(java.util.Arrays.asList(
+            150, 307, 314, 322, 326, 327, 375, 376, 380, 390,
+            5426, 5429, 5436, 5437, 5438, 5439, 5440, 5441, 5510,
+            6738, 6743, 6744, 6746, 6747, 6748, 6749, 6750, 6751,
+            6752, 6753, 6754, 6755, 12551, 12552));
+
+    private String buildExtrasBlock(boolean online)
+    {
+        StringBuilder sb = new StringBuilder(512);
+        if (!online)
+        {
+            sb.append("extras_state=offline\n");
+            return sb.toString();
+        }
+        sb.append("extras_state=live\n");
+
+        // ---- the selected attack style ----------------------------------
+        //
+        // The INDEX is published, not a name, because what index 0..3 MEANS
+        // depends on the weapon - a scimitar's 2 is not a bow's 2. A name
+        // here would be a lookup table of every weapon class, and it would
+        // mislabel rather than fail loudly. The index is enough for the job
+        // Josh asked for: set the style, then CONFIRM it took.
+        int style;
+        try { style = client.getVarpValue(net.runelite.api.VarPlayer.ATTACK_STYLE); }
+        catch (Throwable t) { style = -1; }
+        sb.append("attack_style_index=").append(style).append("\n");
+        sb.append("attack_style_source=varp:")
+          .append(net.runelite.api.VarPlayer.ATTACK_STYLE).append("\n");
+
+        // ---- the target's health ----------------------------------------
+        //
+        // getHealthRatio() is -1 UNTIL THE TARGET HAS TAKEN A HIT, so -1 here
+        // means "not known yet", never "dead". A consumer reading 0 for
+        // unknown would switch target off a monster at full health.
+        String tName = "";
+        int ratio = -1, scale = -1, pct = -1;
+        try
+        {
+            net.runelite.api.Player me = client.getLocalPlayer();
+            net.runelite.api.Actor t = (me == null) ? null : me.getInteracting();
+            if (t != null)
+            {
+                tName = t.getName() == null ? "" : t.getName();
+                ratio = t.getHealthRatio();
+                scale = t.getHealthScale();
+                if (ratio >= 0 && scale > 0) pct = (int) Math.round(ratio * 100.0 / scale);
+            }
+        }
+        catch (Throwable ignored) { }
+        sb.append("target_name=").append(sanitiseValue(tName)).append("\n");
+        sb.append("target_hp_ratio=").append(ratio).append("\n");
+        sb.append("target_hp_scale=").append(scale).append("\n");
+        sb.append("target_hp_percent=").append(pct).append("\n");
+
+        // ---- a random event, standing next to an unattended account -----
+        //
+        // The test is RuneLite's own: an NPC from their list whose
+        // getInteracting() is the local player. The interaction half matters -
+        // these ids also appear as ordinary scenery NPCs, and flagging one
+        // across the room would cry wolf on every pass.
+        int reId = -1;
+        String reName = "";
+        try
+        {
+            net.runelite.api.Player me = client.getLocalPlayer();
+            if (me != null)
+                for (NPC n : client.getTopLevelWorldView().npcs())
+                {
+                    if (n == null || n.getInteracting() != me) continue;
+                    if (!RANDOM_EVENT_NPCS.contains(n.getId())) continue;
+                    reId = n.getId();
+                    reName = n.getName() == null ? "" : n.getName();
+                    break;
+                }
+        }
+        catch (Throwable ignored) { }
+        sb.append("random_event_active=").append(reId >= 0).append("\n");
+        sb.append("random_event_id=").append(reId).append("\n");
+        sb.append("random_event_npc=").append(sanitiseValue(reName)).append("\n");
+        sb.append("random_event_list_source=runelite_randomeventplugin_1.13.3\n");
+        return sb.toString();
+    }
+
     private String buildSystemUpdateState() { return systemUpdateBlock; }
     private String buildCombatState()       { return combatBlock; }
     private String buildTimersState()       { return timersBlock; }
+    private String buildExtrasState()       { return extrasBlock; }
 
     // ---- am I in combat? (2.119) -----------------------------------------
     //
