@@ -1288,7 +1288,7 @@ public class MlmCheck
         java.lang.reflect.Field tvF = c.getDeclaredField("TIMER_VARBITS");
         tvF.setAccessible(true);
         Object[][] tv = (Object[][]) tvF.get(null);
-        eq("all ten timers are listed", tv.length, 10);
+        eq("the timer list is populated", tv.length >= 10, true);
 
         java.util.Set<String> tnames = new java.util.HashSet<>();
         java.util.Set<Integer> tbits = new java.util.HashSet<>();
@@ -1311,8 +1311,11 @@ public class MlmCheck
         int tend   = tSrc.indexOf("};", tblock);
         eq("the timer table was found", tblock > 0 && tend > tblock, true);
         String tbody = tSrc.substring(tblock, tend);
+        // One symbol per row, whatever the row count - asserted as the
+        // IDENTITY rather than a number, so adding a timer cannot make this
+        // fail for the wrong reason while a literal slips in unnoticed.
         eq("every timer id is a VarbitID symbol",
-                countOccurrences(tbody, "VarbitID."), 10);
+                countOccurrences(tbody, "VarbitID."), tv.length);
         // A bare number would look exactly like a working table.
         eq("and no row carries a raw number",
                 tbody.matches("(?s).*,\\s*\\d+\\s*\\}.*"), false);
@@ -1346,12 +1349,15 @@ public class MlmCheck
         // one as "cannon_ammo" would be the confident-wrong-number this repo
         // keeps paying for, so all five candidates go out labelled instead -
         // the /geoffer technique (2.102), one live reading settles it.
-        eq("the cannon ammo is published as unresolved",
-                tSrc.contains("cannon_ammo_source=unresolved_see_candidates"), true);
-        eq("and no field claims to BE the ammo count",
-                tSrc.contains("\"cannon_ammo=\""), false);
-        for (String nm : new String[]{ "mcannon", "rockthrower", "ownedmcannon" })
-            eq("candidate published: " + nm, tSrc.contains("\"" + nm + "\""), true);
+        // 2.124 REVERSED THIS DELIBERATELY. It used to assert the ammo was
+        // published as UNRESOLVED with five candidates beside it, which was
+        // correct while two names in the same jar disagreed about varp 3. Josh
+        // set a cannon up with 45 balls on 2026-10-22, varp 3 read exactly 45,
+        // and the question is closed - so the assertion is inverted here
+        // rather than deleted, because a test quietly dropped is a decision
+        // nobody can find afterwards. The replacement is a few lines below.
+        eq("the question is no longer published as open",
+                tSrc.contains("cannon_ammo_source=unresolved_see_candidates"), false);
         // These ones ARE named unambiguously, so they are published plainly.
         eq("the breakdown flag is published", tSrc.contains("MCANNON_DECAYED"), true);
 
@@ -1375,6 +1381,108 @@ public class MlmCheck
         // Logged out is not a fault and must not read as one.
         eq("offline is named as its own state",
                 tSrc.contains("timers_state=offline"), true);
+
+        // 2.124 - THE REST OF THE POTIONS, AND THREE THINGS MEASURED SINCE.
+
+        // THE FIRST READ IS NOT A MOVEMENT. 2.123 started o.last at -1, so
+        // the first reading always differed and flipped witnessed to true -
+        // the field's only job being to separate "this has moved" from "this
+        // may not even be the right varbit". Found by reading the live feed:
+        // an INACTIVE goading potion claimed witnessed=true after a restart.
+        // COUNTED, NOT CONTAINED. The guard exists in TWO places - the
+        // varbit loop and trackStep - so contains() stayed true with one of
+        // them broken, and the prove-red for the very bug this fixes came
+        // back green. Sixth time this session a pattern matched past the
+        // thing it was about.
+        eq("the first read is excluded from witnessed, in BOTH places",
+                countOccurrences(tSrc, "if (!firstRead) o.witnessed = true;"), 2);
+        eq("and nothing sets it unguarded",
+                countOccurrences(tSrc, "o.witnessed      = true;"), 0);
+        // Same guard on the measurement, or a potion being drunk would be
+        // timed as if it were a step.
+        eq("the unit is only measured off a known previous value, in both",
+                countOccurrences(tSrc, "if (!firstRead && o.lastChangeTick >= 0"), 2);
+
+        // The list grew by the six the game really does count down.
+        eq("sixteen timers now", tv.length, 16);
+        for (String want : new String[]{ "antifire", "super_antifire", "stamina",
+                                         "magic_imbue", "overload_raids", "overload_nmz" })
+            eq("added: " + want, tnames.contains(want), true);
+
+        // NO TIMER IS CLAIMED FOR AN ORDINARY COMBAT POTION, because none
+        // exists - searched all of VarbitID and every near match is a DIVINE
+        // one, a league task, or a POTIONSTORE dose count. A divine potion
+        // HOLDS the boost so the server stores a countdown; an ordinary one
+        // drains a level a minute and stores nothing. Publishing a
+        // super-attack timer would be inventing one.
+        for (String never : new String[]{ "super_attack", "super_strength",
+                                          "super_combat", "ranging_potion" })
+            eq("no invented timer for: " + never, tnames.contains(never), false);
+        // The honest substitute: the boost itself, which exists for every
+        // potion either way and leads rather than lags.
+        eq("the boost delta is published instead",
+                tSrc.contains("boost_source=boosted_minus_real"), true);
+        eq("per skill, real and boosted both",
+                tSrc.contains("_real=") && tSrc.contains("_now="), true);
+        // A DRAINED stat is negative and is not a boost. Counting it would
+        // make "still boosted" true while standing in dragonfire.
+        eq("only a positive delta counts as boosted",
+                tSrc.contains("if (delta > 0) boosted++;"), true);
+
+        // POISON IS ONE SIGNED VARP: positive poisoned, negative immune (that
+        // IS the anti-venom countdown), zero neither. The sign is the state,
+        // so publishing a bare number would let a reader take "-18" for
+        // damage and have it exactly backwards.
+        eq("poison reads the legacy signed varp",
+                tSrc.contains("client.getVarpValue(net.runelite.api.VarPlayer.POISON)"), true);
+        eq("and the sign is turned into a state",
+                tSrc.contains("raw > 0 ? \"poisoned\" : (raw < 0 ? \"immune\" : \"clear\")"), true);
+        // NOTHING IS DERIVED FROM IT. Neither conversion has been measured.
+        eq("no damage figure is invented", tSrc.contains("poison_damage"), false);
+        eq("no seconds are invented", tSrc.contains("poison_seconds"), false);
+        eq("the immunity is timed by the same machinery",
+                tSrc.contains("trackStep(\"poison_immunity\""), true);
+
+        // THE CANNON AMMO IS SETTLED. Josh set one up with 45 balls and varp 3
+        // read exactly 45, so legacy VarPlayer.CANNON_AMMO is right and
+        // gameval ROCKTHROWER is the stale label. The candidate scan has done
+        // its job and must not linger - a resolved question published as open
+        // is just noise that outlives its reason.
+        eq("the ammo is a named field now",
+                tSrc.contains("appendVarpPlain(sb, \"cannon_ammo\",  net.runelite.api.VarPlayer.CANNON_AMMO)"), true);
+        eq("the candidate scan is gone",
+                tSrc.contains("unresolved_see_candidates"), false);
+        eq("and it says where the answer came from",
+                tSrc.contains("varp_measured_45_balls_2026_10_22"), true);
+        // The two that fell out of the same reading.
+        eq("the setup stage is published", tSrc.contains("VarPlayer.CANNON_STATE"), true);
+        eq("and the location", tSrc.contains("VarPlayer.CANNON_COORD"), true);
+
+        // THE 25 MINUTES IS NOT BAKED IN. Two readings off RuneLite were
+        // CONSISTENT WITH 25 minutes from placement, and consistent-with is
+        // not measured - nothing in the game counts it down (setup_time rose
+        // during assembly then froze at 362616, decayed never left 0), so the
+        // age goes out and the lifespan waits for a cannon watched to the end.
+        eq("the lifespan is still unmeasured",
+                tSrc.contains("cannon_lifespan_source=unmeasured"), true);
+        // SCOPED TO THE CANNON BLOCK. The first version searched the whole
+        // file for "1500"/"2500" and fired on an unrelated buffer size - an
+        // assertion about the file rather than about the cannon.
+        int cb0 = tSrc.indexOf("private void appendCannonBlock");
+        int cb1 = tSrc.indexOf("private void appendVarpPlain", cb0);
+        eq("the cannon block was found", cb0 > 0 && cb1 > cb0, true);
+        String cbody = tSrc.substring(cb0, cb1);
+        eq("no 25-minute constant crept into the cannon block",
+                cbody.contains("1500") || cbody.contains("2500"), false);
+        eq("the age is timed from the placement tick",
+                tSrc.contains("cannon_age_ticks="), true);
+        // A cannon already down when the plugin started is timed from first
+        // sight, which is a floor and not an age - the mlm_dep_N_timed_from
+        // distinction.
+        eq("and says which kind of number it is",
+                tSrc.contains("first_sight_not_placement"), true);
+        eq("a cannon taken down forgets its placement",
+                tSrc.contains("cannonPlacedTick = -1;"), true);
 
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);

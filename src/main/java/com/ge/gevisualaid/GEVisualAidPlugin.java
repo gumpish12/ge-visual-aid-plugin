@@ -1821,7 +1821,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.123";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.124";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -15627,6 +15627,20 @@ public class GEVisualAidPlugin extends Plugin
         { "divine_defence",    VarbitID.DIVINEDEFENCE_POTION_TIME },
         { "divine_range",      VarbitID.DIVINERANGE_POTION_TIME },
         { "divine_magic",      VarbitID.DIVINEMAGIC_POTION_TIME },
+        // 2.124 - the rest of what the game actually counts down.
+        { "antifire",          VarbitID.ANTIFIRE_POTION },
+        { "super_antifire",    VarbitID.SUPER_ANTIFIRE_POTION },
+        { "stamina",           VarbitID.STAMINA_DURATION },
+        { "magic_imbue",       VarbitID.MAGIC_IMBUE_ACTIVE },
+        { "overload_raids",    VarbitID.RAIDS_OVERLOAD_TIMER },
+        { "overload_nmz",      VarbitID.NZONE_OVERLOAD_POTION_EFFECTS },
+    };
+
+    // 2.124 - THE SKILLS WHOSE BOOST IS WORTH WATCHING. Combat plus the two
+    // that drain on their own, so one block answers "am I still boosted".
+    private static final Skill[] BOOST_SKILLS = {
+        Skill.ATTACK, Skill.STRENGTH, Skill.DEFENCE,
+        Skill.RANGED, Skill.MAGIC, Skill.HITPOINTS, Skill.PRAYER,
     };
 
     // One timer's observations, carried across ticks on the client thread.
@@ -15641,6 +15655,9 @@ public class GEVisualAidPlugin extends Plugin
     private final java.util.Map<String, TimerObs> timerObs = new java.util.HashMap<>();
     private volatile String timersBlock = "timers_state=no_reading_yet\n";
     private volatile long   timersStampMs = 0;
+    private int     cannonPlacedTick    = -1;   // 2.124
+    private boolean cannonSeenFromStart = false;
+    private boolean cannonFirstLook     = true;
 
     // The pickpocket stun has NO varbit - checked, and the only thing in the
     // API is the graphic. So it is read off the player as a spot animation
@@ -15690,13 +15707,21 @@ public class GEVisualAidPlugin extends Plugin
             TimerObs o = timerObs.get(name);
             if (o == null) { o = new TimerObs(); timerObs.put(name, o); }
 
+            // 2.124 - THE FIRST READ IS NOT A MOVEMENT, AND 2.123 COUNTED IT
+            // AS ONE. o.last starts at -1, so the very first reading was
+            // always "different" and flipped witnessed to true - which is the
+            // whole field defeated, because its only job is to separate "this
+            // number has moved" from "this might not even be the right
+            // varbit". Caught by reading the live feed: an INACTIVE goading
+            // potion reported witnessed=true seconds after a restart.
+            boolean firstRead = (o.last < 0);
             if (raw != o.last)
             {
                 // ONLY A CLEAN SINGLE STEP MEASURES THE UNIT. A jump from 0
                 // to full is a potion being drunk, and a multi-step fall is
                 // two steps we did not see separately - neither says how long
                 // one step takes, and averaging them in would invent a number.
-                if (o.last >= 0 && o.lastChangeTick >= 0 && now >= 0
+                if (!firstRead && o.lastChangeTick >= 0 && now >= 0
                     && raw == o.last - 1)
                 {
                     int gap = now - o.lastChangeTick;
@@ -15704,11 +15729,7 @@ public class GEVisualAidPlugin extends Plugin
                 }
                 o.last           = raw;
                 o.lastChangeTick = now;
-                o.witnessed      = true;
-            }
-            else if (o.last < 0)
-            {
-                o.last = raw;
+                if (!firstRead) o.witnessed = true;
             }
             if (raw > o.peak) o.peak = raw;
 
@@ -15736,11 +15757,133 @@ public class GEVisualAidPlugin extends Plugin
         }
         catch (Throwable ignored) { sb.append("tmr_goading_display_disabled=-1\n"); }
 
+        // These say WHICH antifire is up, which a duration alone cannot.
+        appendVarbitPlain(sb, "tmr_antifire_type",          VarbitID.BUFF_ANTIFIRE_TYPE);
+        appendVarbitPlain(sb, "tmr_antifire_superior_type", VarbitID.BUFF_SUPERIOR_ANTIFIRE_TYPE);
+        appendVarbitPlain(sb, "tmr_stamina_active",         VarbitID.STAMINA_ACTIVE);
+        appendVarbitPlain(sb, "tmr_overload_raids_tier",    VarbitID.RAIDS_OVERLOAD_TIER);
+
+        appendBoostBlock(sb);
+        appendPoisonBlock(sb);
         appendCannonBlock(sb);
         appendStunBlock(sb);
 
         timersStampMs = System.currentTimeMillis();
         return sb.toString();
+    }
+
+    private void appendVarbitPlain(StringBuilder sb, String key, int vb)
+    {
+        int v;
+        try { v = client.getVarbitValue(vb); } catch (Throwable t) { v = -1; }
+        sb.append(key).append("=").append(v).append("\n");
+    }
+
+    // ---- ordinary potions: THERE IS NO TIMER, SO THE DELTA IS THE ANSWER --
+    //
+    // Josh asked for every combat potion, "both devine and not". Half of that
+    // does not exist and the feed has to say so rather than quietly omit it:
+    // searched the whole of VarbitID and there is NO duration varbit for an
+    // ordinary attack/strength/defence/ranging/magic/combat potion. Every
+    // near match is a DIVINE one, a league task, or a POTIONSTORE dose count.
+    //
+    // That is not a gap in RuneLite, it is how the game works. A divine potion
+    // HOLDS the boost for a fixed time, so the server stores a countdown. An
+    // ordinary one has no duration at all - the boost drains one level a
+    // minute - so there is nothing to store and nothing to read.
+    //
+    // What IS readable is the boost itself. boosted minus real is non-zero
+    // while any boost remains and reaches zero when it has gone, for every
+    // potion that exists, divine or not. It is also a LEADING signal for the
+    // last level, which watching the stat snap back to base never was.
+    private void appendBoostBlock(StringBuilder sb)
+    {
+        int boosted = 0;
+        for (Skill sk : BOOST_SKILLS)
+        {
+            String n = sk.getName().toLowerCase();
+            int real = -1, now = -1;
+            try { real = client.getRealSkillLevel(sk);    } catch (Throwable ignored) { }
+            try { now  = client.getBoostedSkillLevel(sk); } catch (Throwable ignored) { }
+            int delta = (real >= 0 && now >= 0) ? (now - real) : 0;
+            sb.append("boost_").append(n).append("_real=").append(real).append("\n");
+            sb.append("boost_").append(n).append("_now=").append(now).append("\n");
+            sb.append("boost_").append(n).append("_delta=").append(delta).append("\n");
+            if (delta > 0) boosted++;
+        }
+        // A DRAINED stat reads negative here and that is not a boost. Counting
+        // it as one would make "am I still boosted" true while standing in a
+        // dragon's breath, so only positives count.
+        sb.append("boost_skills_up=").append(boosted).append("\n");
+        sb.append("boost_source=boosted_minus_real\n");
+    }
+
+    // ---- poison and venom ------------------------------------------------
+    //
+    // ANTI-VENOM HAS NO TIMER VARBIT OF ITS OWN. The whole thing lives in one
+    // SIGNED varp - net.runelite.api.VarPlayer.POISON - where a positive
+    // value means poisoned, a negative one means immune (that IS the
+    // anti-poison / anti-venom countdown) and zero means neither.
+    //
+    // So the sign is the state and the magnitude is the clock, which is why
+    // this cannot be published as a plain number: a reader seeing "-18" and
+    // assuming it meant damage would have it exactly backwards.
+    //
+    // NO DAMAGE FIGURE AND NO SECONDS ARE DERIVED. The conversions are not
+    // something this plugin has measured, and a plausible-looking number
+    // nobody checked is the failure this repo keeps paying for. The raw value
+    // and the state go out; the immunity is handed to the same measuring
+    // machinery as the potions so its unit gets established by observation.
+    private void appendPoisonBlock(StringBuilder sb)
+    {
+        int raw;
+        try { raw = client.getVarpValue(net.runelite.api.VarPlayer.POISON); }
+        catch (Throwable t)
+        {
+            sb.append("poison_state=unreadable:").append(t.getClass().getSimpleName()).append("\n");
+            sb.append("poison_raw=0\n");
+            return;
+        }
+        sb.append("poison_raw=").append(raw).append("\n");
+        sb.append("poison_state=")
+          .append(raw > 0 ? "poisoned" : (raw < 0 ? "immune" : "clear"))
+          .append("\n");
+        sb.append("poison_source=varp:").append(net.runelite.api.VarPlayer.POISON).append("\n");
+        appendVarbitPlain(sb, "poison_type", VarbitID.POISON_TYPE);
+
+        // The immunity magnitude, timed the same way a potion is.
+        trackStep("poison_immunity", raw < 0 ? -raw : 0, sb);
+    }
+
+    // The step-timing machinery, lifted out of the varbit loop so anything
+    // with a countdown can use it - the poison immunity is not a varbit but
+    // it decrements like one.
+    private void trackStep(String name, int raw, StringBuilder sb)
+    {
+        int now;
+        try { now = client.getTickCount(); } catch (Throwable t) { now = -1; }
+        TimerObs o = timerObs.get(name);
+        if (o == null) { o = new TimerObs(); timerObs.put(name, o); }
+        boolean firstRead = (o.last < 0);
+        if (raw != o.last)
+        {
+            if (!firstRead && o.lastChangeTick >= 0 && now >= 0 && raw == o.last - 1)
+            {
+                int gap = now - o.lastChangeTick;
+                if (gap > 0 && gap <= 200) o.ticksPerStep = gap;
+            }
+            o.last           = raw;
+            o.lastChangeTick = now;
+            if (!firstRead) o.witnessed = true;
+        }
+        if (raw > o.peak) o.peak = raw;
+        String k = "tmr_" + name + "_";
+        sb.append(k).append("raw=").append(raw).append("\n");
+        sb.append(k).append("witnessed=").append(o.witnessed).append("\n");
+        sb.append(k).append("ticks_per_step=").append(o.ticksPerStep).append("\n");
+        sb.append(k).append("eta_ticks=")
+          .append(o.ticksPerStep > 0 && raw > 0 ? (raw * o.ticksPerStep) : -1)
+          .append("\n");
     }
 
     // ---- the cannon -------------------------------------------------------
@@ -15763,21 +15906,24 @@ public class GEVisualAidPlugin extends Plugin
     // is the ammo - then this becomes one named field and the scan comes out.
     private void appendCannonBlock(StringBuilder sb)
     {
-        sb.append("cannon_ammo_source=unresolved_see_candidates\n");
-        final Object[][] cand = {
-            { "mcannon",       VarPlayerID.MCANNON },
-            { "mcannonmulti",  VarPlayerID.MCANNONMULTI },
-            { "dropcannon",    VarPlayerID.DROPCANNON },
-            { "rockthrower",   VarPlayerID.ROCKTHROWER },
-            { "ownedmcannon",  VarPlayerID.OWNEDMCANNON },
-        };
-        for (Object[] c : cand)
-        {
-            int v;
-            try { v = client.getVarpValue((Integer) c[1]); } catch (Throwable t) { v = -1; }
-            sb.append("cannon_varp_").append(c[0]).append("=").append(v)
-              .append("  # varp ").append(c[1]).append("\n");
-        }
+        // 2.124 - MEASURED AND SETTLED. 2.123 published five candidate varps
+        // because two names in the SAME jar disagreed about varp 3:
+        // VarPlayer.CANNON_AMMO = 3 against gameval ROCKTHROWER = 3. Josh set
+        // a cannon up with 45 balls on 2026-10-22 and varp 3 read exactly 45,
+        // so the LEGACY name is the correct one and gameval's is stale. The
+        // scan has done its job and comes out.
+        //
+        // Two more fell out of the same reading, neither of which was being
+        // looked for: varp 2 stepped 0-1-2-3-4 as he assembled the thing
+        // (CANNON_STATE, the setup stage) and varp 4 held a packed location
+        // (CANNON_COORD). Legacy names right three times out of three.
+        //
+        // The symbols are used, never the numbers 2/3/4, so a rename fails the
+        // BUILD rather than reading someone else's varp for ever.
+        sb.append("cannon_ammo_source=varp_measured_45_balls_2026_10_22\n");
+        appendVarpPlain(sb, "cannon_ammo",  net.runelite.api.VarPlayer.CANNON_AMMO);
+        appendVarpPlain(sb, "cannon_stage", net.runelite.api.VarPlayer.CANNON_STATE);
+        appendVarpPlain(sb, "cannon_coord", net.runelite.api.VarPlayer.CANNON_COORD);
 
         // These ARE named unambiguously, so they are published as themselves.
         final Object[][] bits = {
@@ -15793,6 +15939,61 @@ public class GEVisualAidPlugin extends Plugin
             try { v = client.getVarbitValue((Integer) b[1]); } catch (Throwable t) { v = -1; }
             sb.append("cannon_").append(b[0]).append("=").append(v).append("\n");
         }
+
+        // ---- how long it has left -------------------------------------
+        //
+        // NOTHING IN THE GAME COUNTS THIS DOWN, and that was measured rather
+        // than assumed: across a full recording cannon_setup_time rose while
+        // the cannon was being ASSEMBLED and then froze at 362616, and
+        // decayed / balltype / safety_on never left 0. So MCANNON_SETUPTIME is
+        // a stamp, not a timer, and the remaining life has to be timed here.
+        //
+        // THE LIFESPAN ITSELF IS NOT BAKED IN. Josh read 24.36 min and then
+        // 23:50 off RuneLite, both consistent with 25 minutes from the moment
+        // the stage reached 4 - but consistent-with is not measured, so the
+        // age goes out and the lifespan stays unmeasured until a cannon is
+        // watched all the way to the end. A 25-minute constant published now
+        // would be a guess wearing a number.
+        int stage;
+        try { stage = client.getVarpValue(net.runelite.api.VarPlayer.CANNON_STATE); }
+        catch (Throwable t) { stage = -1; }
+        int now;
+        try { now = client.getTickCount(); } catch (Throwable t) { now = -1; }
+
+        if (stage <= 0)
+        {
+            // Taken down or never placed - forget the placement so the next
+            // one is timed from its own start rather than inheriting this one.
+            cannonPlacedTick = -1;
+        }
+        else if (cannonPlacedTick < 0 && now >= 0)
+        {
+            cannonPlacedTick = now;
+        }
+        if (cannonFirstLook)
+        {
+            cannonFirstLook = false;
+            cannonSeenFromStart = (stage > 0);
+        }
+        sb.append("cannon_placed_tick=").append(cannonPlacedTick).append("\n");
+        sb.append("cannon_age_ticks=")
+          .append((cannonPlacedTick >= 0 && now >= 0) ? (now - cannonPlacedTick) : -1)
+          .append("\n");
+        // IT MAY HAVE BEEN DOWN BEFORE WE LOOKED. A cannon already placed when
+        // the plugin started is timed from first sight, not from placement, so
+        // the age is a floor and the feed says which kind of number it is -
+        // the same distinction as mlm_dep_N_timed_from.
+        sb.append("cannon_age_source=")
+          .append(cannonSeenFromStart ? "first_sight_not_placement" : "placement")
+          .append("\n");
+        sb.append("cannon_lifespan_source=unmeasured\n");
+    }
+
+    private void appendVarpPlain(StringBuilder sb, String key, int vp)
+    {
+        int v;
+        try { v = client.getVarpValue(vp); } catch (Throwable t) { v = -1; }
+        sb.append(key).append("=").append(v).append("\n");
     }
 
     // ---- the pickpocket stun ---------------------------------------------
