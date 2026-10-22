@@ -1274,6 +1274,108 @@ public class MlmCheck
         eq("and keeps no inline name compare of its own",
                 fSrc.contains("!lower.equals(f.name)"), false);
 
+        // 2.123 - TIMERS AND BUFFS.
+        //
+        // Josh asked for the goading, divine, imbued heart, cannon and
+        // pickpocket-stun timers as groundwork for a "keep the goading going"
+        // tick box. Watching a stat fall back to base is a LAGGING signal -
+        // it says the boost has gone, never that it is about to - so it
+        // cannot plan a top-up.
+        String tSrc = new String(java.nio.file.Files.readAllBytes(
+                java.nio.file.Paths.get("src/main/java/com/ge/gevisualaid/GEVisualAidPlugin.java")),
+                java.nio.charset.StandardCharsets.UTF_8);
+
+        java.lang.reflect.Field tvF = c.getDeclaredField("TIMER_VARBITS");
+        tvF.setAccessible(true);
+        Object[][] tv = (Object[][]) tvF.get(null);
+        eq("all ten timers are listed", tv.length, 10);
+
+        java.util.Set<String> tnames = new java.util.HashSet<>();
+        java.util.Set<Integer> tbits = new java.util.HashSet<>();
+        for (Object[] row : tv)
+        {
+            eq("timer name is unique: " + row[0], tnames.add((String) row[0]), true);
+            // A DUPLICATE VARBIT MEANS TWO NAMES READING ONE NUMBER, which
+            // would report a potion nobody drank. Same family as the
+            // duplicate filter label that is silently dropped.
+            eq("timer varbit is unique: " + row[0], tbits.add((Integer) row[1]), true);
+        }
+        for (String want : new String[]{ "goading", "imbued_heart", "divine_combat" })
+            eq("the timer Josh named is present: " + want, tnames.contains(want), true);
+
+        // EVERY ID IS A SYMBOL, NEVER A LITERAL. Varbit 4398 compiled fine
+        // against an API that had already deleted the constant naming it
+        // (2.100), and the breakage arrived as a flipper clicking the
+        // inventory in a loop. A literal in this table would do the same.
+        int tblock = tSrc.indexOf("private static final Object[][] TIMER_VARBITS");
+        int tend   = tSrc.indexOf("};", tblock);
+        eq("the timer table was found", tblock > 0 && tend > tblock, true);
+        String tbody = tSrc.substring(tblock, tend);
+        eq("every timer id is a VarbitID symbol",
+                countOccurrences(tbody, "VarbitID."), 10);
+        // A bare number would look exactly like a working table.
+        eq("and no row carries a raw number",
+                tbody.matches("(?s).*,\\s*\\d+\\s*\\}.*"), false);
+
+        // THE NEAR-MISS SYMBOL IS THE DANGEROUS ONE. Beside every
+        // DIVINE*_POTION_TIME there is a DIVINE*_POTION_BASE, and beside the
+        // goading timer a BUFF_..._DURATION_DISABLED. Both compile, both read,
+        // and neither is a countdown - so picking one would publish a
+        // confident number that never ticks down.
+        eq("no _BASE varbit is used as a timer", tbody.contains("_POTION_BASE"), false);
+        eq("no _DISABLED varbit is used as a timer", tbody.contains("DISABLED"), false);
+
+        // THE UNIT IS MEASURED, NOT ASSUMED. A varbit called _TIMER does not
+        // say what one of its units is worth, so the plugin watches one step
+        // go by and withholds the eta until it has.
+        eq("a single clean step is what measures the unit",
+                tSrc.contains("raw == o.last - 1"), true);
+        eq("and the eta is withheld until it is measured",
+                tSrc.contains("o.ticksPerStep > 0 && raw > 0 ? (raw * o.ticksPerStep) : -1"), true);
+        // Scoped to the TIMER loop. "_witnessed=" alone also matches
+        // pickpocket_stun_witnessed, so the first version of this passed with
+        // the timer field deleted - the fourth time in this session that a
+        // pattern matched something other than the thing it was about.
+        eq("never watch a number you have not seen move",
+                tSrc.contains(".append(k).append(\"witnessed=\")"), true);
+
+        // THE CANNON BALL COUNT IS NOT RESOLVED AND MUST NOT PRETEND TO BE.
+        // net.runelite.api.VarPlayer.CANNON_AMMO = 3 and
+        // gameval VarPlayerID.ROCKTHROWER = 3 disagree in the SAME jar, and
+        // no reading of constants settles which label is wrong. Publishing
+        // one as "cannon_ammo" would be the confident-wrong-number this repo
+        // keeps paying for, so all five candidates go out labelled instead -
+        // the /geoffer technique (2.102), one live reading settles it.
+        eq("the cannon ammo is published as unresolved",
+                tSrc.contains("cannon_ammo_source=unresolved_see_candidates"), true);
+        eq("and no field claims to BE the ammo count",
+                tSrc.contains("\"cannon_ammo=\""), false);
+        for (String nm : new String[]{ "mcannon", "rockthrower", "ownedmcannon" })
+            eq("candidate published: " + nm, tSrc.contains("\"" + nm + "\""), true);
+        // These ones ARE named unambiguously, so they are published plainly.
+        eq("the breakdown flag is published", tSrc.contains("MCANNON_DECAYED"), true);
+
+        // THE PICKPOCKET STUN HAS NO VARBIT and the feed says what it really
+        // is: a graphic, with a length measured on the falling edge rather
+        // than a countdown it does not have.
+        eq("the stun names its real source",
+                tSrc.contains("pickpocket_stun_source=spotanim:STUNNED_THIEVING"), true);
+        eq("and reads the graphic, not an invented varbit",
+                tSrc.contains("hasSpotAnim(SpotanimID.STUNNED_THIEVING)"), true);
+        eq("its length is recorded when it ENDS",
+                tSrc.contains("if (stunNow) stunLastTicks = stunTicks;"), true);
+
+        // AN AGE BAKED INTO A CACHED STRING IS NOT AN AGE. timersBlock is
+        // built once a tick and handed to every reader, so only the absolute
+        // stamp is stored and /timers subtracts at request time.
+        eq("/timers is registered", tSrc.contains("createContext(\"/timers\""), true);
+        eq("only an absolute stamp is kept", tSrc.contains("timersStampMs ="), true);
+        eq("and the age is computed in the handler",
+                tSrc.contains("(System.currentTimeMillis() - stamp)"), true);
+        // Logged out is not a fault and must not read as one.
+        eq("offline is named as its own state",
+                tSrc.contains("timers_state=offline"), true);
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }

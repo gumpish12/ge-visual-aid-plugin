@@ -26,6 +26,7 @@ import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.ObjectID;
 import net.runelite.api.gameval.VarPlayerID;
+import net.runelite.api.gameval.SpotanimID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.Skill;
 import net.runelite.api.DecorativeObject;
@@ -1820,7 +1821,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.122";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.123";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -4297,6 +4298,7 @@ public class GEVisualAidPlugin extends Plugin
                 + buildSlayerState()                         // 2.108
                 + buildSystemUpdateState()                   // 2.118
                 + buildCombatState()                         // 2.119
+                + buildTimersState()                         // 2.123
                 + buildLoginGeometryState();                 // 2.118
     }
 
@@ -4427,6 +4429,7 @@ public class GEVisualAidPlugin extends Plugin
                 + buildSlayerState()                         // 2.108
                 + buildSystemUpdateState()                   // 2.118
                 + buildCombatState()                         // 2.119
+                + buildTimersState()                         // 2.123
                 + buildLoginGeometryState();                 // 2.118
     }
 
@@ -13625,6 +13628,7 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/widgets", this::handleWidgetsRequest); // 2.81
             httpServer.createContext("/tick",   this::handleTickRequest);     // 2.85
             httpServer.createContext("/motherlode", this::handleMotherlodeRequest); // 2.87
+            httpServer.createContext("/timers", this::handleTimersRequest);    // 2.123
             httpServer.createContext("/geoffer", this::handleGeOfferRequest); // 2.102
             httpServer.createContext("/slayer",  this::handleSlayerRequest);  // 2.108
             httpServer.createContext("/widgettree", this::handleWidgetTreeRequest); // 2.109
@@ -14044,6 +14048,70 @@ public class GEVisualAidPlugin extends Plugin
         try (OutputStream os = ex.getResponseBody()) { os.write(out); }
     }
     // -----------------------------------------------------------------------
+    // 2.123 - THE HUMAN VIEW OF THE TIMERS. Same reasoning as /motherlode,
+    // /widgets and /tick: the numbers are already in /state as ~80 lines
+    // inside tens of kilobytes, which is not something anyone can watch a
+    // potion run down in.
+    //
+    // THE AGE IS COMPUTED HERE, NOT BAKED IN. timersBlock is built once a
+    // tick and handed to every reader, so an age inside it would freeze and
+    // read as fresh for ever - the trap scene_age_ms and game_tick_age_ms
+    // both named. Only the absolute stamp is stored.
+    private void handleTimersRequest(HttpExchange ex)
+    {
+        StringBuilder sb = new StringBuilder(2048);
+        try
+        {
+            String  body  = timersBlock;
+            long    stamp = timersStampMs;
+            long    age   = (stamp == 0) ? -1 : (System.currentTimeMillis() - stamp);
+
+            sb.append("GE Visual Aid ").append(PLUGIN_OUTPUT_VERSION)
+              .append("  -  timers and buffs\n");
+            sb.append("read ").append(age < 0 ? "never" : (age + "ms ago")).append("\n\n");
+
+            if (stamp == 0)
+            {
+                sb.append("NO READING YET. The block is built on the client\n");
+                sb.append("thread in onGameTick, so this fills in once the\n");
+                sb.append("client has ticked at least once.\n");
+            }
+            else if (body.startsWith("timers_state=offline"))
+            {
+                sb.append("LOGGED OUT. GameTick stops firing at the login\n");
+                sb.append("screen, so there is nothing to read - this is not\n");
+                sb.append("a fault.\n");
+            }
+            else
+            {
+                sb.append("ticks_per_step is MEASURED by watching one step go\n");
+                sb.append("by. Until it is, eta_ticks is withheld as -1 rather\n");
+                sb.append("than guessed - a varbit called _TIMER does not say\n");
+                sb.append("what one of its units is worth.\n\n");
+                sb.append("witnessed=false means this session has never seen\n");
+                sb.append("the number move. A varbit reading 0 all day and the\n");
+                sb.append("wrong varbit look identical until it moves once.\n\n");
+                sb.append(body);
+                sb.append("\nTHE CANNON BALL COUNT IS NOT RESOLVED. Two names in\n");
+                sb.append("runelite-api disagree about varp 3 (VarPlayer.CANNON_AMMO\n");
+                sb.append("vs gameval ROCKTHROWER), so all five candidates are above.\n");
+                sb.append("Set a cannon up with a KNOWN number of balls, read this\n");
+                sb.append("once, and whichever varp equals the count is the ammo.\n");
+            }
+            sendPlain(ex, sb.toString());
+        }
+        catch (Throwable t)
+        {
+            // Mirrors /tick: nothing in a page handler may escape, and the
+            // exchange is closed either way.
+            log.warn("GEVisualAid /timers error: {}", t.getMessage());
+        }
+        finally
+        {
+            ex.close();
+        }
+    }
+
     private void handleTickRequest(HttpExchange ex)
     {
         try
@@ -15441,6 +15509,10 @@ public class GEVisualAidPlugin extends Plugin
         catch (Throwable t)
         { combatBlock = "player_combat_state=read_error:" + t.getClass().getSimpleName() + "\n"
                       + "player_in_combat=false\n"; }
+
+        try   { timersBlock = buildTimersBlock(online); }
+        catch (Throwable t)
+        { timersBlock = "timers_state=read_error:" + t.getClass().getSimpleName() + "\n"; }
     }
 
     // ---- the login screen's Ok button (2.118) -----------------------------
@@ -15518,8 +15590,256 @@ public class GEVisualAidPlugin extends Plugin
 
     private String buildSpellbookState() { return spellbookBlock; }
     private String buildSlayerState()    { return slayerBlock; }
+    // ===================================================================
+    // 2.123 - TIMERS AND BUFFS
+    //
+    // Josh, 2026-10-22: "we currently see when the stats drop back to the
+    // base stats to know when the boost has ran out. But runelite exposes
+    // [Timers & Buffs]... goading potion timer, devine potion timer, imbued
+    // heart timer, cannon timer (along with cannon information about when it
+    // breaks down or how many cannon balls in it), pick pocket stun timer."
+    //
+    // WATCHING THE STAT FALL BACK IS A LAGGING SIGNAL AND IT CANNOT PLAN.
+    // It says the boost HAS gone, never that it is about to, so a module can
+    // only ever react. These varbits say how much is left, which is what a
+    // "keep the goading potions going" tick box actually needs.
+    //
+    // EVERY ID IS A SYMBOL, NEVER A LITERAL. The table below pairs a name
+    // with a gameval constant, so a rename in a future runelite-api fails
+    // the BUILD rather than reading the wrong varbit for ever - which is the
+    // whole lesson of varbit 4398 (2.100).
+    //
+    // AND THE UNIT IS MEASURED, NOT ASSUMED. A varbit called _TIMER could
+    // count ticks, seconds, or steps of some other size, and guessing would
+    // produce a confident countdown describing nothing. So the plugin WATCHES
+    // one: it records the game ticks between two consecutive single-step
+    // decrements and publishes that as tmr_<name>_ticks_per_step. Until it
+    // has seen one, the step is -1 and the eta is withheld. Same call as
+    // mlm_eta_source and the game clock publishing its raw intervals.
+    private static final Object[][] TIMER_VARBITS = {
+        { "goading",           VarbitID.GOADING_POTION_TIMER },
+        { "imbued_heart",      VarbitID.IMBUED_HEART_TIMER },
+        { "divine_combat",     VarbitID.DIVINECOMBAT_POTION_TIME },
+        { "divine_bastion",    VarbitID.DIVINEBASTION_POTION_TIME },
+        { "divine_battlemage", VarbitID.DIVINEBATTLEMAGE_POTION_TIME },
+        { "divine_attack",     VarbitID.DIVINEATTACK_POTION_TIME },
+        { "divine_strength",   VarbitID.DIVINESTRENGTH_POTION_TIME },
+        { "divine_defence",    VarbitID.DIVINEDEFENCE_POTION_TIME },
+        { "divine_range",      VarbitID.DIVINERANGE_POTION_TIME },
+        { "divine_magic",      VarbitID.DIVINEMAGIC_POTION_TIME },
+    };
+
+    // One timer's observations, carried across ticks on the client thread.
+    private static final class TimerObs
+    {
+        int last          = -1;   // previous raw reading
+        int lastChangeTick = -1;  // game tick it last moved
+        int ticksPerStep  = -1;   // MEASURED, -1 until a clean step is seen
+        int peak          = -1;   // the largest value this session
+        boolean witnessed = false;
+    }
+    private final java.util.Map<String, TimerObs> timerObs = new java.util.HashMap<>();
+    private volatile String timersBlock = "timers_state=no_reading_yet\n";
+    private volatile long   timersStampMs = 0;
+
+    // The pickpocket stun has NO varbit - checked, and the only thing in the
+    // API is the graphic. So it is read off the player as a spot animation
+    // and its LENGTH is measured here rather than looked up.
+    private boolean stunNow = false;
+    private int     stunTicks = 0;
+    private int     stunLastTicks = -1;
+    private boolean stunWitnessed = false;
+
+    private String buildTimersBlock(boolean online)
+    {
+        StringBuilder sb = new StringBuilder(1024);
+        if (!online)
+        {
+            sb.append("timers_state=offline\n");
+            timersStampMs = System.currentTimeMillis();
+            return sb.toString();
+        }
+        sb.append("timers_state=live\n");
+
+        int now;
+        try { now = client.getTickCount(); } catch (Throwable t) { now = -1; }
+
+        for (Object[] row : TIMER_VARBITS)
+        {
+            String name = (String)  row[0];
+            int    vb   = (Integer) row[1];
+            String k    = "tmr_" + name + "_";
+            sb.append(k).append("varbit=").append(vb).append("\n");
+
+            int raw;
+            try { raw = client.getVarbitValue(vb); }
+            catch (Throwable t)
+            {
+                // A varbit the game has DELETED throws; it does not return
+                // zero (2.100). Naming it is the difference between minutes
+                // and a morning.
+                sb.append(k).append("state=unreadable:")
+                  .append(t.getClass().getSimpleName()).append("\n");
+                sb.append(k).append("raw=-1\n");
+                sb.append(k).append("ticks_per_step=-1\n");
+                sb.append(k).append("eta_ticks=-1\n");
+                sb.append(k).append("witnessed=false\n");
+                continue;
+            }
+
+            TimerObs o = timerObs.get(name);
+            if (o == null) { o = new TimerObs(); timerObs.put(name, o); }
+
+            if (raw != o.last)
+            {
+                // ONLY A CLEAN SINGLE STEP MEASURES THE UNIT. A jump from 0
+                // to full is a potion being drunk, and a multi-step fall is
+                // two steps we did not see separately - neither says how long
+                // one step takes, and averaging them in would invent a number.
+                if (o.last >= 0 && o.lastChangeTick >= 0 && now >= 0
+                    && raw == o.last - 1)
+                {
+                    int gap = now - o.lastChangeTick;
+                    if (gap > 0 && gap <= 200) o.ticksPerStep = gap;
+                }
+                o.last           = raw;
+                o.lastChangeTick = now;
+                o.witnessed      = true;
+            }
+            else if (o.last < 0)
+            {
+                o.last = raw;
+            }
+            if (raw > o.peak) o.peak = raw;
+
+            sb.append(k).append("raw=").append(raw).append("\n");
+            sb.append(k).append("state=").append(raw > 0 ? "active" : "inactive").append("\n");
+            sb.append(k).append("peak=").append(o.peak).append("\n");
+            // NEVER WATCH A NUMBER YOU HAVE NOT SEEN MOVE (the
+            // mlm_sack_witnessed rule). A varbit that reads 0 all session is
+            // indistinguishable from one that is not the right varbit at all.
+            sb.append(k).append("witnessed=").append(o.witnessed).append("\n");
+            sb.append(k).append("ticks_per_step=").append(o.ticksPerStep).append("\n");
+            sb.append(k).append("eta_ticks=")
+              .append(o.ticksPerStep > 0 && raw > 0 ? (raw * o.ticksPerStep) : -1)
+              .append("\n");
+        }
+
+        // The operator can switch the on-screen duration off, and if that
+        // also empties the varbit then a 0 needs to say which kind of 0 it
+        // is - the blank saying why, again.
+        try
+        {
+            sb.append("tmr_goading_display_disabled=")
+              .append(client.getVarbitValue(VarbitID.BUFF_GOADING_POTION_DURATION_DISABLED))
+              .append("\n");
+        }
+        catch (Throwable ignored) { sb.append("tmr_goading_display_disabled=-1\n"); }
+
+        appendCannonBlock(sb);
+        appendStunBlock(sb);
+
+        timersStampMs = System.currentTimeMillis();
+        return sb.toString();
+    }
+
+    // ---- the cannon -------------------------------------------------------
+    //
+    // THE BALL COUNT IS NOT RESOLVED AND THIS SAYS SO. Two names in the same
+    // runelite-api disagree about varp 3:
+    //
+    //     net.runelite.api.VarPlayer.CANNON_AMMO        = 3
+    //     net.runelite.api.gameval.VarPlayerID.ROCKTHROWER = 3
+    //
+    // and gameval puts MCANNON at 0, MCANNONMULTI at 1, DROPCANNON at 2 and
+    // OWNEDMCANNON at 4. One of those labels is wrong and no amount of
+    // reading constants settles which. Picking one and publishing it as
+    // "cannon_ammo" is exactly the confident-wrong-number this repo keeps
+    // paying for.
+    //
+    // So all five candidates go out LABELLED, the way /geoffer scans for a
+    // price the operator already knows (2.102). Set up a cannon with a known
+    // number of balls, read /timers once, and the varp that equals the count
+    // is the ammo - then this becomes one named field and the scan comes out.
+    private void appendCannonBlock(StringBuilder sb)
+    {
+        sb.append("cannon_ammo_source=unresolved_see_candidates\n");
+        final Object[][] cand = {
+            { "mcannon",       VarPlayerID.MCANNON },
+            { "mcannonmulti",  VarPlayerID.MCANNONMULTI },
+            { "dropcannon",    VarPlayerID.DROPCANNON },
+            { "rockthrower",   VarPlayerID.ROCKTHROWER },
+            { "ownedmcannon",  VarPlayerID.OWNEDMCANNON },
+        };
+        for (Object[] c : cand)
+        {
+            int v;
+            try { v = client.getVarpValue((Integer) c[1]); } catch (Throwable t) { v = -1; }
+            sb.append("cannon_varp_").append(c[0]).append("=").append(v)
+              .append("  # varp ").append(c[1]).append("\n");
+        }
+
+        // These ARE named unambiguously, so they are published as themselves.
+        final Object[][] bits = {
+            { "decayed",       VarbitID.MCANNON_DECAYED },
+            { "balltype",      VarbitID.MCANNON_BALLTYPE },
+            { "last_balltype", VarbitID.MCANNON_LAST_BALLTYPE },
+            { "safety_on",     VarbitID.MCANNON_SAFETY_ON },
+            { "setup_time",    VarbitID.MCANNON_SETUPTIME },
+        };
+        for (Object[] b : bits)
+        {
+            int v;
+            try { v = client.getVarbitValue((Integer) b[1]); } catch (Throwable t) { v = -1; }
+            sb.append("cannon_").append(b[0]).append("=").append(v).append("\n");
+        }
+    }
+
+    // ---- the pickpocket stun ---------------------------------------------
+    //
+    // NO VARBIT EXISTS FOR THIS. Checked across VarbitID and VarPlayerID: the
+    // only stun entries are unrelated (BARBASSAULT_EGGCOUNT_STUN,
+    // BUFF_SIRE_STUN_DURATION_DISABLED, FOSSIL_ACTIVITY_STUNTARMONSTER). What
+    // the API does expose is the graphic, SpotanimID.STUNNED_THIEVING, and
+    // Actor.hasSpotAnim - so this is a BOOLEAN with a measured length rather
+    // than a countdown, and the feed says so instead of implying a timer it
+    // does not have.
+    private void appendStunBlock(StringBuilder sb)
+    {
+        boolean on = false;
+        try
+        {
+            net.runelite.api.Player me = client.getLocalPlayer();
+            if (me != null) on = me.hasSpotAnim(SpotanimID.STUNNED_THIEVING);
+        }
+        catch (Throwable ignored) { }
+
+        if (on)
+        {
+            stunTicks = stunNow ? stunTicks + 1 : 1;
+            stunNow = true;
+            stunWitnessed = true;
+        }
+        else
+        {
+            // The length is only known once it ENDS, so it is recorded on the
+            // falling edge and republished every tick after - the same shape
+            // as mlm_flight_last_ticks keeping the real delivery time
+            // checkable against the constant.
+            if (stunNow) stunLastTicks = stunTicks;
+            stunNow = false;
+            stunTicks = 0;
+        }
+        sb.append("pickpocket_stunned=").append(stunNow).append("\n");
+        sb.append("pickpocket_stun_ticks=").append(stunTicks).append("\n");
+        sb.append("pickpocket_stun_last_ticks=").append(stunLastTicks).append("\n");
+        sb.append("pickpocket_stun_witnessed=").append(stunWitnessed).append("\n");
+        sb.append("pickpocket_stun_source=spotanim:STUNNED_THIEVING\n");
+    }
+
     private String buildSystemUpdateState() { return systemUpdateBlock; }
     private String buildCombatState()       { return combatBlock; }
+    private String buildTimersState()       { return timersBlock; }
 
     // ---- am I in combat? (2.119) -----------------------------------------
     //
