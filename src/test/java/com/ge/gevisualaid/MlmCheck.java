@@ -1463,8 +1463,14 @@ public class MlmCheck
         // not measured - nothing in the game counts it down (setup_time rose
         // during assembly then froze at 362616, decayed never left 0), so the
         // age goes out and the lifespan waits for a cannon watched to the end.
-        eq("the lifespan is still unmeasured",
-                tSrc.contains("cannon_lifespan_source=unmeasured"), true);
+        // 2.125 REVERSED THIS. It asserted the lifespan was published as
+        // UNMEASURED, which was right while the only evidence was two
+        // readings consistent-with 25 minutes. Josh pointed at RuneLite's own
+        // plugin, javap gave GameTimer.CANNON = 25 MINUTES outright, and the
+        // question closed. Inverted rather than deleted, and the replacement
+        // asserts the SOURCE is named - see below.
+        eq("the lifespan is no longer withheld",
+                tSrc.contains("cannon_lifespan_source=unmeasured"), false);
         // SCOPED TO THE CANNON BLOCK. The first version searched the whole
         // file for "1500"/"2500" and fired on an unrelated buffer size - an
         // assertion about the file rather than about the cannon.
@@ -1472,8 +1478,14 @@ public class MlmCheck
         int cb1 = tSrc.indexOf("private void appendVarpPlain", cb0);
         eq("the cannon block was found", cb0 > 0 && cb1 > cb0, true);
         String cbody = tSrc.substring(cb0, cb1);
-        eq("no 25-minute constant crept into the cannon block",
-                cbody.contains("1500") || cbody.contains("2500"), false);
+        // AND SO WAS THIS. It forbade a 25-minute constant in the cannon
+        // block, which was the right guard while such a number could only
+        // have been a guess. It is now LOOKED UP from the client jar and
+        // carries its provenance in the feed, so what matters is no longer
+        // its absence but that it never appears without a source beside it.
+        eq("a lifespan constant never appears without its source",
+                !cbody.contains("2500") || cbody.contains("CANNON_LIFESPAN_TICKS"), true);
+        eq("and no OTHER bare duration crept in", cbody.contains("1500"), false);
         eq("the age is timed from the placement tick",
                 tSrc.contains("cannon_age_ticks="), true);
         // A cannon already down when the plugin started is timed from first
@@ -1483,6 +1495,30 @@ public class MlmCheck
                 tSrc.contains("first_sight_not_placement"), true);
         eq("a cannon taken down forgets its placement",
                 tSrc.contains("cannonPlacedTick = -1;"), true);
+
+        // 2.125 - THE CANNON LIFESPAN, LOOKED UP INSTEAD OF WAITED FOR.
+        // Josh: "cant we just look up that?" Read from the compiled client
+        // with javap: GameTimer.CANNON = 25 MINUTES, CANNON_REPAIR = 10.
+        eq("the lifespan is 2500 ticks",
+                tSrc.contains("CANNON_LIFESPAN_TICKS = 2500"), true);
+        eq("and the repair timer is 1000",
+                tSrc.contains("CANNON_REPAIR_TICKS   = 1000"), true);
+        // A CONSTANT LIFTED FROM SOMEONE ELSE'S CODE IS ONLY AS CURRENT AS
+        // THEIR CODE, and 2.99 established the hub serves a different build
+        // per client version. A consumer told where the number came from can
+        // distrust it; one handed a bare 2500 cannot.
+        eq("the feed names where the lifespan came from",
+                tSrc.contains("cannon_lifespan_source=runelite_gametimer_cannon_25min"), true);
+        eq("it is no longer published as unmeasured",
+                tSrc.contains("cannon_lifespan_source=unmeasured"), false);
+        // The broken flag is CONFIRMED against RuneLite, not a candidate.
+        eq("and names the source of the broken flag too",
+                tSrc.contains("cannon_broken_source=runelite_cannonplugin_varbit_13672"), true);
+        // AN ETA BUILT ON A FLOOR READS LONGER THAN THE TRUTH, which is the
+        // dangerous direction, so a cannon that was already down when the
+        // plugin started gets -1 rather than an optimistic number.
+        eq("no eta from a first-sight age",
+                tSrc.contains("!cannonSeenFromStart && stage > 0"), true);
 
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);

@@ -1821,7 +1821,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.124";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.125";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -15655,6 +15655,10 @@ public class GEVisualAidPlugin extends Plugin
     private final java.util.Map<String, TimerObs> timerObs = new java.util.HashMap<>();
     private volatile String timersBlock = "timers_state=no_reading_yet\n";
     private volatile long   timersStampMs = 0;
+    // 2.125 - from RuneLite's own GameTimer enum, read with javap:
+    // CANNON = 25 MINUTES, CANNON_REPAIR = 10 MINUTES, at 600ms a tick.
+    private static final int CANNON_LIFESPAN_TICKS = 2500;
+    private static final int CANNON_REPAIR_TICKS   = 1000;
     private int     cannonPlacedTick    = -1;   // 2.124
     private boolean cannonSeenFromStart = false;
     private boolean cannonFirstLook     = true;
@@ -15986,7 +15990,51 @@ public class GEVisualAidPlugin extends Plugin
         sb.append("cannon_age_source=")
           .append(cannonSeenFromStart ? "first_sight_not_placement" : "placement")
           .append("\n");
-        sb.append("cannon_lifespan_source=unmeasured\n");
+
+        // 2.125 - THE LIFESPAN, LOOKED UP RATHER THAN WAITED FOR.
+        //
+        // Josh: "all of this information is in the runelite cannon and boosts
+        // information plugins, cant we just look up that?" He is right and it
+        // should have been the FIRST move, not the last - this repo already
+        // has the rule (read the third-party plugin's source when the game
+        // moves under both of you) and I measured instead, which cost him
+        // setting a cannon up.
+        //
+        // Read out of the compiled client with javap, which is the authority
+        // the same way the installed Copilot jar was for 2.104:
+        //   GameTimer.CANNON        = 25 MINUTES = 2500 ticks
+        //   GameTimer.CANNON_REPAIR = 10 MINUTES = 1000 ticks
+        // and his two readings off RuneLite (24.36 then 23:50) are the first
+        // of those counting down.
+        //
+        // THE SOURCE IS NAMED IN THE FEED, not just in this comment, because
+        // a constant lifted from someone else's code is only as current as
+        // their code - and 2.99 established the hub serves a different build
+        // per client version. A consumer that knows where the number came
+        // from can distrust it; one handed a bare 2500 cannot.
+        sb.append("cannon_lifespan_ticks=").append(CANNON_LIFESPAN_TICKS).append("\n");
+        sb.append("cannon_repair_ticks=").append(CANNON_REPAIR_TICKS).append("\n");
+        sb.append("cannon_lifespan_source=runelite_gametimer_cannon_25min\n");
+
+        // Remaining life, but ONLY when the placement moment is genuinely
+        // known. A cannon already down when the plugin started was timed from
+        // first sight, so its age is a floor and an eta built on it would
+        // read LONGER than the truth - the dangerous direction. -1 there.
+        int age = (cannonPlacedTick >= 0 && now >= 0) ? (now - cannonPlacedTick) : -1;
+        sb.append("cannon_eta_ticks=")
+          .append((age >= 0 && !cannonSeenFromStart && stage > 0)
+                  ? Math.max(0, CANNON_LIFESPAN_TICKS - age) : -1)
+          .append("\n");
+
+        // THE BROKEN FLAG IS CONFIRMED, not a candidate. RuneLite's own
+        // CannonPlugin does, in onVarbitChanged bytecode:
+        //     sipush 13672 ... putfield cannonDecayed
+        // which is exactly the varbit published as cannon_decayed above. It
+        // read 0 throughout Josh's run because the cannon never broke, which
+        // is the right answer and not a missing one. 2.124 called this
+        // unproven and wanted three witnesses; one authoritative source beat
+        // all three.
+        sb.append("cannon_broken_source=runelite_cannonplugin_varbit_13672\n");
     }
 
     private void appendVarpPlain(StringBuilder sb, String key, int vp)
