@@ -100,6 +100,13 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+// 2.127 — hold your ground. Confirmed present in runelite-api-1.12.39 /
+// client-1.12.39 with javap before being written, per the rule in CLAUDE.md:
+// MenuOptionClicked.consume(), .getMenuOption(), KeyManager, HotkeyListener.
+import net.runelite.api.events.MenuOptionClicked;
+import net.runelite.client.config.Keybind;
+import net.runelite.client.input.KeyManager;
+import net.runelite.client.util.HotkeyListener;
 
 @Slf4j
 @PluginDescriptor(
@@ -117,6 +124,35 @@ import java.util.concurrent.TimeUnit;
 public class GEVisualAidPlugin extends Plugin
 {
     @Inject private Client             client;
+    @Inject private KeyManager         keyManager;   // 2.127 - hold your ground
+
+    // ── 2.127 — HOLD YOUR GROUND ────────────────────────────────────────────
+    //
+    // While holdGroundHotkey is DOWN, a "Walk here" click is consumed, so an
+    // attack click that misses a moving NPC does nothing instead of walking the
+    // character off. Released, movement is completely normal.
+    //
+    // VOLATILE because the key events arrive on the AWT event thread and
+    // onMenuOptionClicked is read on the client thread. Without it the client
+    // thread could read a stale false and walk anyway - the one failure this
+    // exists to prevent.
+    //
+    // IT FAILS OPEN BY CONSTRUCTION. Every way of going wrong - the key never
+    // pressed, a lost release, the hotkey unset, the feature off, the skiller
+    // dead mid-click - leaves holdGroundDown false and movement normal. The
+    // inverse design (block by default, release to permit) would strand the
+    // character on any one of those, which is not acceptable unattended.
+    private volatile boolean holdGroundDown = false;
+
+    // BUILT IN startUp, NOT HERE. A field initialiser referencing `config` is
+    // an "illegal forward reference" - config is injected further down the
+    // field list - and it failed the BUILD rather than misbehaving at runtime,
+    // which is the right way round.
+    private HotkeyListener holdGroundListener;
+
+    /** 2.127 — published so /state can say whether the key is down right now. */
+    boolean isHoldGroundDown() { return holdGroundDown; }
+
     // 2.110: ItemComposition is CLIENT STATE. Read from the HTTP thread it
     // does not throw - it returns nothing, so /item answered with a full set
     // of plausible rows reading no_such_item and -1, while getItemPrice
@@ -1821,7 +1857,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.126";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.127";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2599,6 +2635,17 @@ public class GEVisualAidPlugin extends Plugin
     protected void startUp()
     {
         log.info("GEVisualAid v{} starting up", PLUGIN_OUTPUT_VERSION);
+        // 2.127 - registered unconditionally, not behind holdGroundEnabled. The
+        // listener only ever sets a boolean, and the gate lives in
+        // onMenuOptionClicked - so ticking the setting takes effect at once
+        // instead of needing the plugin cycled, and no restart can leave the
+        // key dead while the box reads on.
+        holdGroundListener = new HotkeyListener(() -> config.holdGroundHotkey())
+        {
+            @Override public void hotkeyPressed()  { holdGroundDown = true;  }
+            @Override public void hotkeyReleased() { holdGroundDown = false; }
+        };
+        keyManager.registerKeyListener(holdGroundListener);
         for (int i = 0; i < 8; i++)  slots[i]          = new SlotState();
         for (int i = 0; i < 28; i++) inventorySlots[i]  = new InventorySlot();
         session.load();
@@ -2697,6 +2744,14 @@ public class GEVisualAidPlugin extends Plugin
     @Override
     protected void shutDown()
     {
+        // 2.127 - unregister FIRST and clear the flag. A listener left attached
+        // to a stopped plugin keeps writing holdGroundDown, and a flag left
+        // true with nothing to clear it would suppress "Walk here" for the rest
+        // of the session with no way to tell why. Clearing it is the fail-open
+        // half of the design.
+        try { if (holdGroundListener != null) keyManager.unregisterKeyListener(holdGroundListener); }
+        catch (Exception ignored) { }
+        holdGroundDown = false;
         // Plugin v2.4 — Stop the idle-write scheduler cleanly so the
         // daemon thread doesn't outlive the plugin being disabled.
         try
@@ -2739,6 +2794,58 @@ public class GEVisualAidPlugin extends Plugin
     }
 
     // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // 2.127 — HOLD YOUR GROUND: cancel a "Walk here" while the key is held
+    // -----------------------------------------------------------------------
+    //
+    // The skiller clicks where an NPC was read a moment ago. If it has stepped
+    // away, the menu under the cursor is "Walk here" on bare floor, so the
+    // character walks off instead of attacking. The click cannot be made more
+    // accurate - what is needed is for a MISS to do nothing. The skiller holds
+    // the key across its attack click and releases it after, so every other
+    // click in the session is untouched.
+    //
+    // THREE GATES, CHEAPEST FIRST, and the order matters: this runs on every
+    // single menu click in the game, so the common case must cost one boolean
+    // read. holdGroundDown is false almost always.
+    //
+    // IT MATCHES THE OPTION TEXT, NOT A MenuAction CONSTANT. "Walk here" is
+    // what the client puts in the menu for a walk, and MenuAction constants
+    // move between RuneLite versions - the no-lookup-table rule. The compare is
+    // case-insensitive and trimmed because the option is display text, not an
+    // identifier.
+    //
+    // WHAT IT DELIBERATELY DOES NOT DO: it never consumes anything but a walk.
+    // An Attack, a Take, a Use, a bank click - all pass through untouched even
+    // with the key down, so holding it cannot break an interaction. The only
+    // thing suppressed is the one thing we never want from a missed click.
+    @Subscribe
+    public void onMenuOptionClicked(MenuOptionClicked event)
+    {
+        if (!holdGroundDown)                 return;   // the usual case
+        if (!config.holdGroundEnabled())     return;
+        if (config.holdGroundHotkey() == null
+            || config.holdGroundHotkey().equals(Keybind.NOT_SET)) return;
+
+        String opt = event.getMenuOption();
+        if (opt == null) return;
+        if (!"walk here".equals(opt.trim().toLowerCase())) return;
+
+        event.consume();
+        holdGroundBlocks++;
+        holdGroundLastMs = System.currentTimeMillis();
+    }
+
+    /** 2.127 — counters, so a block is VISIBLE instead of a click that did
+     *  nothing for no stated reason. Published on /state beside the key state:
+     *  "it did nothing" and "we cancelled it" look identical in the game and
+     *  need opposite repairs. */
+    private volatile int  holdGroundBlocks = 0;
+    private volatile long holdGroundLastMs = 0L;
+
+    int  holdGroundBlockCount() { return holdGroundBlocks; }
+    long holdGroundLastBlockMs() { return holdGroundLastMs; }
+
     // Game state change
     // -----------------------------------------------------------------------
     @Subscribe
@@ -5235,6 +5342,23 @@ public class GEVisualAidPlugin extends Plugin
         sb.append("aggro_source=").append(aggroSource).append("\n");
         sb.append("aggro_known=").append(aggroLeft >= 0).append("\n");
         sb.append("aggro_in_wilderness=").append(wildy).append("\n");
+        // 2.127 — HOLD YOUR GROUND, AND THE BLANK SAYS WHY. A click that was
+        // cancelled and a click that simply did nothing are identical in the
+        // game and need opposite repairs, so the state is published rather
+        // than inferred: hold_ground_state names which of the four it is, and
+        // hold_ground_blocks proves it has ever actually fired. Never watch a
+        // number you have not seen move.
+        sb.append("hold_ground_state=").append(
+                !config.holdGroundEnabled()                        ? "off"
+              : (config.holdGroundHotkey() == null
+                 || config.holdGroundHotkey().equals(Keybind.NOT_SET)) ? "no_hotkey_set"
+              : holdGroundDown                                     ? "held_walk_blocked"
+              :                                                      "idle_walk_normal").append("\n");
+        sb.append("hold_ground_key_down=").append(holdGroundDown).append("\n");
+        sb.append("hold_ground_hotkey=").append(
+                config.holdGroundHotkey() == null ? "none" : config.holdGroundHotkey().toString()).append("\n");
+        sb.append("hold_ground_blocks=").append(holdGroundBlocks).append("\n");
+        sb.append("hold_ground_last_block_ms=").append(holdGroundLastMs).append("\n");
         sb.append("aggro_anchor_a_x=").append(internalSrc && aggroAnchorA != null ? aggroAnchorA.getX() : -1).append("\n");
         sb.append("aggro_anchor_a_y=").append(internalSrc && aggroAnchorA != null ? aggroAnchorA.getY() : -1).append("\n");
         sb.append("aggro_anchor_b_x=").append(internalSrc && aggroAnchorB != null ? aggroAnchorB.getX() : -1).append("\n");

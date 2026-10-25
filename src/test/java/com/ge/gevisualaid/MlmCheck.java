@@ -169,6 +169,45 @@ public class MlmCheck
         String srcCode = code.toString();
         eq("nothing reads the logout panel off the interface root 182.0",
                 srcCode.contains("isVisible(182, 0)"), false);
+
+        // ── 2.127 HOLD YOUR GROUND ──────────────────────────────────────────
+        // Consumes a "Walk here" while the hotkey is held, so an attack click
+        // that misses a moving NPC does nothing instead of walking the
+        // character off. Every assertion here is about the BLAST RADIUS: this
+        // handler runs on every menu click in the game, and a mistake in it
+        // either makes the client unclickable or strands the character.
+        eq("hold ground: the held flag is volatile (key thread writes, client thread reads)",
+                srcCode.contains("private volatile boolean holdGroundDown"), true);
+        // THE ONLY THING IT MAY EVER CONSUME IS A WALK. Asserted as ORDER, not
+        // presence: the walk-here test must come BEFORE the consume, or a
+        // reordering would start cancelling Attack, Take and bank clicks with
+        // the key down and the plugin would look like a broken mouse.
+        int iWalk    = srcCode.indexOf("\"walk here\".equals(");
+        int iConsume = srcCode.indexOf("event.consume()");
+        eq("hold ground: it tests for a walk at all", iWalk > 0, true);
+        eq("hold ground: and does so BEFORE consuming anything",
+                iWalk > 0 && iConsume > iWalk, true);
+        // THE CHEAP GATE IS FIRST. holdGroundDown is false on virtually every
+        // click of the session, so it must be the first thing read - ahead of
+        // two config calls - or this costs reflection on every menu click.
+        int iFlag = srcCode.indexOf("if (!holdGroundDown)");
+        int iCfg  = srcCode.indexOf("config.holdGroundEnabled()");
+        eq("hold ground: the boolean gate is read before the config",
+                iFlag > 0 && iCfg > iFlag, true);
+        // IT FAILS OPEN. shutDown must both detach the listener and clear the
+        // flag: a flag left true with nothing able to clear it would suppress
+        // walking for the rest of the session with nothing saying why.
+        eq("hold ground: shutDown unregisters the key listener",
+                srcCode.contains("unregisterKeyListener(holdGroundListener)"), true);
+        eq("hold ground: and clears the held flag so it cannot stick",
+                srcCode.contains("holdGroundDown = false"), true);
+        // AND THE STATE IS PUBLISHED. A cancelled click and a click that did
+        // nothing are identical in the game; hold_ground_state names which,
+        // and hold_ground_blocks proves it has ever fired.
+        eq("hold ground: /state names which kind of nothing it is",
+                srcCode.contains("hold_ground_state="), true);
+        eq("hold ground: and counts the blocks, so the number can be watched moving",
+                srcCode.contains("hold_ground_blocks="), true);
         // SCOPED TO THE ASSIGNMENT. Asking whether the symbol appears ANYWHERE
         // passed with the gate rewritten as a bare isVisible(182, 8) - because
         // logoutOpenSource mentions the symbol two lines below. Proved by

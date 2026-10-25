@@ -578,6 +578,42 @@ public interface GEVisualAidConfig extends Config
             section = combatSection, position = 4)
     default boolean aggroTimerEnabled() { return false; }
 
+    // ── 2.127 — HOLD YOUR GROUND, OURS, ON A HELD KEY ───────────────────────
+    //
+    // Josh, 2026-10-25: "can you not just take the hold your attack feature and
+    // copy it into the plugin with a hotkey".
+    //
+    // The problem: the skiller clicks where an NPC is. If the NPC steps away
+    // between the read and the click, the menu under the cursor is no longer
+    // "Attack" - it is "Walk here" on bare floor - so the character walks off
+    // instead of attacking. The click cannot be made more accurate; what is
+    // needed is for a MISS to do nothing.
+    //
+    // WHY NOT THE THIRD-PARTY PLUGIN. Hold Your Ground does exactly this and
+    // its hotkey (holdMovingHotkey + invert) is the right shape, but it is one
+    // global switch shared with manual play, read from a jar the hub serves
+    // per CLIENT VERSION - so a pinned VM silently gets a different build
+    // (2.99). Ours is in the same feed, same config, same /config endpoint,
+    // and the skiller already holds keys across a click with Critical.
+    //
+    // THE HELD KEY IS THE WHOLE DESIGN, AND IT FAILS OPEN. Movement is normal
+    // unless the key is DOWN, so a crashed skiller, a dropped keystroke or an
+    // unset hotkey all leave the character able to walk. The inverse - block by
+    // default, release to permit - would strand him on any failure, which is
+    // not acceptable on an unattended machine.
+    @ConfigItem(keyName = "holdGroundEnabled", name = "Hold your ground (held key)",
+            description = "While the key below is HELD, a 'Walk here' click is cancelled - so an "
+                    + "attack click that misses a moving NPC does nothing instead of walking you "
+                    + "across the room. Released, movement is completely normal.",
+            section = combatSection, position = 40)
+    default boolean holdGroundEnabled() { return false; }
+
+    @ConfigItem(keyName = "holdGroundHotkey", name = "Hold your ground key",
+            description = "Hold this to suppress 'Walk here'. Leave unset and the feature is "
+                    + "inert - nothing is ever cancelled.",
+            section = combatSection, position = 41)
+    default Keybind holdGroundHotkey() { return Keybind.NOT_SET; }
+
     @ConfigItem(keyName = "aggroUseRuneLitePlugin", name = "Use RuneLite's aggression timer",
             description = "Read the countdown straight off RuneLite's own NPC Aggression "
                     + "Timer plugin, which must be enabled with 'Show timer' on. Turn this "
