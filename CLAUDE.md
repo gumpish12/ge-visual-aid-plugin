@@ -594,6 +594,57 @@ function is one new reader away from being lost.
   **Two of them passed the first time they were asked** - see the off-test
   rule above.
 
+- **WE CONSUME A `Walk here` NOW, AND IT IS THE FIRST THING THIS PLUGIN HAS
+  EVER BLOCKED** (2.127). Every other endpoint and field here only ever
+  OBSERVES. `onMenuOptionClicked` cancels a click, which is a different class of
+  power, so it is fenced three ways:
+  - **It can only ever consume a walk.** Attack, Take, Use, bank clicks all pass
+    through untouched even with the key down, so holding it cannot break an
+    interaction. `mlmCheck` asserts the walk test comes BEFORE the consume as an
+    ORDER, not a presence — a reordering would start cancelling everything and
+    read as a broken mouse.
+  - **It matches the option TEXT, not a `MenuAction` constant.** "Walk here" is
+    what the client puts in the menu; MenuAction constants move between
+    versions, which is the no-lookup-table rule.
+  - **The cheap gate is first.** This runs on every menu click in the game, so
+    the common case is one volatile boolean read before either config call.
+- **`holdGroundDown` IS VOLATILE BECAUSE TWO THREADS TOUCH IT.** The key events
+  arrive on the AWT thread; `onMenuOptionClicked` runs on the client thread.
+  Without it the client thread can read a stale `false` and walk anyway — the
+  one failure the feature exists to prevent.
+- **IT FAILS OPEN BY CONSTRUCTION, AND THAT IS THE WHOLE DESIGN.** Movement is
+  normal unless the key is DOWN, so the key never pressed, a lost release, an
+  unset hotkey, the feature off, the skiller dead mid-click or the plugin
+  stopped all leave the character able to walk. Block-by-default with the key to
+  permit would strand him on any one of those. `shutDown` therefore both
+  detaches the listener and clears the flag: a flag left true with nothing able
+  to clear it suppresses walking for the rest of the session with nothing saying
+  why.
+- **THE LISTENER IS REGISTERED UNCONDITIONALLY, NOT BEHIND THE SETTING.** It
+  only ever sets a boolean, and the gate lives in the handler — so ticking the
+  box takes effect at once instead of needing the plugin cycled, and no restart
+  can leave the key dead while the setting reads on.
+- **IT IS BUILT IN `startUp`, NOT AS A FIELD INITIALISER.** A lambda there
+  referencing the injected `config` is an "illegal forward reference" because
+  `config` is declared further down the field list. It failed the BUILD rather
+  than misbehaving at runtime, which is the right way round.
+- **`hold_ground_state` NAMES WHICH KIND OF NOTHING IT IS** — `off`,
+  `no_hotkey_set`, `held_walk_blocked`, `idle_walk_normal`. A cancelled click
+  and a click that did nothing are identical in the game and need opposite
+  repairs. `hold_ground_blocks` counts the cancellations, because a feature that
+  has never been seen to fire is indistinguishable from one that does not work.
+  Confirmed live at `hold_ground_blocks=1` on 2026-10-27.
+- **WE BUILT OUR OWN RATHER THAN DEPENDING ON `hold-your-ground`, AND 2.99 IS
+  THE REASON.** That plugin does the same job and its `holdMovingHotkey` +
+  `holdMovingHotkeyInvert` is the right shape — read out of its bytecode before
+  deciding, which corrected two things stated wrongly from its NAME:
+  `holdAttacks` does **not** suppress the walk fallback (it stops you CHASING an
+  out-of-range NPC), and the walk block lives only in `holdMoving`. But the hub
+  serves a different jar **per client version**, so a pinned VM silently gets a
+  different build of something the suite depends on. **Read a third-party
+  plugin's bytecode before describing what it does; never infer it from the
+  setting's name.**
+
 ## Versioning and deploy
 
 - Filename stays `GEVisualAidPlugin.java` — Java requires it to match the class.
