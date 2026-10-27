@@ -2651,6 +2651,37 @@ public class GEVisualAidPlugin extends Plugin
     protected void startUp()
     {
         log.info("GEVisualAid v{} starting up", PLUGIN_OUTPUT_VERSION);
+
+        // 2.129 - WARM THE NPC TABLE OFF THE CLIENT THREAD. Josh, agreeing to
+        // it: "as long as it wont slow down the plugin im happy to add them".
+        // MEASURED, cold: the parse is 146ms and a lookup afterwards is 137ns.
+        // 137ns a tick is nothing; 146ms inside onGameTick is a quarter of a
+        // game tick stalled, and it would land on the first attack of the
+        // session - the worst possible moment. So it is parsed HERE, on a
+        // daemon thread.
+        //
+        // This is safe off the client thread precisely because it touches
+        // NOTHING in the client: it is a bundled resource, no scene, no
+        // widgets, no varbits. ensureLoaded() is synchronised and remembers
+        // its outcome, so if an attack somehow beats the warm-up the client
+        // thread simply waits for the same single parse instead of doing a
+        // second one.
+        //
+        // Gated on the setting, so a flipping client never opens the file -
+        // which is the whole reason the setting exists.
+        try
+        {
+            if (config.npcStyleDataEnabled())
+            {
+                Thread warm = new Thread(NpcStyleData::ensureLoaded, "gevisualaid-npcdata");
+                warm.setDaemon(true);
+                warm.start();
+            }
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid npc_data warm-up skipped: {}", t.getMessage());
+        }
         // 2.127 - registered unconditionally, not behind holdGroundEnabled. The
         // listener only ever sets a boolean, and the gate lives in
         // onMenuOptionClicked - so ticking the setting takes effect at once
@@ -7036,8 +7067,23 @@ public class GEVisualAidPlugin extends Plugin
                         .append(",facing_me=").append(facing)
                         .append(",attackable=").append(npcIsAttackable(n))
                         .append(",level=").append(npcCombatLevel(n))
-                        .append(",anim=").append(safeNpcAnim(n))
-                        .append(",actions=").append(sanitiseValue(npcActionList(n)))
+                        .append(",anim=").append(safeNpcAnim(n));
+                    // 2.129 - the catalogued style and max hit per NPC, so
+                    // /attack answers "what is it attacking me with" for
+                    // everything on screen and not just the current attacker.
+                    boolean nd = false;
+                    try { nd = config.npcStyleDataEnabled(); } catch (Throwable ignored3) { }
+                    if (nd)
+                    {
+                        int nid = safeNpcId(n);
+                        near.append(",styles=")
+                            .append(nid >= 0 ? NpcStyleData.styleNames(nid) : "")
+                            .append(",max_hit=")
+                            .append(nid >= 0 ? NpcStyleData.maxHit(nid) : -1)
+                            .append(",aggro=")
+                            .append(nid >= 0 ? NpcStyleData.aggressive(nid) : -1);
+                    }
+                    near.append(",actions=").append(sanitiseValue(npcActionList(n)))
                         .append('\n');
                     shown++;
                 }
@@ -7054,10 +7100,43 @@ public class GEVisualAidPlugin extends Plugin
         }
         catch (Throwable ignored) { }
 
+        // 2.129 — the NPC's own catalogued style, when the setting is on, the
+        // attacker is attackable, and the table lists EXACTLY ONE style.
+        //
+        // Josh: "cant it just show npcs attacking me with mage, range or
+        // melee? we have the bosses attacks covered". This is that half.
+        // soleStyle returns null for all 732 hybrid rows, so a Tormented
+        // Demon is never answered from here - the projectile decides those.
+        String npcStyle = null;
+        boolean npcData = false;
+        try { npcData = config.npcStyleDataEnabled(); } catch (Throwable ignored) { }
+        if (npcData && byAttackable && byId >= 0)
+            npcStyle = NpcStyleData.soleStyle(byId);
+
         // 2.129 — the evidence for the melee reading, published beside it so
         // it can be checked against the right-click menu without a deploy.
         // att_attacker_attackable=false with a name beside it is exactly the
-        // conversation case, and now it says so.
+        // conversation case, and now it says so. The table's own reading goes
+        // out whether or not it was used, so "it did not pray" can be told
+        // from "the table had nothing to say".
+        sb.append("att_npc_data_enabled=").append(npcData).append("\n");
+        if (npcData)
+        {
+            sb.append("att_npc_data_state=").append(NpcStyleData.state()).append("\n");
+            sb.append("att_npc_data_rows=").append(NpcStyleData.rows()).append("\n");
+            sb.append("att_attacker_styles=")
+              .append(byId >= 0 ? NpcStyleData.styleNames(byId) : "").append("\n");
+            sb.append("att_attacker_style_mask=")
+              .append(byId >= 0 ? NpcStyleData.styleMask(byId) : 0).append("\n");
+            sb.append("att_attacker_max_hit=")
+              .append(byId >= 0 ? NpcStyleData.maxHit(byId) : -1).append("\n");
+            sb.append("att_attacker_aggressive=")
+              .append(byId >= 0 ? NpcStyleData.aggressive(byId) : -1).append("\n");
+            sb.append("att_attacker_sole_style=")
+              .append(npcStyle == null ? "" : npcStyle).append("\n");
+            sb.append("att_attacker_sole_overhead=")
+              .append(npcStyle == null ? "" : NpcStyleData.overheadFor(npcStyle)).append("\n");
+        }
         sb.append("att_attacker_attackable=").append(byAttackable).append("\n");
         sb.append("att_attacker_actions=").append(sanitiseValue(byActions)).append("\n");
         sb.append("att_attacker_combat_level=").append(byLevel).append("\n");
@@ -7077,8 +7156,17 @@ public class GEVisualAidPlugin extends Plugin
         // every reader believing the old one - the `queued` / `flight_lost`
         // lesson. A talking NPC now lands on the `facing_but_not_attackable`
         // branch, which is a NONE, not a MELEE.
+        // THE ORDER BELOW IS THE DESIGN. npc_data ranks BELOW a live
+        // projectile and ABOVE adjacency, because a projectile is the
+        // narrowest and most current evidence and the only thing that can
+        // answer a style SWITCHER - while adjacency only ever yields MELEE,
+        // so a ranged-only monster standing next to you reads MELEE from
+        // distance alone and the table is strictly better than that.
         String style, conf;
         if (recentProj)          { style = "RANGED_OR_MAGIC"; conf = "projectile"; }
+        else if (npcStyle != null && byDist >= 0)
+                                 { style = npcStyle;
+                                   conf = "npc_data_sole_style"; }
         else if (melee)          { style = "MELEE";
                                    conf = "adjacent_attackable_no_projectile"; }
         else if (byDist >= 0 && !byAttackable)
@@ -7092,6 +7180,15 @@ public class GEVisualAidPlugin extends Plugin
         attSummaryBlock = "att_summary_state=ok\n"
                 + "att_style=" + style + "\n"
                 + "att_basis=" + conf + "\n"
+                + "att_overhead=" + NpcStyleData.overheadFor(style) + "\n"
+                + "att_npc_data_enabled=" + npcData + "\n"
+                + (npcData ? "att_npc_data_state=" + NpcStyleData.state() + "\n"
+                           + "att_npc_data_rows=" + NpcStyleData.rows() + "\n"
+                           + "att_attacker_styles="
+                           + (byId >= 0 ? NpcStyleData.styleNames(byId) : "") + "\n"
+                           + "att_attacker_max_hit="
+                           + (byId >= 0 ? NpcStyleData.maxHit(byId) : -1) + "\n"
+                         : "")
                 + "att_attacker_name=" + sanitiseValue(byName) + "\n"
                 + "att_attacker_dist=" + byDist + "\n"
                 + "att_attacker_attackable=" + byAttackable + "\n"
@@ -7100,6 +7197,12 @@ public class GEVisualAidPlugin extends Plugin
                 + "att_projectile_id=" + attLastProjectile + "\n"
                 + "att_projectile_age_ms=" + since + "\n";
 
+        // 2.129 — ONE FIELD THE CONSUMER CAN ACT ON, whatever decided it.
+        // Before this, a consumer had to re-derive the overhead from the style
+        // in its own code for melee and read att_projectile_overhead for a
+        // projectile - two spellings of one mapping, in two languages. "" for
+        // NONE, UNKNOWN and RANGED_OR_MAGIC, which all mean "pray nothing".
+        sb.append("att_overhead=").append(NpcStyleData.overheadFor(style)).append("\n");
         sb.append("att_style=").append(style).append("\n");
         sb.append("att_basis=").append(conf).append("\n");
 

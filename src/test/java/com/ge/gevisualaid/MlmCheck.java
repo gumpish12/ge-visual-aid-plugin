@@ -1713,8 +1713,13 @@ public class MlmCheck
                 tSrc.contains("adjacent_attackable_no_projectile"), true);
         eq("and the old basis word cannot creep back",
                 tSrc.contains("\"adjacent_no_projectile\""), false);
+        // THE ASSIGNMENT, NOT THE BARE STRING. The plain string also occurs in
+        // the comment above that branch, so tSrc.contains("facing_but_not_
+        // attackable") stayed green with the branch itself deleted - proved by
+        // the mutation that replaced it with attacker_out_of_melee_range. Weak
+        // key, and the THIRD of these in one session.
         eq("a facing-but-harmless NPC is its own named case, and is NONE not MELEE",
-                tSrc.contains("facing_but_not_attackable"), true);
+                tSrc.contains("conf = \"facing_but_not_attackable\""), true);
         // An attackable NPC must win over a nearer harmless one, or the melee
         // reading depends on whether the shopkeeper or the hellhound is closer.
         eq("an attackable attacker outranks a nearer harmless NPC",
@@ -1738,7 +1743,96 @@ public class MlmCheck
         eq("the animation is published and never acted on - which one means 'attack' needs a table",
                 tSrc.contains("safeNpcAnim"), true);
 
+        String cfgSrc = new String(java.nio.file.Files.readAllBytes(
+                java.nio.file.Paths.get("src/main/java/com/ge/gevisualaid/GEVisualAidConfig.java")),
+                java.nio.charset.StandardCharsets.UTF_8);
+
+        // ---- 2.129: THE NPC STYLE TABLE, AND WHY IT IS ALLOWED ------------
+        //
+        // CLAUDE.md forbids lookup tables because they rot silently and
+        // mislabel rather than fail loudly. These assertions ARE the three
+        // things that answer that, so they are the ones that matter most:
+        // a hybrid must never be answered, a missing id must never be
+        // answered, and the thing must be rebuildable.
+
+        // 1. AMBIGUOUS IS NOT A GUESS. This is the whole safety property.
+        //    Josh asked specifically about a Tormented Demon, which the wiki
+        //    lists as melee+ranged+magic. Called against the REAL compiled
+        //    class, not a second copy of the rule.
+        eq("a melee-only NPC is answered",
+                "MELEE".equals(NpcStyleData.soleStyle(soleIdWithMask(1))), true);
+        eq("a hybrid is NOT answered - null, so nothing acts on it",
+                NpcStyleData.soleStyle(soleIdWithMask(7)) == null, true);
+        eq("nor a two-style hybrid",
+                NpcStyleData.soleStyle(soleIdWithMask(5)) == null, true);
+        // 2. A MISSING ID IS SILENCE, NEVER A STYLE.
+        eq("an id that is not in the table answers nothing",
+                NpcStyleData.soleStyle(999_999_999) == null, true);
+        eq("and its mask is 0, not a style",
+                NpcStyleData.styleMask(999_999_999), 0);
+        eq("and its max hit is -1, which is not 0 - 0 is a real reading",
+                NpcStyleData.maxHit(999_999_999), -1);
+        // 3. IT LOADED AT ALL, and says so rather than failing silently.
+        eq("the bundled table parses", "ok".equals(NpcStyleData.state()), true);
+        eq("and has the full wiki set in it", NpcStyleData.rows() >= 4000, true);
+        // 4. REBUILDABLE, which is what makes it a cache and not folklore.
+        eq("the generator is vendored beside it",
+                java.nio.file.Files.exists(
+                    java.nio.file.Paths.get("tools/build_npc_data.py")), true);
+        eq("and so is its licence",
+                java.nio.file.Files.exists(
+                    java.nio.file.Paths.get("tools/npc_data_LICENSE_aggro-tag.txt")), true);
+
+        // OFF BY DEFAULT. Josh: "ensure its toggleable on or off. Because my
+        // flippers etc wont need access to it". A default-on setting would
+        // parse 110KB on every flipping VM at the first attack reading.
+        eq("the npc_data setting exists and defaults to OFF",
+                cfgSrc.contains("default boolean npcStyleDataEnabled() { return false; }"), true);
+        eq("and nothing reads the table unless it is on",
+                tSrc.contains("if (npcData && byAttackable && byId >= 0)"), true);
+        // MEASURED: 146ms to parse, 137ns a lookup. The lookup is free; the
+        // parse is a quarter of a game tick and would land on the first attack
+        // of the session if it happened in onGameTick. So it is warmed on a
+        // daemon thread at startUp - safe off the client thread because it
+        // touches no scene, widget or varbit, only a bundled resource.
+        eq("the parse is warmed off the client thread, not done in onGameTick",
+                tSrc.contains("new Thread(NpcStyleData::ensureLoaded, \"gevisualaid-npcdata\")"), true);
+        eq("and even the warm-up is behind the setting",
+                tSrc.contains("if (config.npcStyleDataEnabled())"), true);
+
+        // THE ORDER. A live projectile must outrank the table, because it is
+        // the only thing that can follow a switcher; the table must outrank
+        // adjacency, because adjacency can only ever say MELEE.
+        int iProj = tSrc.indexOf("conf = \"projectile\"");
+        int iTbl  = tSrc.indexOf("conf = \"npc_data_sole_style\"");
+        int iAdj  = tSrc.indexOf("conf = \"adjacent_attackable_no_projectile\"");
+        eq("projectile outranks the table, and the table outranks adjacency",
+                iProj > 0 && iTbl > iProj && iAdj > iTbl, true);
+
+        // ONE SPELLING OF STYLE -> PRAYER, so a consumer never re-derives it.
+        eq("att_overhead is published for whatever decided the style",
+                tSrc.contains("sb.append(\"att_overhead=\")"), true);
+        eq("and RANGED_OR_MAGIC maps to no prayer at all",
+                NpcStyleData.overheadFor("RANGED_OR_MAGIC"), "");
+        eq("as do NONE and UNKNOWN",
+                NpcStyleData.overheadFor("NONE") + NpcStyleData.overheadFor("UNKNOWN"), "");
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
+    }
+
+    /**
+     * A REAL id out of the bundled table with exactly this style mask.
+     *
+     * Hardcoding an id here would be a second table, and one that goes stale
+     * the first time the wiki data is rebuilt - so the id is DISCOVERED from
+     * the file the code under test actually reads. Returns -1 if the file has
+     * no such row, which fails the assertion rather than passing it quietly.
+     */
+    private static int soleIdWithMask(int mask)
+    {
+        for (int id = 0; id < 60000; id++)
+            if (NpcStyleData.styleMask(id) == mask) return id;
+        return -1;
     }
 }

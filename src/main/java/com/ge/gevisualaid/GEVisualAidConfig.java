@@ -519,6 +519,21 @@ public interface GEVisualAidConfig extends Config
             section = combatSection, position = 2)
     default boolean attackStyleEnabled() { return false; }
 
+    @ConfigItem(keyName = "npcStyleDataEnabled", name = "NPC attack style data",
+            description = "Look the attacker's attack style up in a bundled, wiki-derived "
+                    + "table of 4,024 NPCs, so an ordinary monster can be prayed against "
+                    + "BEFORE it attacks instead of only once a projectile is in the air. "
+                    + "Needs \"Incoming attack style\" on as well. An NPC with more than "
+                    + "one style listed (a Tormented Demon has all three) is NOT answered "
+                    + "from the table - it stays UNKNOWN and the projectile decides, so a "
+                    + "switcher is never guessed at. An id absent from the table reads "
+                    + "unknown and nothing acts on it. OFF BY DEFAULT: it parses a 110KB "
+                    + "resource on first use and a flipping client has no use for it. "
+                    + "Rebuild the data with tools/build_npc_data.py; its date is published "
+                    + "as att_npc_data_version.",
+            section = combatSection, position = 3)
+    default boolean npcStyleDataEnabled() { return false; }
+
     @ConfigItem(keyName = "prayerTrackingEnabled", name = "Active prayers",
             description = "List which prayers are currently switched on, with the overhead "
                     + "called out separately. Cheap.",
