@@ -1600,6 +1600,95 @@ public class MlmCheck
                 countOccurrences(tSrc, "n.getInteracting() != me"), 2);
         eq("offline is its own state", tSrc.contains("extras_state=offline"), true);
 
+        // ===================================================================
+        // 2.128 - THE PROJECTILE STYLE TABLE.
+        //
+        // This is the one lookup table CLAUDE.md allows, and it is allowed
+        // only because an id it does not know returns UNKNOWN instead of a
+        // guess. Every assertion here is about keeping that true - a table
+        // that answered RANGED for an id it had never seen would be the
+        // mislabel-rather-than-fail-loudly trap, wearing a prayer book.
+        //
+        // The REAL compiled rule is called, not a copy: same reason as
+        // filterNameMatches and portfolioGeShare above.
+        // ===================================================================
+        Method pStyle = ProjectileStyles.class.getDeclaredMethod("styleOf", int.class);
+        Method pBoss  = ProjectileStyles.class.getDeclaredMethod("bossOf",  int.class);
+        Method pOver  = ProjectileStyles.class.getDeclaredMethod("overheadFor", String.class);
+        Method pSize  = ProjectileStyles.class.getDeclaredMethod("size");
+        Method pConf  = ProjectileStyles.class.getDeclaredMethod("conflicts");
+        pStyle.setAccessible(true); pBoss.setAccessible(true);
+        pOver.setAccessible(true);  pSize.setAccessible(true);
+        pConf.setAccessible(true);
+
+        // NO ID MAY CARRY TWO STYLES. If one did, which answer you got would
+        // depend on map iteration order - a prayer that is right on Monday.
+        eq("no projectile id is listed under two styles", pConf.invoke(null), 0);
+
+        // The count is asserted, not just "> 0": the table is transcribed by
+        // hand, and a row lost in an edit leaves a table that still works for
+        // everything except the boss that went missing.
+        eq("the table has all 76 ids", pSize.invoke(null), 76);
+
+        // Measured samples, one per style, from three different bosses - so a
+        // single wrong column cannot pass. Zulrah's two are the pair most
+        // likely to be read the wrong way round (1046 magic, 1044 ranged).
+        eq("Zulrah 1046 is magic",   pStyle.invoke(null, 1046), "MAGIC");
+        eq("Zulrah 1044 is ranged",  pStyle.invoke(null, 1044), "RANGED");
+        eq("Olm 1345 is melee",      pStyle.invoke(null, 1345), "MELEE");
+        eq("Leviathan 2487 is ranged", pStyle.invoke(null, 2487), "RANGED");
+        eq("the boss name comes out with it", pBoss.invoke(null, 1046), "Zulrah");
+
+        // THE WHOLE SAFETY PROPERTY. An id nobody listed must be UNKNOWN and
+        // must map to NO prayer, so the consumer has nothing to click.
+        eq("an unlisted id is UNKNOWN", pStyle.invoke(null, 999999), "UNKNOWN");
+        eq("and has no boss",           pBoss.invoke(null, 999999), "");
+        eq("UNKNOWN maps to no overhead", pOver.invoke(null, "UNKNOWN"), "");
+        // -1 is what the plugin publishes before it has ever seen one. It
+        // must take the same path as any other unlisted id, not throw.
+        eq("the never-seen id -1 is UNKNOWN", pStyle.invoke(null, -1), "UNKNOWN");
+
+        // Spelled as the Prayer enum spells it, because the consumer compares
+        // this against pray_overhead, which comes straight off Prayer.name().
+        eq("magic asks for PROTECT_FROM_MAGIC",
+                pOver.invoke(null, "MAGIC"), "PROTECT_FROM_MAGIC");
+        eq("ranged asks for PROTECT_FROM_MISSILES",
+                pOver.invoke(null, "RANGED"), "PROTECT_FROM_MISSILES");
+        eq("melee asks for PROTECT_FROM_MELEE",
+                pOver.invoke(null, "MELEE"), "PROTECT_FROM_MELEE");
+
+        // AND THE PLUGIN HAS TO ACTUALLY ASK IT. A correct table nobody
+        // consults is the same as no table - the lesson that cost a round on
+        // filterNameMatches.
+        eq("appendAttackStyle calls the real table",
+                tSrc.contains("ProjectileStyles.styleOf(attLastProjectile)"), true);
+        eq("the style is published", tSrc.contains("att_projectile_style="), true);
+        eq("the prayer to turn on is published",
+                tSrc.contains("att_projectile_overhead="), true);
+        eq("the flight time left is published",
+                tSrc.contains("att_projectile_cycles_left="), true);
+
+        // THE BLANK HAS TO SAY WHY - 2.92's rule. A style of NONE because no
+        // projectile has ever arrived and a style of NONE because the last
+        // one was two minutes ago need different repairs, and an id the table
+        // does not know is a third thing again.
+        eq("no projectile is named as such",
+                tSrc.contains("projSource = \"no_projectile\""), true);
+        eq("a lapsed projectile is named stale",
+                tSrc.contains("projSource = \"stale\""), true);
+        eq("an unlisted id is named not_in_table",
+                tSrc.contains("\"not_in_table\""), true);
+        eq("a match names the boss it matched",
+                tSrc.contains("(\"table:\" + projBoss)"), true);
+
+        // att_style IS NOT ALLOWED TO CHANGE MEANING. It has said
+        // RANGED_OR_MAGIC since 2.126 and the skiller reads it; narrowing it
+        // in place would re-point an existing consumer without touching it,
+        // which is exactly the flight_lost -> queued mistake. The new answer
+        // is a NEW field or it is not safe.
+        eq("att_style still publishes RANGED_OR_MAGIC",
+                tSrc.contains("style = \"RANGED_OR_MAGIC\""), true);
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }

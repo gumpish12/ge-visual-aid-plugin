@@ -1857,7 +1857,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.127";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.128";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2410,6 +2410,8 @@ public class GEVisualAidPlugin extends Plugin
     private volatile int  attLastProjectile = -1;
     private volatile long attLastProjectileMs = 0;
     private volatile int  attProjectileCount  = 0;
+    // 2.128 — ticks of flight left when last seen. Same thread rules.
+    private volatile int  attLastProjectileCycles = -1;
 
     // V2.48 — parsed bank watch list.
     private String             bankSpecRaw = null;
@@ -3182,6 +3184,13 @@ public class GEVisualAidPlugin extends Plugin
                 attProjectileCount++;
             attLastProjectile   = id;
             attLastProjectileMs = now;
+            // 2.128: how many ticks of flight are left. The event fires every
+            // tick while the projectile travels, so this counts DOWN and is
+            // the only thing in the feed that separates "about to land" from
+            // "just launched". A prayer switch that arrives after the hit is
+            // a wasted click, and without this number a consumer cannot tell
+            // which it is about to make.
+            attLastProjectileCycles = p.getRemainingCycles();
         }
         catch (Throwable ignored) { }
     }
@@ -6858,6 +6867,7 @@ public class GEVisualAidPlugin extends Plugin
         sb.append("att_projectile_id=").append(attLastProjectile).append("\n");
         sb.append("att_projectile_age_ms=").append(since).append("\n");
         sb.append("att_projectile_count=").append(attProjectileCount).append("\n");
+        sb.append("att_projectile_cycles_left=").append(attLastProjectileCycles).append("\n");
 
         // Who is attacking us, and how close.
         String  byName = "";
@@ -6905,6 +6915,58 @@ public class GEVisualAidPlugin extends Plugin
 
         sb.append("att_style=").append(style).append("\n");
         sb.append("att_basis=").append(conf).append("\n");
+
+        // -------------------------------------------------------------------
+        // 2.128 — RANGED vs MAGIC, which att_style above cannot answer.
+        //
+        // att_style IS DELIBERATELY UNCHANGED. It has published
+        // RANGED_OR_MAGIC since 2.126 and the skiller reads it; narrowing it
+        // in place would change what an existing reader is being told without
+        // that reader being touched, which is the `queued` / `flight_lost`
+        // lesson. The new answer arrives as a NEW field, and a consumer that
+        // wants it asks for it.
+        //
+        // AND IT NAMES WHICH KIND OF NOTHING IT IS, because a blank style and
+        // a style nobody could work out need opposite repairs:
+        //   no_projectile  — none has ever been aimed at us this session
+        //   stale          — one was, but too long ago to be this attack
+        //   table:<boss>   — matched, and here is the boss it belongs to
+        //   not_in_table   — a real, current projectile this table does not
+        //                    know. The gap is bosses-only coverage, and a
+        //                    consumer must pray NOTHING on it.
+        // -------------------------------------------------------------------
+        String projStyle, projSource, projBoss = "";
+        if (attLastProjectile < 0)
+        {
+            projStyle  = "NONE";
+            projSource = "no_projectile";
+        }
+        else if (!recentProj)
+        {
+            projStyle  = "NONE";
+            projSource = "stale";
+        }
+        else
+        {
+            projStyle = ProjectileStyles.styleOf(attLastProjectile);
+            projBoss  = ProjectileStyles.bossOf(attLastProjectile);
+            projSource = ProjectileStyles.UNKNOWN.equals(projStyle)
+                    ? "not_in_table" : ("table:" + projBoss);
+        }
+
+        sb.append("att_projectile_style=").append(projStyle).append("\n");
+        sb.append("att_projectile_style_source=").append(projSource).append("\n");
+        sb.append("att_projectile_boss=").append(projBoss).append("\n");
+        // The prayer to turn on, spelled as the Prayer enum spells it, so a
+        // consumer compares it with pray_overhead instead of re-deriving the
+        // mapping. "" on NONE and on UNKNOWN — there is nothing to pray.
+        sb.append("att_projectile_overhead=")
+          .append(ProjectileStyles.overheadFor(projStyle)).append("\n");
+        // Which table this VM has. A machine running an older plugin is the
+        // failure that looks most like a working one, and 2.99 established
+        // the fleet can genuinely differ.
+        sb.append("att_projectile_table_size=")
+          .append(ProjectileStyles.size()).append("\n");
     }
 
     // -----------------------------------------------------------------------

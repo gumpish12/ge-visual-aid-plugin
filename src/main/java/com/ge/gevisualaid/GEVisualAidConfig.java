@@ -511,7 +511,11 @@ public interface GEVisualAidConfig extends Config
             description = "Infer whether you are being attacked by melee, ranged or magic, "
                     + "from projectiles aimed at you and attacker distance. The client does "
                     + "not label attack styles, so att_style is a best guess and att_basis "
-                    + "says what it was based on.",
+                    + "says what it was based on. 2.128 also splits ranged from magic for "
+                    + "the 32 bosses in att_projectile_table_size, via att_projectile_style "
+                    + "- a projectile that is not in that table reads UNKNOWN rather than "
+                    + "guessing, so an auto-pray reading it prays nothing instead of the "
+                    + "wrong thing.",
             section = combatSection, position = 2)
     default boolean attackStyleEnabled() { return false; }
 
