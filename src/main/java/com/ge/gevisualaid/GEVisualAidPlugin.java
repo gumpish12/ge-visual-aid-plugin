@@ -16,6 +16,7 @@ import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.NPC;
+import net.runelite.api.NPCComposition;
 import net.runelite.api.Perspective;
 import net.runelite.api.Player;
 import net.runelite.api.Prayer;
@@ -1857,7 +1858,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.128";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.129";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2412,6 +2413,19 @@ public class GEVisualAidPlugin extends Plugin
     private volatile int  attProjectileCount  = 0;
     // 2.128 — ticks of flight left when last seen. Same thread rules.
     private volatile int  attLastProjectileCycles = -1;
+
+    // 2.129 — the NPCs around the player and what each one OFFERS, built on
+    // the client thread in appendAttackStyle and served by /attack. Josh:
+    // "cant it show the npcs near me and what their actions are? we can see
+    // when im in combat, cant we see what im in combat with and what they are
+    // attacking me with". It is a cached string for the same reason every
+    // other scene reading here is one: wv.npcs() must not be touched from the
+    // HTTP thread.
+    private volatile String attSummaryBlock = "att_summary_state=no_reading_yet\n";
+    private volatile String attNearbyBlock = "att_nearby_state=no_reading_yet\n";
+    private volatile int    attNearbyTick  = -1;
+    private static final int ATT_NEAR_TILES = 10;   // a runaway stop, not a budget
+    private static final int ATT_NEAR_MAX   = 16;
 
     // V2.48 — parsed bank watch list.
     private String             bankSpecRaw = null;
@@ -6859,6 +6873,83 @@ public class GEVisualAidPlugin extends Plugin
     // is reported as such. A projectile aimed at the player means ranged or
     // magic; an attacker adjacent with no projectile means melee.
     // -----------------------------------------------------------------------
+    // 2.129 — an NPC's own action list, which is the only table-free way to
+    // tell a thing that can hit you from a thing you can talk to. Uses the
+    // TRANSFORMED composition first: an NPC that changes form (and several
+    // slayer monsters do) carries its real actions there.
+    private NPCComposition npcComp(NPC n)
+    {
+        try
+        {
+            NPCComposition c = n.getTransformedComposition();
+            return c != null ? c : n.getComposition();
+        }
+        catch (Throwable t) { return null; }
+    }
+
+    // "Attack" in the action list. Not a name, not an id, not a combat level
+    // — the action is what the CLIENT itself offers on right-click, so it is
+    // right for a monster nobody has catalogued and it goes false the moment
+    // the NPC stops being attackable.
+    private boolean npcIsAttackable(NPC n)
+    {
+        try
+        {
+            NPCComposition c = npcComp(n);
+            if (c == null) return false;
+            String[] a = c.getActions();
+            if (a == null) return false;
+            for (String s : a)
+                if (s != null && s.equalsIgnoreCase("Attack")) return true;
+            return false;
+        }
+        catch (Throwable t) { return false; }
+    }
+
+    // The whole list, published so the reading above is checkable against
+    // what the client actually offers without a deploy. Separators stripped
+    // for the same reason portfolio_items strips them.
+    private String npcActionList(NPC n)
+    {
+        try
+        {
+            NPCComposition c = npcComp(n);
+            if (c == null) return "";
+            String[] a = c.getActions();
+            if (a == null) return "";
+            StringBuilder out = new StringBuilder();
+            for (String s : a)
+            {
+                if (s == null || s.isEmpty() || "null".equals(s)) continue;
+                if (out.length() > 0) out.append('/');
+                out.append(s.replace('/', ' ').replace(',', ' ')
+                            .replace('=', ' ').replace('\n', ' '));
+            }
+            return out.toString();
+        }
+        catch (Throwable t) { return ""; }
+    }
+
+    private int npcCombatLevel(NPC n)
+    {
+        try
+        {
+            NPCComposition c = npcComp(n);
+            return c == null ? -1 : c.getCombatLevel();
+        }
+        catch (Throwable t) { return -1; }
+    }
+
+    // Published raw and never interpreted. An attack animation would answer
+    // "is it swinging at me right now", but knowing WHICH animation means an
+    // attack needs a per-monster table, which this repo does not keep. So the
+    // number goes out for observation and nothing acts on it.
+    private int safeNpcAnim(NPC n)
+    {
+        try { return n.getAnimation(); }
+        catch (Throwable t) { return -1; }
+    }
+
     private void appendAttackStyle(StringBuilder sb)
     {
         long now = System.currentTimeMillis();
@@ -6870,9 +6961,9 @@ public class GEVisualAidPlugin extends Plugin
         sb.append("att_projectile_cycles_left=").append(attLastProjectileCycles).append("\n");
 
         // Who is attacking us, and how close.
-        String  byName = "";
-        int     byId   = -1, byDist = -1;
-        boolean melee  = false;
+        String  byName = "", byActions = "";
+        int     byId   = -1, byDist = -1, byLevel = -1;
+        boolean melee  = false, byAttackable = false;
         try
         {
             WorldPoint me = client.getLocalPlayer() == null
@@ -6887,17 +6978,89 @@ public class GEVisualAidPlugin extends Plugin
                     WorldPoint w = n.getWorldLocation();
                     if (w == null) continue;
                     int d = chebyshev(me, w);
-                    if (byDist >= 0 && d >= byDist) continue;
+                    boolean atk = npcIsAttackable(n);
+                    // AN ATTACKABLE NPC WINS OVER A NEARER HARMLESS ONE.
+                    // 2.129: a shopkeeper standing on top of you while a
+                    // hellhound bites from two tiles away must not be the one
+                    // reported - nearest alone picks the shopkeeper and the
+                    // melee reading then depends on who happens to be closer.
+                    if (byDist >= 0)
+                    {
+                        if (byAttackable && !atk) continue;
+                        if (byAttackable == atk && d >= byDist) continue;
+                    }
                     byDist = d;
                     byId   = safeNpcId(n);
                     byName = n.getName() == null ? "" : n.getName();
+                    byAttackable = atk;
+                    byActions = npcActionList(n);
+                    byLevel   = npcCombatLevel(n);
                 }
-                // Adjacent, or within reach of a halberd-length attacker.
-                melee = byDist >= 0 && byDist <= 2;
+                // Adjacent, or within reach of a halberd-length attacker -
+                // AND something we could attack back.
+                //
+                // 2.129: `getInteracting() == me` means the NPC is FACING us,
+                // which a shopkeeper does while you talk to it. Josh, live:
+                // "it also just triggered when i was standing next to an non
+                // aggressive npc. talking to a npc. it only should fire when
+                // im actively being attacked." Until 2.129 this published
+                // att_style=MELEE for every conversation.
+                //
+                // THE ACTION LIST IS THE DISCRIMINATOR, AND IT IS PRE-DAMAGE.
+                // A hitsplat would also prove an attack and was rejected for
+                // Josh's reason: "a hitsplat means its not protected me from
+                // it" - by then the hit has landed, which is the one thing a
+                // prayer switcher exists to prevent. An NPC's own actions say
+                // what it is BEFORE it swings, they are self-describing, and
+                // they self-correct the way #Take on the bar dispenser does.
+                melee = byDist >= 0 && byDist <= 2 && byAttackable;
+
+                // 2.129 — and the whole neighbourhood, for /attack. Same
+                // loop cost as the scan above; it is the same npcs() walk.
+                StringBuilder near = new StringBuilder(512);
+                int shown = 0, seen = 0;
+                for (NPC n : wv.npcs())
+                {
+                    if (n == null) continue;
+                    WorldPoint w = n.getWorldLocation();
+                    if (w == null) continue;
+                    int d = chebyshev(me, w);
+                    if (d > ATT_NEAR_TILES) continue;
+                    seen++;
+                    if (shown >= ATT_NEAR_MAX) continue;
+                    boolean facing = n.getInteracting() == client.getLocalPlayer();
+                    near.append("att_near_").append(shown).append('=')
+                        .append(sanitiseValue(n.getName() == null ? "" : n.getName()))
+                        .append(",id=").append(safeNpcId(n))
+                        .append(",dist=").append(d)
+                        .append(",facing_me=").append(facing)
+                        .append(",attackable=").append(npcIsAttackable(n))
+                        .append(",level=").append(npcCombatLevel(n))
+                        .append(",anim=").append(safeNpcAnim(n))
+                        .append(",actions=").append(sanitiseValue(npcActionList(n)))
+                        .append('\n');
+                    shown++;
+                }
+                near.append("att_near_count=").append(shown).append("\n");
+                near.append("att_near_seen=").append(seen).append("\n");
+                near.append("att_near_radius=").append(ATT_NEAR_TILES).append("\n");
+                near.append("att_near_cap=").append(ATT_NEAR_MAX).append("\n");
+                near.append("att_nearby_state=")
+                    .append(seen == 0 ? "nothing_within_radius" : "ok").append("\n");
+                attNearbyBlock = near.toString();
+                try { attNearbyTick = client.getTickCount(); }
+                catch (Throwable ignored2) { }
             }
         }
         catch (Throwable ignored) { }
 
+        // 2.129 — the evidence for the melee reading, published beside it so
+        // it can be checked against the right-click menu without a deploy.
+        // att_attacker_attackable=false with a name beside it is exactly the
+        // conversation case, and now it says so.
+        sb.append("att_attacker_attackable=").append(byAttackable).append("\n");
+        sb.append("att_attacker_actions=").append(sanitiseValue(byActions)).append("\n");
+        sb.append("att_attacker_combat_level=").append(byLevel).append("\n");
         sb.append("att_attacker_name=").append(byName).append("\n");
         sb.append("att_attacker_id=").append(byId).append("\n");
         sb.append("att_attacker_dist=").append(byDist).append("\n");
@@ -6907,11 +7070,35 @@ public class GEVisualAidPlugin extends Plugin
         // previous attack does not linger as the current style.
         boolean recentProj = since >= 0 && since <= 1500;
 
+        // 2.129 CHANGED WHAT MELEE MEANS, SO att_basis SAYS SO. It used to be
+        // adjacent_no_projectile and it now also requires the NPC to offer
+        // "Attack". The basis string is the field a consumer reads to know
+        // WHY, so changing the rule without changing the word would leave
+        // every reader believing the old one - the `queued` / `flight_lost`
+        // lesson. A talking NPC now lands on the `facing_but_not_attackable`
+        // branch, which is a NONE, not a MELEE.
         String style, conf;
         if (recentProj)          { style = "RANGED_OR_MAGIC"; conf = "projectile"; }
-        else if (melee)          { style = "MELEE";           conf = "adjacent_no_projectile"; }
+        else if (melee)          { style = "MELEE";
+                                   conf = "adjacent_attackable_no_projectile"; }
+        else if (byDist >= 0 && !byAttackable)
+                                 { style = "NONE";
+                                   conf = "facing_but_not_attackable"; }
         else if (byDist >= 0)    { style = "UNKNOWN";         conf = "attacker_out_of_melee_range"; }
         else                     { style = "NONE";            conf = "no_attacker"; }
+
+        // 2.129 - the same readings, cached for /attack. Built here because
+        // this is the client thread; the handler must not re-derive them.
+        attSummaryBlock = "att_summary_state=ok\n"
+                + "att_style=" + style + "\n"
+                + "att_basis=" + conf + "\n"
+                + "att_attacker_name=" + sanitiseValue(byName) + "\n"
+                + "att_attacker_dist=" + byDist + "\n"
+                + "att_attacker_attackable=" + byAttackable + "\n"
+                + "att_attacker_actions=" + sanitiseValue(byActions) + "\n"
+                + "att_attacker_combat_level=" + byLevel + "\n"
+                + "att_projectile_id=" + attLastProjectile + "\n"
+                + "att_projectile_age_ms=" + since + "\n";
 
         sb.append("att_style=").append(style).append("\n");
         sb.append("att_basis=").append(conf).append("\n");
@@ -13818,6 +14005,7 @@ public class GEVisualAidPlugin extends Plugin
             httpServer.createContext("/motherlode", this::handleMotherlodeRequest); // 2.87
             httpServer.createContext("/timers", this::handleTimersRequest);    // 2.123
             httpServer.createContext("/geoffer", this::handleGeOfferRequest); // 2.102
+            httpServer.createContext("/attack", this::handleAttackRequest);  // 2.129
             httpServer.createContext("/slayer",  this::handleSlayerRequest);  // 2.108
             httpServer.createContext("/widgettree", this::handleWidgetTreeRequest); // 2.109
             httpServer.createContext("/item",    this::handleItemRequest);     // 2.110
@@ -14293,6 +14481,87 @@ public class GEVisualAidPlugin extends Plugin
             // Mirrors /tick: nothing in a page handler may escape, and the
             // exchange is closed either way.
             log.warn("GEVisualAid /timers error: {}", t.getMessage());
+        }
+        finally
+        {
+            ex.close();
+        }
+    }
+
+    // 2.129 — THE HUMAN VIEW OF WHAT IS AROUND THE PLAYER. Josh: "cant it
+    // show the npcs near me and what their actions are? we can see when im in
+    // combat, cant we see what im in combat with and what they are attacking
+    // me with". Same reasoning as /widgets, /tick, /motherlode and /geoffer:
+    // the numbers were already in /state and unusable at the rate and size
+    // their reader needed.
+    //
+    // EVERY WAY OF HAVING NOTHING TO SHOW NAMES WHICH WAY IT IS, because
+    // "switched off", "logged out", "nothing within 10 tiles" and "no reading
+    // yet" are four different repairs and an identical empty list.
+    private void handleAttackRequest(HttpExchange ex)
+    {
+        try
+        {
+            boolean online;
+            try { online = client.getGameState() == GameState.LOGGED_IN; }
+            catch (Throwable t) { online = false; }
+
+            StringBuilder r = new StringBuilder(1024);
+            r.append("plugin_output_version=").append(PLUGIN_OUTPUT_VERSION).append("\n");
+
+            boolean on;
+            try { on = config.attackStyleEnabled(); } catch (Throwable t) { on = false; }
+
+            if (!on)
+                r.append("attack_page_state=off"
+                       + " - tick the \"Incoming attack style\" box in the"
+                       + " plugin's settings\n");
+            else if (!online)
+                r.append("attack_page_state=offline - nothing to read at the"
+                       + " login screen\n");
+            else
+                r.append("attack_page_state=ok\n");
+
+            // The age is computed HERE, never baked into the cached string -
+            // the scene_age_ms / game_tick_age_ms trap. A cached age reads as
+            // fresh for ever.
+            int nowTick = -1;
+            try { nowTick = client.getTickCount(); } catch (Throwable ignored) { }
+            r.append("att_nearby_tick=").append(attNearbyTick).append("\n");
+            r.append("att_nearby_age_ticks=")
+             .append(attNearbyTick < 0 || nowTick < 0 ? -1 : nowTick - attNearbyTick)
+             .append("\n");
+
+            if (on && online)
+            {
+                r.append(attSummaryBlock);
+                r.append(attNearbyBlock);
+            }
+
+            r.append("# attackable=true means the NPC offers \"Attack\" on"
+                   + " right-click. That is what 2.129 requires before it"
+                   + " calls anything MELEE - facing_me alone is also true of"
+                   + " an NPC you are talking to.\n");
+            r.append("# anim is published and never acted on: knowing which"
+                   + " animation is an attack needs a per-monster table.\n");
+            r.append("# a RANGED or MAGIC attack from an NPC whose projectile"
+                   + " id is not in the table reads UNKNOWN and prays NOTHING."
+                   + " Its id shows as att_projectile_id - send it over and it"
+                   + " can be added.\n");
+
+            byte[] out = r.toString().getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+            ex.getResponseHeaders().set("Cache-Control", "no-cache, no-store, must-revalidate");
+            ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+            ex.sendResponseHeaders(200, out.length);
+            try (OutputStream os = ex.getResponseBody())
+            {
+                os.write(out);
+            }
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid /attack error: {}", t.getMessage());
         }
         finally
         {

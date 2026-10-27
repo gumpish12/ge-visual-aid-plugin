@@ -1689,6 +1689,55 @@ public class MlmCheck
         eq("att_style still publishes RANGED_OR_MAGIC",
                 tSrc.contains("style = \"RANGED_OR_MAGIC\""), true);
 
+        // ---- 2.129: FACING ME IS NOT ATTACKING ME --------------------------
+        //
+        // Josh, live: "it also just triggered when i was standing next to an
+        // non aggressive npc. talking to a npc. it only should fire when im
+        // actively being attacked." getInteracting() == me is true of a
+        // conversation, so until 2.129 every shopkeeper published MELEE.
+        //
+        // A hitsplat would also prove an attack and was REJECTED for Josh's
+        // reason - "a hitsplat means its not protected me from it". The action
+        // list is the only pre-damage, table-free answer.
+        eq("the melee reading requires the NPC to be attackable",
+                tSrc.contains("melee = byDist >= 0 && byDist <= 2 && byAttackable"), true);
+        eq("attackability is read from the NPC's own action list, not an id list",
+                tSrc.contains("s.equalsIgnoreCase(\"Attack\")"), true);
+        eq("and from the TRANSFORMED composition, so a monster that changes form still reads right",
+                tSrc.contains("n.getTransformedComposition()"), true);
+        // THE BASIS HAD TO CHANGE WITH THE RULE. A consumer reads att_basis to
+        // know WHY, so leaving the old word in place would tell every reader
+        // the old rule still applied - the flight_lost -> queued lesson, which
+        // the block directly above this one already names.
+        eq("att_basis names the new rule",
+                tSrc.contains("adjacent_attackable_no_projectile"), true);
+        eq("and the old basis word cannot creep back",
+                tSrc.contains("\"adjacent_no_projectile\""), false);
+        eq("a facing-but-harmless NPC is its own named case, and is NONE not MELEE",
+                tSrc.contains("facing_but_not_attackable"), true);
+        // An attackable NPC must win over a nearer harmless one, or the melee
+        // reading depends on whether the shopkeeper or the hellhound is closer.
+        eq("an attackable attacker outranks a nearer harmless NPC",
+                tSrc.contains("if (byAttackable && !atk) continue;"), true);
+        // The evidence goes out beside the verdict, so it is checkable against
+        // the right-click menu without a deploy.
+        for (String af : new String[]{"att_attacker_attackable", "att_attacker_actions",
+                                      "att_attacker_combat_level"})
+            eq("the feed carries " + af, tSrc.contains(af), true);
+
+        // ---- 2.129: /attack, the human view -------------------------------
+        eq("/attack is registered",
+                tSrc.contains("createContext(\"/attack\""), true);
+        eq("and it serves a block built on the CLIENT thread, never re-derived in the handler",
+                tSrc.contains("r.append(attNearbyBlock)")
+             && tSrc.contains("attNearbyBlock = near.toString()"), true);
+        // Same trap as scene_age_ms and game_tick_age_ms: an age baked into a
+        // cached string reads as fresh for ever.
+        eq("the nearby age is computed in the handler, not baked into the cache",
+                tSrc.contains("att_nearby_age_ticks"), true);
+        eq("the animation is published and never acted on - which one means 'attack' needs a table",
+                tSrc.contains("safeNpcAnim"), true);
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }
