@@ -1858,7 +1858,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.129";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.130";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2421,6 +2421,33 @@ public class GEVisualAidPlugin extends Plugin
     // attacking me with". It is a cached string for the same reason every
     // other scene reading here is one: wv.npcs() must not be touched from the
     // HTTP thread.
+    // 2.130 — HOW LONG A SEEN PROJECTILE STYLE OUTRANKS ADJACENCY.
+    //
+    // Josh, on tormented gorillas: "it did pray correctly however kept
+    // resetting back to melee when i was next to them, even though they were
+    // attacking me with range or mage. so they would attack with mage, id
+    // pray mage, then back to melee, then mage etc... it never did a melee
+    // attack whilst it was maging or ranging me."
+    //
+    // MEASURED ARITHMETIC, not a theory: ATT_PROJ_MS was 1500ms and a gorilla
+    // attacks every 4 game ticks = 2400ms. So for ~900ms of every cycle the
+    // projectile reading had lapsed, adjacency was the only evidence left,
+    // and adjacency can only ever say MELEE. The flap was once per attack,
+    // exactly as he describes it.
+    //
+    // 4000ms covers one 2400ms cycle with margin. A monster that genuinely
+    // switches TO melee therefore keeps the old overhead for at most about
+    // one and a half attacks, which is the price of not flapping every cycle.
+    // Published as att_projectile_hold_ms so the number stays checkable
+    // against a real attack interval - same discipline as
+    // mlm_sack_settle_ticks.
+    private static final long ATT_PROJ_MS      = 1500;   // "in flight now"
+    private static final long ATT_PROJ_HOLD_MS = 4000;   // "still using that style"
+
+    private volatile long   attProjHoldMs    = 0;
+    private volatile int    attProjHoldId    = -1;       // which attacker it was
+    private volatile String attProjHoldStyle = "";
+
     private volatile String attSummaryBlock = "att_summary_state=no_reading_yet\n";
     private volatile String attNearbyBlock = "att_nearby_state=no_reading_yet\n";
     private volatile int    attNearbyTick  = -1;
@@ -7144,10 +7171,44 @@ public class GEVisualAidPlugin extends Plugin
         sb.append("att_attacker_id=").append(byId).append("\n");
         sb.append("att_attacker_dist=").append(byDist).append("\n");
         sb.append("att_under_attack=").append(byDist >= 0).append("\n");
+        // 2.130 - the hold, published so the flap fix is observable and the
+        // 4000ms stays checkable against a real attack interval.
+        sb.append("att_projectile_hold_ms=").append(ATT_PROJ_HOLD_MS).append("\n");
+        sb.append("att_projectile_hold_style=").append(attProjHoldStyle).append("\n");
+        sb.append("att_projectile_hold_age_ms=")
+          .append(attProjHoldMs == 0 ? -1 : (now - attProjHoldMs)).append("\n");
+        sb.append("att_projectile_hold_attacker=").append(attProjHoldId).append("\n");
 
-        // Recent means within roughly two ticks, so a projectile from the
-        // previous attack does not linger as the current style.
-        boolean recentProj = since >= 0 && since <= 1500;
+        // "In flight now" - within roughly two ticks.
+        //
+        // THE COMMENT THAT USED TO BE HERE SAID THE BUG OUT LOUD: "so a
+        // projectile from the previous attack does not linger as the current
+        // style". Not lingering is right for a projectile in FLIGHT and wrong
+        // for what the monster is DOING - between two mage attacks it left
+        // adjacency as the only evidence, and adjacency can only say MELEE.
+        boolean recentProj = since >= 0 && since <= ATT_PROJ_MS;
+
+        // 2.130 - THE HOLD. A style we have actually SEEN this attacker use
+        // outranks adjacency until it lapses, so the gap between attacks no
+        // longer reads as melee. Narrowed through the table here because the
+        // hold has to remember MAGIC or RANGED, not "one of the two".
+        String liveNarrow = recentProj && attLastProjectile >= 0
+                ? ProjectileStyles.styleOf(attLastProjectile) : "";
+        if (!liveNarrow.isEmpty() && !ProjectileStyles.UNKNOWN.equals(liveNarrow)
+                && byId >= 0)
+        {
+            attProjHoldMs    = now;
+            attProjHoldId    = byId;      // TIED TO THE ATTACKER, see below
+            attProjHoldStyle = liveNarrow;
+        }
+        // IT IS TIED TO THE ATTACKER ID ON PURPOSE. A gorilla dying and a
+        // melee monster taking over must not inherit the gorilla's magic
+        // hold - that would pray magic at something punching you, which is
+        // worse than the flap this fixes.
+        boolean projHeld = byId >= 0 && byId == attProjHoldId
+                && attProjHoldMs > 0
+                && (now - attProjHoldMs) <= ATT_PROJ_HOLD_MS
+                && !attProjHoldStyle.isEmpty();
 
         // 2.129 CHANGED WHAT MELEE MEANS, SO att_basis SAYS SO. It used to be
         // adjacent_no_projectile and it now also requires the NPC to offer
@@ -7164,6 +7225,12 @@ public class GEVisualAidPlugin extends Plugin
         // distance alone and the table is strictly better than that.
         String style, conf;
         if (recentProj)          { style = "RANGED_OR_MAGIC"; conf = "projectile"; }
+        // 2.130 - a style this attacker was SEEN using, still inside the hold.
+        // Above npc_data because it is an observation of this fight rather
+        // than a catalogue entry, and above adjacency for the reason the hold
+        // exists at all.
+        else if (projHeld)       { style = attProjHoldStyle;
+                                   conf = "projectile_held"; }
         else if (npcStyle != null && byDist >= 0)
                                  { style = npcStyle;
                                    conf = "npc_data_sole_style"; }
