@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpExchange;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Actor;
+import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.Animation;
 import net.runelite.api.Client;
 import net.runelite.api.CollisionData;
@@ -1858,7 +1859,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.130";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.131";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2447,6 +2448,38 @@ public class GEVisualAidPlugin extends Plugin
     private volatile long   attProjHoldMs    = 0;
     private volatile int    attProjHoldId    = -1;       // which attacker it was
     private volatile String attProjHoldStyle = "";
+
+    // 2.131 — WHAT THE NPC ACTUALLY DID, ONE LINE PER ATTACK.
+    //
+    // Josh: "is there anyway of just identifying the NPC and seeing what
+    // attack style he is using on the plugin. Because some rarely bosses have
+    // a ranged melee attack. Is there anyway to show what attack style that
+    // NPC is using at the time".
+    //
+    // THE ANSWER IS NO, AND IT IS NOT A LIMITATION OF THIS PLUGIN. Checked
+    // with javap against runelite-api 1.13.4: Actor has getAnimation,
+    // getPoseAnimation, getGraphic, getCombatLevel, getInteracting - and
+    // NOTHING about attack style. The game never labels an attack, so every
+    // style reading anywhere in this suite is an inference. His "ranged melee
+    // attack" is precisely the case inference gets wrong: an attack with no
+    // projectile, which adjacency can only call MELEE.
+    //
+    // WHAT IS OBSERVABLE IS THE ATTACK ITSELF. Each distinct attack of an NPC
+    // plays a distinct ANIMATION id, and a ranged-styled attack with no
+    // projectile still has its own animation, different from that NPC's real
+    // melee animation. So the raw observations are logged and NOTHING is
+    // inferred from them: name, id, animation, the projectile that followed,
+    // the graphic, the distance. Once an animation has been SEEN to go with a
+    // style, that pairing is a measurement rather than a guess - which is the
+    // only way anything here is allowed to learn an id.
+    private static final int ATT_SEEN_MAX = 24;
+    private final String[] attSeen      = new String[ATT_SEEN_MAX];
+    private final int[]    attSeenAnim  = new int[ATT_SEEN_MAX];
+    private final int[]    attSeenTick  = new int[ATT_SEEN_MAX];
+    private final int[]    attSeenProj  = new int[ATT_SEEN_MAX];
+    private volatile int   attSeenPos   = 0;     // next slot to write
+    private volatile int   attSeenCount = 0;
+    private volatile String attSeenBlock = "att_seen_state=no_reading_yet\n";
 
     private volatile String attSummaryBlock = "att_summary_state=no_reading_yet\n";
     private volatile String attNearbyBlock = "att_nearby_state=no_reading_yet\n";
@@ -3237,6 +3270,87 @@ public class GEVisualAidPlugin extends Plugin
     // -----------------------------------------------------------------------
     // Game tick
     // -----------------------------------------------------------------------
+    // 2.131 — one row per attack animation played AT US by an NPC.
+    //
+    // Gated on the NPC interacting with the local player, so the rest of the
+    // scene's idle animations never reach it. It records and never decides:
+    // no animation id in this repo is mapped to a style, because that mapping
+    // would be a per-monster table and nobody has measured one yet. The point
+    // is to make measuring possible.
+    @Subscribe
+    public void onAnimationChanged(AnimationChanged event)
+    {
+        try
+        {
+            if (!config.attackStyleEnabled()) return;
+            Actor a = event.getActor();
+            if (!(a instanceof NPC)) return;
+            if (a.getInteracting() != client.getLocalPlayer()) return;
+            int anim = a.getAnimation();
+            if (anim == -1) return;          // the attack ENDING, not starting
+
+            NPC n = (NPC) a;
+            int tick = -1;
+            try { tick = client.getTickCount(); } catch (Throwable ignored) { }
+
+            // The SAME animation re-reported on the same tick is one attack.
+            int prev = (attSeenPos - 1 + ATT_SEEN_MAX) % ATT_SEEN_MAX;
+            if (attSeenCount > 0 && attSeenAnim[prev] == anim && attSeenTick[prev] == tick)
+                return;
+
+            int d = -1;
+            try
+            {
+                WorldPoint me = client.getLocalPlayer() == null
+                        ? null : client.getLocalPlayer().getWorldLocation();
+                WorldPoint w  = n.getWorldLocation();
+                if (me != null && w != null) d = chebyshev(me, w);
+            }
+            catch (Throwable ignored) { }
+
+            int slot = attSeenPos;
+            attSeenAnim[slot] = anim;
+            attSeenTick[slot] = tick;
+            attSeenProj[slot] = -1;          // stamped later if one follows
+            attSeen[slot] = "tick=" + tick
+                    + ",npc=" + sanitiseValue(n.getName() == null ? "" : n.getName())
+                    + ",id=" + safeNpcId(n)
+                    + ",anim=" + anim
+                    + ",dist=" + d
+                    + ",gfx=" + safeActorGraphic(a)
+                    + ",attackable=" + npcIsAttackable(n);
+            attSeenPos   = (slot + 1) % ATT_SEEN_MAX;
+            if (attSeenCount < ATT_SEEN_MAX) attSeenCount++;
+        }
+        catch (Throwable ignored) { }
+    }
+
+    private int safeActorGraphic(Actor a)
+    {
+        try { return a.getGraphic(); } catch (Throwable t) { return -1; }
+    }
+
+    // 2.131 — pair a projectile with the animation that launched it.
+    //
+    // THE ANIMATION COMES FIRST AND THE PROJECTILE FOLLOWS, so the pairing
+    // has to be done backwards, onto the newest row. It is a CORRELATION and
+    // the window is published as part of the row rather than hidden: two
+    // ticks, because a projectile is created on the tick after the attack
+    // animation starts. A row that keeps proj=-1 is the interesting one -
+    // that is an attack with no projectile at all, which is either real melee
+    // or exactly the "ranged melee attack" Josh is asking about.
+    private void attLinkProjectile(int projId, int tick)
+    {
+        if (attSeenCount == 0) return;
+        int prev = (attSeenPos - 1 + ATT_SEEN_MAX) % ATT_SEEN_MAX;
+        if (attSeenProj[prev] != -1) return;                 // already paired
+        if (tick < 0 || attSeenTick[prev] < 0) return;
+        if (tick - attSeenTick[prev] > 2) return;            // too late to be this one
+        attSeenProj[prev] = projId;
+        attSeen[prev] = attSeen[prev] + ",proj=" + projId
+                + ",proj_after_ticks=" + (tick - attSeenTick[prev]);
+    }
+
     @Subscribe
     public void onProjectileMoved(ProjectileMoved event)
     {
@@ -3263,6 +3377,17 @@ public class GEVisualAidPlugin extends Plugin
             // a wasted click, and without this number a consumer cannot tell
             // which it is about to make.
             attLastProjectileCycles = p.getRemainingCycles();
+
+            // 2.131 - pair it with the animation that launched it. The event
+            // fires every tick while it travels, so this is called many times
+            // per projectile; attLinkProjectile's own guards are what make
+            // that safe - it stamps only a row that has no projectile yet and
+            // only within two ticks of it. A "first sight" flag here on the
+            // projectile ID would have been WRONG, because a boss reusing the
+            // same projectile for its next attack would then never pair.
+            int tick = -1;
+            try { tick = client.getTickCount(); } catch (Throwable ignored2) { }
+            attLinkProjectile(id, tick);
         }
         catch (Throwable ignored) { }
     }
@@ -7121,6 +7246,23 @@ public class GEVisualAidPlugin extends Plugin
                 near.append("att_nearby_state=")
                     .append(seen == 0 ? "nothing_within_radius" : "ok").append("\n");
                 attNearbyBlock = near.toString();
+
+                // 2.131 - the attack log, newest FIRST. Built here on the
+                // client thread for the same reason everything else is.
+                StringBuilder sq = new StringBuilder(1024);
+                for (int i = 0; i < attSeenCount; i++)
+                {
+                    int ix = (attSeenPos - 1 - i + 2 * ATT_SEEN_MAX) % ATT_SEEN_MAX;
+                    if (attSeen[ix] == null) continue;
+                    sq.append("att_seen_").append(i).append('=')
+                      .append(attSeen[ix]).append('\n');
+                }
+                sq.append("att_seen_count=").append(attSeenCount).append("\n");
+                sq.append("att_seen_cap=").append(ATT_SEEN_MAX).append("\n");
+                sq.append("att_seen_state=")
+                  .append(attSeenCount == 0 ? "nothing_has_attacked_yet" : "ok")
+                  .append("\n");
+                attSeenBlock = sq.toString();
                 try { attNearbyTick = client.getTickCount(); }
                 catch (Throwable ignored2) { }
             }
@@ -14706,6 +14848,7 @@ public class GEVisualAidPlugin extends Plugin
             {
                 r.append(attSummaryBlock);
                 r.append(attNearbyBlock);
+                r.append(attSeenBlock);
             }
 
             r.append("# attackable=true means the NPC offers \"Attack\" on"
@@ -14718,6 +14861,17 @@ public class GEVisualAidPlugin extends Plugin
                    + " id is not in the table reads UNKNOWN and prays NOTHING."
                    + " Its id shows as att_projectile_id - send it over and it"
                    + " can be added.\n");
+            r.append("# THE GAME NEVER LABELS AN ATTACK STYLE. Checked against"
+                   + " runelite-api 1.13.4: Actor has no such field, so every"
+                   + " style reading here is an inference.\n");
+            r.append("# att_seen_N is one row per attack animation played at"
+                   + " you, newest first. A row with proj= is ranged or magic"
+                   + " and its projectile id names which. A row with NO proj"
+                   + " is an attack with nothing in flight - real melee, or a"
+                   + " ranged-styled attack that only its animation id can"
+                   + " tell apart. Nothing here maps an animation to a style:"
+                   + " send a boss's rows over and the pairing becomes a"
+                   + " measurement.\n");
 
             byte[] out = r.toString().getBytes(StandardCharsets.UTF_8);
             ex.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");

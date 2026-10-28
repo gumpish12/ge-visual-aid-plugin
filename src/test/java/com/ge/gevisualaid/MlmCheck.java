@@ -1840,6 +1840,65 @@ public class MlmCheck
                 tSrc.contains("sb.append(\"att_projectile_hold_age_ms=\")")
              && tSrc.contains("sb.append(\"att_projectile_hold_attacker=\")"), true);
 
+        // ---- 2.131: THE ATTACK LOG RECORDS, IT NEVER DECIDES --------------
+        //
+        // Josh: "is there anyway of just identifying the NPC and seeing what
+        // attack style he is using... Because some rarely bosses have a ranged
+        // melee attack." Checked with javap against runelite-api 1.13.4:
+        // Actor exposes NO attack style, so the game never labels one. What is
+        // observable is the attack - its ANIMATION - and that is logged raw.
+        eq("the animation subscriber exists",
+                tSrc.contains("public void onAnimationChanged(AnimationChanged event)"), true);
+        eq("and only for an NPC that is interacting with US",
+                tSrc.contains("if (a.getInteracting() != client.getLocalPlayer()) return;"), true);
+        eq("and only when the setting is on",
+                tSrc.contains("if (!config.attackStyleEnabled()) return;"), true);
+        // anim == -1 is the attack ENDING. Logging it would double every row.
+        eq("an animation ending is not an attack",
+                tSrc.contains("if (anim == -1) return;"), true);
+
+        // THE WHOLE POINT: nothing maps an animation to a style. The moment
+        // something does, it is a per-monster table nobody has measured, and
+        // this repo's rule is that such a thing mislabels rather than fails.
+        //
+        // THE FIRST VERSION OF THIS WAS A NEGATIVE REGEX AND IT DID NOT WORK.
+        // It looked for `anim == <number>` next to a style assignment, and the
+        // prove-red mutation wrote `attSeenAnim[0] == 7855` - which the regex
+        // never saw, because it only matched a variable literally called
+        // `anim`. A negative assertion over free-form code is unenforceable:
+        // there are unlimited spellings of the thing being forbidden.
+        //
+        // So it is a POSITIVE instead. Every branch of the style decision
+        // names its basis, so pinning the exact SET of bases makes any new
+        // branch - animation-derived or otherwise - fail here until it is
+        // added deliberately. One number to update, and no way past it.
+        java.util.Set<String> bases = new java.util.TreeSet<>();
+        java.util.regex.Matcher bm = java.util.regex.Pattern
+                .compile("conf = \"([a-z_]+)\"").matcher(tSrc);
+        while (bm.find()) bases.add(bm.group(1));
+        eq("the style decision has exactly the seven known bases and no others",
+                bases.toString(),
+                "[adjacent_attackable_no_projectile, attacker_out_of_melee_range,"
+              + " facing_but_not_attackable, no_attacker, npc_data_sole_style,"
+              + " projectile, projectile_held]");
+
+        // The projectile is paired BACKWARDS onto the newest row, because the
+        // animation starts first. A "first sight of this projectile id" guard
+        // would be wrong - a boss reusing one projectile would never pair.
+        eq("a projectile is paired onto the row that has none yet",
+                tSrc.contains("if (attSeenProj[prev] != -1) return;"), true);
+        eq("and only within two ticks of it",
+                tSrc.contains("if (tick - attSeenTick[prev] > 2) return;"), true);
+        eq("the pairing is called from the projectile handler",
+                tSrc.contains("attLinkProjectile(id, tick);"), true);
+        // Newest first, so the row for the attack just taken is att_seen_0.
+        eq("the log is published newest first",
+                tSrc.contains("(attSeenPos - 1 - i + 2 * ATT_SEEN_MAX) % ATT_SEEN_MAX"), true);
+        eq("and says when nothing has attacked yet",
+                tSrc.contains("nothing_has_attacked_yet"), true);
+        eq("the cap is published, so a truncated log cannot look complete",
+                tSrc.contains("sq.append(\"att_seen_cap=\")"), true);
+
         // THE ORDER. A live projectile must outrank the table, because it is
         // the only thing that can follow a switcher; the table must outrank
         // adjacency, because adjacency can only ever say MELEE.
