@@ -2064,9 +2064,9 @@ public class MlmCheck
              && tSrc.contains("else if (matches > 1) attProjAmbiguous++;"), true);
         // 2.134 counted the failures and never emitted them, which is how a
         // whole trip read as melee-only with nothing saying otherwise.
-        for (String f : new String[]{"att_proj_paired", "att_proj_unsourced",
-                                     "att_proj_ambiguous"})
-            eq("the feed publishes " + f, tSrc.contains("sq.append(\"" + f + "=\")"), true);
+        for (String pf : new String[]{"att_proj_paired", "att_proj_unsourced",
+                                      "att_proj_ambiguous"})
+            eq("the feed publishes " + pf, tSrc.contains("sq.append(\"" + pf + "=\")"), true);
         eq("and each row says how its projectile was placed",
                 tSrc.contains("+ \",proj_src=\" + how"), true);
         eq("and the row it pairs to is matched BY NPC, not by being newest",
