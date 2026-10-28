@@ -2043,6 +2043,32 @@ public class MlmCheck
         // NO SOURCE, NO PAIRING. Falling back to "the newest row" is the bug.
         eq("an unsourced projectile is counted and dropped, never guessed onto a row",
                 tSrc.contains("if (srcId < 0) { attProjUnsourced++; return; }"), true);
+
+        // ---- 2.135: getSourceActor() IS OFTEN NULL ------------------------
+        //
+        // Measured on Josh's second Zulrah trip, after 2.134: every row came
+        // back with_proj=0 including Zulrah at dist 6-10. 2.134 traded a wrong
+        // pairing for NO pairing and called it safe - the same data loss in a
+        // humbler coat. getSourcePoint() places it by tile instead.
+        eq("there is a spatial fallback when the source actor is null",
+                tSrc.contains("WorldPoint sp = p.getSourcePoint();"), true);
+        // A LARGE NPC OCCUPIES A FOOTPRINT. getWorldLocation() is the
+        // south-west corner and Zulrah is 3x3, so an exact tile match would
+        // make this dead code for every boss that matters.
+        eq("and it matches the NPC's whole footprint, not one tile",
+                tSrc.contains("if (dx < 0 || dy < 0 || dx >= size || dy >= size) continue;"), true);
+        // EXACTLY ONE CANDIDATE OR NOTHING - ambiguity is how 2.134's rows
+        // got contaminated and must not be resolved by picking.
+        eq("two candidates is ambiguous and pairs nothing",
+                tSrc.contains("if (matches == 1 && found >= 0)")
+             && tSrc.contains("else if (matches > 1) attProjAmbiguous++;"), true);
+        // 2.134 counted the failures and never emitted them, which is how a
+        // whole trip read as melee-only with nothing saying otherwise.
+        for (String f : new String[]{"att_proj_paired", "att_proj_unsourced",
+                                     "att_proj_ambiguous"})
+            eq("the feed publishes " + f, tSrc.contains("sq.append(\"" + f + "=\")"), true);
+        eq("and each row says how its projectile was placed",
+                tSrc.contains("+ \",proj_src=\" + how"), true);
         eq("and the row it pairs to is matched BY NPC, not by being newest",
                 tSrc.contains("if (attSeenNpcId[ix] != srcId) continue;"), true);
         // The old correlation window and its field are gone: a number nobody

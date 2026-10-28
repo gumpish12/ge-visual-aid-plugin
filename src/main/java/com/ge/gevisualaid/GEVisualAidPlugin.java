@@ -1859,7 +1859,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.134";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.135";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2508,6 +2508,8 @@ public class GEVisualAidPlugin extends Plugin
     private final java.util.Map<Integer, Integer> attLastAnimTickByNpc =
             new java.util.HashMap<>();
     private volatile int attProjUnsourced = 0;
+    private volatile int attProjAmbiguous = 0;
+    private volatile int attProjPaired    = 0;
     private volatile String attLogBlock = "att_log_state=no_reading_yet\n";
 
     private volatile String attSummaryBlock = "att_summary_state=no_reading_yet\n";
@@ -3434,17 +3436,74 @@ public class GEVisualAidPlugin extends Plugin
         if (attSeenCount == 0) return;
 
         int srcId = -1;
+        String how = "";
         try
         {
             Actor src = p.getSourceActor();
-            if (src instanceof NPC) srcId = safeNpcId((NPC) src);
+            if (src instanceof NPC) { srcId = safeNpcId((NPC) src); how = "actor"; }
         }
         catch (Throwable ignored) { }
-        // NO SOURCE, NO PAIRING. Falling back to "the newest row" is exactly
-        // the bug above. An unpaired row reads as an attack with no projectile
-        // and that is wrong too - but it is wrong in the direction that says
-        // "nothing is known", which is the only safe direction here.
+
+        // 2.135 — AND A SPATIAL FALLBACK, BECAUSE getSourceActor() IS OFTEN
+        // NULL. Measured on Josh's second Zulrah trip, after 2.134 shipped:
+        // every row came back with_proj=0, including Zulrah at dist 6-10 -
+        // which she plainly was not meleeing him from. 2.134 traded a WRONG
+        // pairing for NO pairing and called that safe; it is not, it is the
+        // same data loss wearing a humbler face.
+        //
+        // getSourcePoint() gives the tile the projectile left from, so the
+        // source can be found by POSITION. That is still a correlation, but a
+        // spatial one, and it separates Zulrah from the snakelings beside her
+        // where "most recent animation" could not.
+        //
+        // EXACTLY ONE CANDIDATE OR NOTHING. Two NPCs overlapping the source
+        // tile is genuine ambiguity and guessing between them is how 2.134's
+        // rows got contaminated in the first place.
+        if (srcId < 0)
+        {
+            try
+            {
+                WorldPoint sp = p.getSourcePoint();
+                WorldView wv = client.getTopLevelWorldView();
+                if (sp != null && wv != null)
+                {
+                    int found = -1, matches = 0;
+                    for (NPC n : wv.npcs())
+                    {
+                        if (n == null) continue;
+                        WorldPoint w = n.getWorldLocation();
+                        if (w == null || w.getPlane() != sp.getPlane()) continue;
+                        // A LARGE NPC OCCUPIES A FOOTPRINT, NOT A TILE.
+                        // getWorldLocation() is its south-west corner, and
+                        // Zulrah is 3x3 - so an exact tile match would never
+                        // find her and this fallback would be dead code for
+                        // every boss that matters.
+                        int size = 1;
+                        try
+                        {
+                            NPCComposition c = npcComp(n);
+                            if (c != null && c.getSize() > 0) size = c.getSize();
+                        }
+                        catch (Throwable ignored2) { }
+                        int dx = sp.getX() - w.getX();
+                        int dy = sp.getY() - w.getY();
+                        if (dx < 0 || dy < 0 || dx >= size || dy >= size) continue;
+                        matches++;
+                        found = safeNpcId(n);
+                    }
+                    if (matches == 1 && found >= 0) { srcId = found; how = "source_tile"; }
+                    else if (matches > 1) attProjAmbiguous++;
+                }
+            }
+            catch (Throwable ignored) { }
+        }
+
+        // STILL NOTHING, STILL NO PAIRING - but counted and PUBLISHED now, so
+        // "no projectile" can be told from "a projectile nobody could place".
+        // 2.134 counted this and never emitted it, which is how a whole Zulrah
+        // trip read as melee-only without anything saying otherwise.
         if (srcId < 0) { attProjUnsourced++; return; }
+        attProjPaired++;
 
         // The most recent animation BY THAT NPC, searched back through the
         // ring rather than assuming it is the newest entry.
@@ -3456,7 +3515,7 @@ public class GEVisualAidPlugin extends Plugin
             if (tick >= 0 && attSeenTick[ix] >= 0 && tick - attSeenTick[ix] > 4)
                 return;                              // its last animation is stale
             attSeenProj[ix] = projId;
-            attSeen[ix] = attSeen[ix] + ",proj=" + projId;
+            attSeen[ix] = attSeen[ix] + ",proj=" + projId + ",proj_src=" + how;
             if (attLogOn())
                 NpcAttackLog.recordProjectile(srcId, attSeenAnim[ix], projId);
             return;
@@ -7429,6 +7488,12 @@ public class GEVisualAidPlugin extends Plugin
                 }
                 sq.append("att_seen_count=").append(attSeenCount).append("\n");
                 sq.append("att_seen_cap=").append(ATT_SEEN_MAX).append("\n");
+                // 2.135 - how the pairing is actually going. Three numbers
+                // that were invisible while a whole Zulrah trip recorded
+                // zero projectiles: paired, unplaceable, and ambiguous.
+                sq.append("att_proj_paired=").append(attProjPaired).append("\n");
+                sq.append("att_proj_unsourced=").append(attProjUnsourced).append("\n");
+                sq.append("att_proj_ambiguous=").append(attProjAmbiguous).append("\n");
                 sq.append("att_seen_state=")
                   .append(attSeenCount == 0 ? "nothing_has_attacked_yet" : "ok")
                   .append("\n");
