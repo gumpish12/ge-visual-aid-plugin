@@ -1859,7 +1859,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.133";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.134";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2499,8 +2499,15 @@ public class GEVisualAidPlugin extends Plugin
     // can be shorter than any attack speed. The gap is published RAW and
     // nothing concludes from it, because "which cadence is an attack" is per
     // monster and per weapon and nobody here has measured one.
-    private volatile int attLastAnimNpc  = -1;
-    private volatile int attLastAnimTick = -1;
+    // 2.134 - PER NPC, NOT ONE SLOT. 2.133 kept a single last-NPC/last-tick
+    // pair, which works with one attacker and is useless in a crowd: at Zulrah
+    // consecutive animations come from different NPCs, so the gap was -1 on
+    // every single row Josh collected. A one-slot cache for a per-entity fact
+    // is the same mistake as the one-slot projectile pairing above, found in
+    // the same output.
+    private final java.util.Map<Integer, Integer> attLastAnimTickByNpc =
+            new java.util.HashMap<>();
+    private volatile int attProjUnsourced = 0;
     private volatile String attLogBlock = "att_log_state=no_reading_yet\n";
 
     private volatile String attSummaryBlock = "att_summary_state=no_reading_yet\n";
@@ -3359,11 +3366,16 @@ public class GEVisualAidPlugin extends Plugin
 
             // 2.133 - the gap since this same NPC last animated at us.
             int nid = safeNpcId(n);
-            int gap = (nid >= 0 && nid == attLastAnimNpc
-                       && attLastAnimTick >= 0 && tick >= 0)
-                    ? tick - attLastAnimTick : -1;
-            attLastAnimNpc  = nid;
-            attLastAnimTick = tick;
+            int gap = -1;
+            if (nid >= 0 && tick >= 0)
+            {
+                Integer last = attLastAnimTickByNpc.get(nid);
+                if (last != null && last >= 0) gap = tick - last;
+                attLastAnimTickByNpc.put(nid, tick);
+                // A runaway stop: one entry per NPC ID ever seen attacking,
+                // which is bounded in practice but not by anything here.
+                if (attLastAnimTickByNpc.size() > 256) attLastAnimTickByNpc.clear();
+            }
 
             int slot = attSeenPos;
             attSeenAnim[slot] = anim;
@@ -3398,30 +3410,57 @@ public class GEVisualAidPlugin extends Plugin
         try { return a.getGraphic(); } catch (Throwable t) { return -1; }
     }
 
-    // 2.131 — pair a projectile with the animation that launched it.
+    // 2.134 — pair a projectile with the animation that launched it, BY ASKING
+    // THE PROJECTILE WHO FIRED IT.
     //
-    // THE ANIMATION COMES FIRST AND THE PROJECTILE FOLLOWS, so the pairing
-    // has to be done backwards, onto the newest row. It is a CORRELATION and
-    // the window is published as part of the row rather than hidden: two
-    // ticks, because a projectile is created on the tick after the attack
-    // animation starts. A row that keeps proj=-1 is the interesting one -
-    // that is an attack with no projectile at all, which is either real melee
-    // or exactly the "ranged melee attack" Josh is asking about.
-    private void attLinkProjectile(int projId, int tick)
+    // 2.131 and 2.132 guessed: stamp it onto the newest row within two ticks.
+    // That is only ever right with ONE attacker, and Josh's first Zulrah trip
+    // proved it - his catalogue came back with
+    //
+    //   npc=Zulrah,anim=5069,proj=[1044, 1046, 2487, 2489]
+    //
+    // four projectile ids on one animation, because snakelings were firing at
+    // the same time and every projectile landed on whichever NPC had animated
+    // most recently. The rows looked authoritative and were cross-contaminated
+    // nonsense - the mislabel-rather-than-fail trap, self-inflicted.
+    //
+    // Projectile.getSourceActor() has been there the whole time. Checked with
+    // javap against runelite-api 1.13.4. A fact replaces the correlation:
+    // there is no window to tune, no "newest row", and a crowd cannot confuse
+    // it. The window and the proj_after_ticks field are gone with it, because
+    // a number nobody needs is a number someone will later trust.
+    private void attLinkProjectile(Projectile p, int projId, int tick)
     {
         if (attSeenCount == 0) return;
-        int prev = (attSeenPos - 1 + ATT_SEEN_MAX) % ATT_SEEN_MAX;
-        if (attSeenProj[prev] != -1) return;                 // already paired
-        if (tick < 0 || attSeenTick[prev] < 0) return;
-        if (tick - attSeenTick[prev] > 2) return;            // too late to be this one
-        attSeenProj[prev] = projId;
-        attSeen[prev] = attSeen[prev] + ",proj=" + projId
-                + ",proj_after_ticks=" + (tick - attSeenTick[prev]);
-        // 2.132 - the catalogue learns the pairing too, keyed on the same
-        // NPC and animation the row was recorded under rather than on
-        // whatever is attacking now.
-        if (attLogOn())
-            NpcAttackLog.recordProjectile(attSeenNpcId[prev], attSeenAnim[prev], projId);
+
+        int srcId = -1;
+        try
+        {
+            Actor src = p.getSourceActor();
+            if (src instanceof NPC) srcId = safeNpcId((NPC) src);
+        }
+        catch (Throwable ignored) { }
+        // NO SOURCE, NO PAIRING. Falling back to "the newest row" is exactly
+        // the bug above. An unpaired row reads as an attack with no projectile
+        // and that is wrong too - but it is wrong in the direction that says
+        // "nothing is known", which is the only safe direction here.
+        if (srcId < 0) { attProjUnsourced++; return; }
+
+        // The most recent animation BY THAT NPC, searched back through the
+        // ring rather than assuming it is the newest entry.
+        for (int i = 0; i < attSeenCount; i++)
+        {
+            int ix = (attSeenPos - 1 - i + 2 * ATT_SEEN_MAX) % ATT_SEEN_MAX;
+            if (attSeenNpcId[ix] != srcId) continue;
+            if (attSeenProj[ix] != -1) return;        // already paired
+            if (tick >= 0 && attSeenTick[ix] >= 0 && tick - attSeenTick[ix] > 4)
+                return;                              // its last animation is stale
+            attSeenProj[ix] = projId;
+            attSeen[ix] = attSeen[ix] + ",proj=" + projId;
+            if (attLogOn())
+                NpcAttackLog.recordProjectile(srcId, attSeenAnim[ix], projId);
+            return;
+        }
     }
 
     // 2.132 - the catalogue needs BOTH switches. The attack-style box is what
@@ -3518,7 +3557,7 @@ public class GEVisualAidPlugin extends Plugin
             // same projectile for its next attack would then never pair.
             int tick = -1;
             try { tick = client.getTickCount(); } catch (Throwable ignored2) { }
-            attLinkProjectile(id, tick);
+            attLinkProjectile(p, id, tick);
         }
         catch (Throwable ignored) { }
     }
@@ -14968,6 +15007,17 @@ public class GEVisualAidPlugin extends Plugin
 
             StringBuilder r = new StringBuilder(1024);
             r.append("plugin_output_version=").append(PLUGIN_OUTPUT_VERSION).append("\n");
+
+            // 2.134 - ?reset=yes throws the catalogue away. Spelled out rather
+            // than a bare ?reset, because this is the one action on this page
+            // that destroys data and a stray link must not fire it.
+            String q = ex.getRequestURI().getRawQuery();
+            if (q != null && q.contains("reset=yes"))
+            {
+                String what = NpcAttackLog.reset();
+                attLogFlush(true);
+                r.append("att_log_reset=").append(what).append("\n");
+            }
 
             boolean on;
             try { on = config.attackStyleEnabled(); } catch (Throwable t) { on = false; }

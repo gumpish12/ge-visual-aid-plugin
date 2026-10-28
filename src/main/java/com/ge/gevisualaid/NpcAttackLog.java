@@ -381,6 +381,27 @@ final class NpcAttackLog
     static String fileName() { return FILE; }
 
     /**
+     * Throw the whole catalogue away.
+     *
+     * Needed because 2.131-2.133 attributed projectiles to whichever NPC
+     * animated last, so any row collected in a crowd has other monsters'
+     * projectiles in it - Zulrah came back with four ids on one animation.
+     * Those rows look authoritative and are wrong, and there is no way to
+     * separate the good from the bad after the fact.
+     *
+     * DESTRUCTIVE AND DELIBERATE: only reachable from /attack?reset=yes, and
+     * it returns what it discarded so the reply is evidence rather than a
+     * cheerful nothing.
+     */
+    static synchronized String reset()
+    {
+        int n = ROWS.size();
+        ROWS.clear();
+        dirty = true;                 // so the empty state reaches disk
+        return "discarded " + n + " row(s)";
+    }
+
+    /**
      * This animation's share of everything that NPC has been seen to do.
      *
      * NOT STORED, DERIVED. Storing it would be a second copy of a number that

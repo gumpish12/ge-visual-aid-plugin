@@ -1890,11 +1890,14 @@ public class MlmCheck
         // animation starts first. A "first sight of this projectile id" guard
         // would be wrong - a boss reusing one projectile would never pair.
         eq("a projectile is paired onto the row that has none yet",
-                tSrc.contains("if (attSeenProj[prev] != -1) return;"), true);
-        eq("and only within two ticks of it",
-                tSrc.contains("if (tick - attSeenTick[prev] > 2) return;"), true);
+                tSrc.contains("if (attSeenProj[ix] != -1) return;"), true);
+        // 2.134 - the staleness guard moved onto the row matched BY NPC, and
+        // widened to four ticks because that row is now definitely the right
+        // monster's and only needs to exclude a genuinely old animation.
+        eq("a stale animation is not paired to",
+                tSrc.contains("tick - attSeenTick[ix] > 4"), true);
         eq("the pairing is called from the projectile handler",
-                tSrc.contains("attLinkProjectile(id, tick);"), true);
+                tSrc.contains("attLinkProjectile(p, id, tick);"), true);
         // Newest first, so the row for the attack just taken is att_seen_0.
         eq("the log is published newest first",
                 tSrc.contains("(attSeenPos - 1 - i + 2 * ATT_SEEN_MAX) % ATT_SEEN_MAX"), true);
@@ -2027,6 +2030,43 @@ public class MlmCheck
                 ProjectileStyles.styleOf(2948), "MAGIC");
         eq("and its never-projectiled animation was NOT guessed at",
                 tSrc.contains("11568") || aSrc.contains("11568"), false);
+
+        // ---- 2.134: ASK THE PROJECTILE WHO FIRED IT ------------------------
+        //
+        // 2.131-2.133 stamped a projectile onto whichever NPC animated most
+        // recently. Right with one attacker, nonsense in a crowd - Josh's
+        // first Zulrah trip produced npc=Zulrah,anim=5069,proj=[1044, 1046,
+        // 2487, 2489] because snakelings were firing at the same time. The
+        // rows looked authoritative and were cross-contaminated.
+        eq("the projectile's own source actor decides the pairing",
+                tSrc.contains("Actor src = p.getSourceActor();"), true);
+        // NO SOURCE, NO PAIRING. Falling back to "the newest row" is the bug.
+        eq("an unsourced projectile is counted and dropped, never guessed onto a row",
+                tSrc.contains("if (srcId < 0) { attProjUnsourced++; return; }"), true);
+        eq("and the row it pairs to is matched BY NPC, not by being newest",
+                tSrc.contains("if (attSeenNpcId[ix] != srcId) continue;"), true);
+        // The old correlation window and its field are gone: a number nobody
+        // needs is a number someone will later trust.
+        // THE EMITTED FIELD, not the word. The first form asserted the bare
+        // name was absent and failed a CORRECT file - the comment explaining
+        // its removal mentions it. FIFTH weak key of this exact shape, and
+        // this one is a negative as well, so it failed in the direction that
+        // blocks a true statement rather than passing a false one.
+        eq("the two-tick correlation window is gone",
+                tSrc.contains("\",proj_after_ticks=\""), false);
+
+        // The gap was per-SESSION-last-NPC, which is -1 on every row in a
+        // crowd - and it was, on all ten of Josh's.
+        eq("the animation gap is tracked per NPC, not in one slot",
+                tSrc.contains("attLastAnimTickByNpc"), true);
+        eq("and that map has a runaway stop",
+                tSrc.contains("attLastAnimTickByNpc.size() > 256"), true);
+
+        // Destructive, so it must be spelled out and must report what it did.
+        eq("the catalogue can be reset, but only by an explicit reset=yes",
+                tSrc.contains("q.contains(\"reset=yes\")"), true);
+        eq("and the reset says what it discarded rather than nothing",
+                aSrc.contains("return \"discarded \" + n + \" row(s)\";"), true);
 
         // THE ORDER. A live projectile must outrank the table, because it is
         // the only thing that can follow a switcher; the table must outrank
