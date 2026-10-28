@@ -62,7 +62,7 @@ final class NpcAttackLog
     static final int MIN_SAMPLES = 12;
 
     private static final String FILE    = "npc_attacks.txt";
-    private static final String VERSION = "1";
+    private static final String VERSION = "2";   // 2.133 added min_gap/max_gap
 
     static final class Row
     {
@@ -70,12 +70,43 @@ final class NpcAttackLog
         String name = "";
         int    seen, withProj;
         int    minDist = -1, maxDist = -1;
+        // 2.133 — the cadence this animation appears on. An attack fires on
+        // the monster's own interval; a BLOCK fires when our weapon lands, so
+        // its gaps are ragged and can be shorter than any attack speed. Raw,
+        // and nothing concludes from it: "which cadence is an attack" is per
+        // monster and per weapon and nobody here has measured one.
+        int    minGap = -1, maxGap = -1;
         final TreeSet<Integer> projIds = new TreeSet<>();
     }
 
     // LinkedHashMap so the file keeps a stable order between writes and a
     // diff of two runs is readable.
     private static final Map<String, Row> ROWS = new LinkedHashMap<>();
+
+    // 2.133 — the file to load from, handed over by the plugin so this class
+    // never has to know about config. Set once; ensureLoaded() uses it so a
+    // load can happen on first use rather than only at startUp.
+    private static volatile File source = null;
+
+    static void setSource(File f)
+    {
+        if (f != null) source = f;
+    }
+
+    /**
+     * Idempotent, and safe to call on every record.
+     *
+     * WITH NO SOURCE YET IT DOES NOTHING AND DOES NOT LATCH. Calling
+     * load(null) here would set loaded=true and state=no_output_folder, and
+     * the catalogue would then never read the file for the rest of the
+     * session - which is the exact truncation bug this method was added to
+     * fix, reintroduced one line further down.
+     */
+    static synchronized void ensureLoaded()
+    {
+        if (loaded || source == null) return;
+        load(source);
+    }
 
     private static boolean loaded = false;
     private static volatile boolean dirty = false;
@@ -94,9 +125,17 @@ final class NpcAttackLog
     // -----------------------------------------------------------------------
     // Recording. Called on the client thread from onAnimationChanged.
     // -----------------------------------------------------------------------
-    static synchronized void record(int npcId, int anim, String name, int dist)
+    static synchronized void record(int npcId, int anim, String name, int dist, int gap)
     {
         if (npcId < 0 || anim < 0) return;
+        // 2.133 - ENSURE-LOADED, NOT LOAD-AT-STARTUP. Josh's first test found
+        // this: he ticked the setting after RuneLite was already running, so
+        // startUp's load never fired, `loaded` stayed false, and the first
+        // flush would have written ONLY this session's rows over whatever was
+        // on disk. The class exists to accumulate and it would have silently
+        // truncated instead. A one-shot load at startup is wrong for anything
+        // behind a setting that can be ticked mid-session.
+        ensureLoaded();
         Row r = ROWS.get(key(npcId, anim));
         if (r == null)
         {
@@ -111,6 +150,11 @@ final class NpcAttackLog
         {
             if (r.minDist < 0 || dist < r.minDist) r.minDist = dist;
             if (dist > r.maxDist) r.maxDist = dist;
+        }
+        if (gap >= 0)
+        {
+            if (r.minGap < 0 || gap < r.minGap) r.minGap = gap;
+            if (gap > r.maxGap) r.maxGap = gap;
         }
         dirty = true;
     }
@@ -169,6 +213,23 @@ final class NpcAttackLog
         sb.append("att_log_min_samples=").append(MIN_SAMPLES).append("\n");
         sb.append("att_log_cap=").append(cap).append("\n");
 
+        // 2.133 — SHARE OF THAT NPC'S ATTACKS. Josh: "the frost nagua did a
+        // special attack every so often, which i had to avoid. im happy to
+        // manually deal with those."
+        //
+        // A rare animation and a main attack look identical in a seen count
+        // until you know the total, and the difference is the whole point: a
+        // special is something to AVOID and a main attack is something to
+        // pray. share=3% beside share=94% says which is which at a glance,
+        // where seen=2 beside seen=15 does not - that reads as "needs more
+        // sampling" when it may already be fully sampled and simply rare.
+        Map<Integer, Integer> totals = new LinkedHashMap<>();
+        for (Row r : ROWS.values())
+        {
+            Integer t = totals.get(r.npcId);
+            totals.put(r.npcId, (t == null ? 0 : t) + r.seen);
+        }
+
         List<Row> all = new ArrayList<>(ROWS.values());
         Collections.sort(all, (a, b) -> b.seen - a.seen);
         int i = 0;
@@ -180,9 +241,11 @@ final class NpcAttackLog
               .append(",id=").append(r.npcId)
               .append(",anim=").append(r.anim)
               .append(",seen=").append(r.seen)
+              .append(",share=").append(sharePct(r, totals)).append('%')
               .append(",with_proj=").append(r.withProj)
               .append(",proj=").append(r.projIds.isEmpty() ? "none" : r.projIds)
               .append(",dist=").append(r.minDist).append('-').append(r.maxDist)
+              .append(",gap=").append(r.minGap).append('-').append(r.maxGap)
               .append(",verdict=").append(verdict(r))
               .append('\n');
             i++;
@@ -222,7 +285,22 @@ final class NpcAttackLog
                             if (!s.trim().isEmpty()) r.projIds.add(Integer.parseInt(s.trim()));
                     r.minDist = Integer.parseInt(p[5].trim());
                     r.maxDist = Integer.parseInt(p[6].trim());
-                    r.name    = p[7];
+                    // 2.133 ADDED TWO COLUMNS, AND A v1 FILE MUST STILL LOAD.
+                    // The name moved from index 7 to index 9. Reading it by a
+                    // fixed index would have put a NUMBER in the name column
+                    // for every old row and lost the gaps for every new one -
+                    // so the column count decides, which is what the version
+                    // header in the file was written for.
+                    if (p.length >= 10)
+                    {
+                        r.minGap = Integer.parseInt(p[7].trim());
+                        r.maxGap = Integer.parseInt(p[8].trim());
+                        r.name   = p[9];
+                    }
+                    else
+                    {
+                        r.name = p[7];      // v1: no gaps were recorded
+                    }
                     ROWS.put(key(r.npcId, r.anim), r);
                 }
                 catch (NumberFormatException e) { bad++; }
@@ -244,7 +322,8 @@ final class NpcAttackLog
         dirty = false;
         StringBuilder sb = new StringBuilder(4096);
         sb.append("# GEVisualAid npc_attacks v").append(VERSION).append('\n');
-        sb.append("# npc_id\tanim\tseen\twith_proj\tproj_ids\tmin_dist\tmax_dist\tname\n");
+        sb.append("# npc_id\tanim\tseen\twith_proj\tproj_ids\tmin_dist\tmax_dist"
+                + "\tmin_gap\tmax_gap\tname\n");
         for (Row r : ROWS.values())
         {
             StringBuilder ids = new StringBuilder();
@@ -257,6 +336,7 @@ final class NpcAttackLog
               .append(r.seen).append('\t').append(r.withProj).append('\t')
               .append(ids).append('\t')
               .append(r.minDist).append('\t').append(r.maxDist).append('\t')
+              .append(r.minGap).append('\t').append(r.maxGap).append('\t')
               .append(r.name == null ? "" : r.name.replace('\t', ' ').replace('\n', ' '))
               .append('\n');
         }
@@ -275,6 +355,13 @@ final class NpcAttackLog
         {
             File tmp = new File(f.getParentFile(), FILE + ".tmp");
             Files.write(tmp.toPath(), body.getBytes(StandardCharsets.UTF_8));
+            // 2.133 - the path is recorded HERE as well as in load(). Josh's
+            // first test showed att_log_file=(none) while rows were being
+            // written: path was only ever set by load(), which had not run.
+            // A page that cannot name the file it is writing is the "configured
+            // but not working" reading all over again - it looked like nothing
+            // was being saved when in fact something was.
+            path = f.getAbsolutePath();
             try { Files.move(tmp.toPath(), f.toPath(),
                     java.nio.file.StandardCopyOption.REPLACE_EXISTING); }
             catch (Throwable mv)
@@ -292,4 +379,20 @@ final class NpcAttackLog
     }
 
     static String fileName() { return FILE; }
+
+    /**
+     * This animation's share of everything that NPC has been seen to do.
+     *
+     * NOT STORED, DERIVED. Storing it would be a second copy of a number that
+     * is already the sum of the rows, and the two would drift the first time
+     * one row was updated without the other - the portfolio_items lesson, that
+     * a total which is a sum should be the terms taken apart rather than a
+     * separate calculation.
+     */
+    private static int sharePct(Row r, Map<Integer, Integer> totals)
+    {
+        Integer t = totals.get(r.npcId);
+        if (t == null || t <= 0) return -1;
+        return (int) Math.round(100.0 * r.seen / t);
+    }
 }

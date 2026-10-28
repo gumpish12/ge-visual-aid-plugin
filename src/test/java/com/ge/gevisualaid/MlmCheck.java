@@ -1628,7 +1628,11 @@ public class MlmCheck
         // The count is asserted, not just "> 0": the table is transcribed by
         // hand, and a row lost in an edit leaves a table that still works for
         // everything except the boss that went missing.
-        eq("the table has all 76 ids", pSize.invoke(null), 76);
+        // 77 since 2.133: Frost Nagua's magic projectile 2948, measured from
+        // the attack catalogue's first run rather than lifted from another
+        // plugin. The pin is here so an id cannot be LOST silently; it is
+        // meant to be bumped deliberately when one is added.
+        eq("the table has all 77 ids", pSize.invoke(null), 77);
 
         // Measured samples, one per style, from three different bosses - so a
         // single wrong column cannot pass. Zulrah's two are the pair most
@@ -1965,6 +1969,64 @@ public class MlmCheck
         // A count alone cannot tell "24 of 50 parsed" from "24 were written".
         eq("unreadable lines in the file are named, not silently dropped",
                 aSrc.contains("ok_with_"), true);
+
+        // ---- 2.133: THE BUGS JOSH'S FIRST TEST FOUND ----------------------
+        //
+        // He ticked the setting after RuneLite was running, so startUp's
+        // one-shot load never fired and the first flush would have written
+        // ONLY that session's rows over the file. att_log_file read "(none)"
+        // while rows were being written, which is how it surfaced.
+        eq("the load is ensured on every record, not only at startUp",
+                aSrc.contains("ensureLoaded();"), true);
+        eq("and ensureLoaded does NOT latch when there is no file yet",
+                aSrc.contains("if (loaded || source == null) return;"), true);
+        eq("the path is recorded by the writer too, so it cannot report (none)",
+                aSrc.matches("(?s).*static void write\\(File f, String body\\).*"
+                           + "path = f\\.getAbsolutePath\\(\\);.*"), true);
+        // Once a tick, not once per animation - attLogFile() reads config and
+        // calls mkdirs.
+        eq("the source is handed over once a tick, not on every swing",
+                tSrc.contains("NpcAttackLog.setSource(attLogFile());")
+             && !tSrc.contains("NpcAttackLog.setSource(attLogFile());\n                NpcAttackLog.record"), true);
+
+        // THE GAP, which is how an attack is told from a BLOCK animation - a
+        // defend animation passes every gate this log has and would otherwise
+        // land as a mystery never_projectiled attack, which is the one verdict
+        // that matters most.
+        eq("the gap between an NPC's animations is recorded",
+                tSrc.contains("+ \",gap=\" + gap"), true);
+        eq("and kept per row as a range",
+                aSrc.contains("r.minGap") && aSrc.contains("r.maxGap"), true);
+        // SCOPED TO verdict(), NOT THE WHOLE FILE. The first version asserted
+        // that "minGap <" appears nowhere, and it failed a correct file: that
+        // text is the min-TRACKING in record(), which is exactly what the gap
+        // is for. A negative over a whole file is the same mistake as the
+        // animation-mapping assertion earlier today - what is actually wanted
+        // is that the VERDICT does not read the gap, so that is what is
+        // checked, in the one method that draws conclusions.
+        java.util.regex.Matcher vm = java.util.regex.Pattern
+                .compile("static String verdict\\(Row r\\)\\s*\\{(.*?)\\n    \\}",
+                         java.util.regex.Pattern.DOTALL).matcher(aSrc);
+        eq("verdict() is found", vm.find(), true);
+        String vBody = vm.reset().find() ? vm.group(1) : "";
+        eq("nothing concludes from the gap - verdict never reads it",
+                !vBody.contains("Gap"), true);
+
+        // A v1 FILE MUST STILL LOAD. The name column moved from 7 to 9, so a
+        // fixed index would have put a NUMBER in every old row's name and
+        // lost the gaps on every new one.
+        eq("the loader decides by column count, so an older file still reads",
+                aSrc.contains("if (p.length >= 10)") && aSrc.contains("r.name = p[7];"), true);
+        eq("and the file carries its format version",
+                aSrc.contains("VERSION = \"2\""), true);
+
+        // The measured entry from that run: Frost Nagua animation 11566 threw
+        // projectile 2948 fifteen times out of fifteen, and Josh named the
+        // style. The first row in this table from our OWN observation.
+        eq("Frost Nagua's magic projectile is in the table, measured here",
+                ProjectileStyles.styleOf(2948), "MAGIC");
+        eq("and its never-projectiled animation was NOT guessed at",
+                tSrc.contains("11568") || aSrc.contains("11568"), false);
 
         // THE ORDER. A live projectile must outrank the table, because it is
         // the only thing that can follow a switcher; the table must outrank

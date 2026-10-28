@@ -101,6 +101,22 @@ final class ProjectileStyles
         clash += put(m, "Wardens divine",  new int[]{2208}, new int[]{2206}, new int[]{2204});
         clash += put(m, "Whisperer",       new int[]{2445}, new int[]{2444}, new int[]{});
         clash += put(m, "Xarth",           new int[]{4034}, new int[]{4374}, new int[]{});
+        // MEASURED HERE, NOT LIFTED FROM THE PROJECTILE OVERRIDE PLUGIN.
+        // 2.133, from the attack catalogue's first real run on Josh's account,
+        // 2026-10-28: Frost Nagua (npc 13788), animation 11566, fifteen
+        // samples, projectile 2948 on every single one -
+        //   verdict=always_projectile:2948:not_in_table
+        // and Josh fighting it: "then a mage frost nagua". So the id is its
+        // magic attack. This is the first entry in this table that came from
+        // the suite's own observation rather than someone else's source, and
+        // it is exactly the chain the catalogue was built to produce: an
+        // animation always paired with one projectile, plus the operator
+        // naming the style once.
+        //
+        // Its OTHER animation, 11568, carried no projectile across 2 samples
+        // and is deliberately NOT here. Two samples is nothing, and a melee
+        // attack and a block animation look identical from this distance.
+        clash += put(m, "Frost Nagua",     new int[]{2948}, new int[]{},     new int[]{});
         clash += put(m, "Zebak",           new int[]{2181}, new int[]{2187, 2188, 2189, 2190}, new int[]{});
         clash += put(m, "Zebak rocks",     new int[]{2176, 2177}, new int[]{2178, 2179}, new int[]{});
         clash += put(m, "Zulrah",          new int[]{1046}, new int[]{1044}, new int[]{});

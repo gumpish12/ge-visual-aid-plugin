@@ -1859,7 +1859,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.132";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.133";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2487,6 +2487,20 @@ public class GEVisualAidPlugin extends Plugin
     private static final long ATT_LOG_FLUSH_MS = 30_000;
     private static final int  ATT_LOG_SHOW     = 40;   // runaway stop, not a budget
     private volatile long attLogFlushedMs = 0;
+    // 2.133 — THE GAP BETWEEN ONE NPC'S ANIMATIONS, WHICH IS HOW AN ATTACK IS
+    // TOLD FROM A BLOCK. An NPC plays a defend animation when WE hit it, and
+    // that animation passes every gate the attack log has: it is an NPC, it is
+    // interacting with us, and its animation is not -1. So a block lands in
+    // the catalogue looking exactly like a mystery attack with no projectile -
+    // which is the one verdict Josh is hunting, so polluting it matters.
+    //
+    // An attack fires on the monster's own cadence (4-5 ticks, in an attack
+    // slot). A block fires when our weapon lands, so its gaps are ragged and
+    // can be shorter than any attack speed. The gap is published RAW and
+    // nothing concludes from it, because "which cadence is an attack" is per
+    // monster and per weapon and nobody here has measured one.
+    private volatile int attLastAnimNpc  = -1;
+    private volatile int attLastAnimTick = -1;
     private volatile String attLogBlock = "att_log_state=no_reading_yet\n";
 
     private volatile String attSummaryBlock = "att_summary_state=no_reading_yet\n";
@@ -3343,6 +3357,14 @@ public class GEVisualAidPlugin extends Plugin
             }
             catch (Throwable ignored) { }
 
+            // 2.133 - the gap since this same NPC last animated at us.
+            int nid = safeNpcId(n);
+            int gap = (nid >= 0 && nid == attLastAnimNpc
+                       && attLastAnimTick >= 0 && tick >= 0)
+                    ? tick - attLastAnimTick : -1;
+            attLastAnimNpc  = nid;
+            attLastAnimTick = tick;
+
             int slot = attSeenPos;
             attSeenAnim[slot] = anim;
             attSeenTick[slot] = tick;
@@ -3352,6 +3374,7 @@ public class GEVisualAidPlugin extends Plugin
                     + ",id=" + safeNpcId(n)
                     + ",anim=" + anim
                     + ",dist=" + d
+                    + ",gap=" + gap
                     + ",gfx=" + safeActorGraphic(a)
                     + ",attackable=" + npcIsAttackable(n);
             attSeenPos   = (slot + 1) % ATT_SEEN_MAX;
@@ -3364,7 +3387,7 @@ public class GEVisualAidPlugin extends Plugin
             {
                 attSeenNpcId[slot] = safeNpcId(n);
                 NpcAttackLog.record(safeNpcId(n), anim,
-                        n.getName() == null ? "" : n.getName(), d);
+                        n.getName() == null ? "" : n.getName(), d, gap);
             }
         }
         catch (Throwable ignored) { }
@@ -7375,6 +7398,15 @@ public class GEVisualAidPlugin extends Plugin
                 // 2.132 - the cumulative catalogue, and its periodic flush.
                 // Both here because this is the client thread and this block
                 // only runs when the attack-style box is on.
+                // 2.133 - the source goes in HERE, once a tick, not once per
+                // animation: attLogFile() reads config and calls mkdirs, which
+                // has no business running on every swing. The recorder then
+                // only has to call ensureLoaded().
+                if (attLogOn())
+                {
+                    NpcAttackLog.setSource(attLogFile());
+                    NpcAttackLog.ensureLoaded();
+                }
                 attLogBlock = attLogOn()
                         ? NpcAttackLog.block(ATT_LOG_SHOW)
                         : "att_log_state=off - tick \"NPC attack catalogue\"\n";
@@ -14991,6 +15023,19 @@ public class GEVisualAidPlugin extends Plugin
                    + " verdict=always_projectile:<id>:<style> is a chain with"
                    + " no guess in it. Nothing is concluded below "
                    + NpcAttackLog.MIN_SAMPLES + " samples.\n");
+            r.append("# share= is that animation's share of everything the NPC"
+                   + " has been seen to do, which is what separates a RARE"
+                   + " SPECIAL from a main attack - seen=2 beside seen=15"
+                   + " reads as undersampled when it may be fully sampled and"
+                   + " simply rare. gap= is the tick spacing it appears on: an"
+                   + " attack lands on the monster's own cadence, a BLOCK"
+                   + " animation fires when your weapon does and is ragged."
+                   + " Both are raw and nothing concludes from either.\n");
+            r.append("# NOTHING IS EVER AUTO-PRAYED FROM THIS FILE. Auto-pray"
+                   + " acts only on a live projectile, a held projectile style,"
+                   + " a single-style NPC from npc_data, or an attackable NPC"
+                   + " adjacent with nothing in flight. An animation it has"
+                   + " never been told the meaning of cannot reach it.\n");
             r.append("# att_seen_N is one row per attack animation played at"
                    + " you, newest first. A row with proj= is ranged or magic"
                    + " and its projectile id names which. A row with NO proj"
