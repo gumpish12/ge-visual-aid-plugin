@@ -1800,6 +1800,46 @@ public class MlmCheck
         eq("and even the warm-up is behind the setting",
                 tSrc.contains("if (config.npcStyleDataEnabled())"), true);
 
+        // ---- 2.130: THE HOLD, so adjacency stops filling the gap ----------
+        //
+        // Josh, on tormented gorillas: "they would attack with mage, id pray
+        // mage, then back to melee, then mage etc... it never did a melee
+        // attack whilst it was maging or ranging me." MEASURED ARITHMETIC:
+        // the window was 1500ms and a gorilla attacks every 4 ticks =
+        // 2400ms, so ~900ms of every cycle had no projectile reading left and
+        // adjacency can only ever say MELEE.
+        eq("the hold window clears one full attack cycle",
+                ATT_PROJ_HOLD_MS_from(tSrc) >= 2400, true);
+        eq("and it is longer than the in-flight window",
+                ATT_PROJ_HOLD_MS_from(tSrc) > ATT_PROJ_MS_from(tSrc), true);
+        eq("the held style is its own named basis",
+                tSrc.contains("conf = \"projectile_held\""), true);
+        // TIED TO THE ATTACKER. A gorilla dying and a melee monster taking
+        // over must not inherit the gorilla's magic hold - praying magic at
+        // something punching you is worse than the flap this fixes.
+        eq("the hold only applies to the SAME attacker",
+                tSrc.contains("byId == attProjHoldId"), true);
+        // ORDER: below a live projectile (it tracks a switch), above npc_data
+        // (an observation of this fight beats a catalogue entry), above
+        // adjacency (the whole reason it exists).
+        int iPj = tSrc.indexOf("conf = \"projectile\"");
+        int iHd = tSrc.indexOf("conf = \"projectile_held\"");
+        int iNd = tSrc.indexOf("conf = \"npc_data_sole_style\"");
+        eq("ranked below a live projectile and above the npc table",
+                iPj > 0 && iHd > iPj && iNd > iHd, true);
+        // The number stays checkable against a real attack interval, the same
+        // discipline as mlm_sack_settle_ticks being published.
+        // THE APPEND, NOT THE NAME. The bare string also appears in the
+        // comment above the constant ("Published as att_projectile_hold_ms so
+        // the number stays checkable"), so contains() stayed green with the
+        // append deleted. FOURTH weak key of this kind in two sessions, and
+        // always the same shape: a field name that also occurs in prose.
+        eq("the window is published, not buried",
+                tSrc.contains("sb.append(\"att_projectile_hold_ms=\")"), true);
+        eq("with its age and which attacker it belongs to",
+                tSrc.contains("sb.append(\"att_projectile_hold_age_ms=\")")
+             && tSrc.contains("sb.append(\"att_projectile_hold_attacker=\")"), true);
+
         // THE ORDER. A live projectile must outrank the table, because it is
         // the only thing that can follow a switcher; the table must outrank
         // adjacency, because adjacency can only ever say MELEE.
@@ -1829,6 +1869,26 @@ public class MlmCheck
      * the file the code under test actually reads. Returns -1 if the file has
      * no such row, which fails the assertion rather than passing it quietly.
      */
+    /**
+     * The two projectile windows, read out of the SOURCE rather than
+     * hardcoded here. A copy of the number in the checker would agree with
+     * itself for ever while the plugin drifted - the second-spelling trap.
+     * Returns -1 when the constant cannot be found, which fails the
+     * assertion rather than passing it.
+     */
+    private static long constMs(String src, String name)
+    {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile(name + "\\s*=\\s*(\\d+)").matcher(src);
+        return m.find() ? Long.parseLong(m.group(1)) : -1;
+    }
+
+    private static long ATT_PROJ_HOLD_MS_from(String src)
+    { return constMs(src, "ATT_PROJ_HOLD_MS"); }
+
+    private static long ATT_PROJ_MS_from(String src)
+    { return constMs(src, "ATT_PROJ_MS"); }
+
     private static int soleIdWithMask(int mask)
     {
         for (int id = 0; id < 60000; id++)
