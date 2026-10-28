@@ -1899,6 +1899,73 @@ public class MlmCheck
         eq("the cap is published, so a truncated log cannot look complete",
                 tSrc.contains("sq.append(\"att_seen_cap=\")"), true);
 
+        // ---- 2.132: THE CUMULATIVE CATALOGUE ------------------------------
+        //
+        // Josh: "can I leave it running for all NPCS and we just collate them
+        // over time? If im reading it right, i can just fight an NPC, map out
+        // all of their attacks, then that is saved?" - the ring buffer was
+        // neither cumulative nor saved, which is what this adds.
+        String aSrc = new String(java.nio.file.Files.readAllBytes(
+                java.nio.file.Paths.get(
+                    "src/main/java/com/ge/gevisualaid/NpcAttackLog.java")),
+                java.nio.charset.StandardCharsets.UTF_8);
+
+        // THE SAMPLE FLOOR IS THE WHOLE HONESTY OF IT. "Never seen with a
+        // projectile" is worth nothing after one sample. Called against the
+        // real compiled class, not a second copy of the rule.
+        NpcAttackLog.Row few = new NpcAttackLog.Row();
+        few.seen = 1; few.withProj = 0;
+        eq("one sample draws no conclusion",
+                NpcAttackLog.verdict(few).startsWith("too_few_samples"), true);
+        NpcAttackLog.Row many = new NpcAttackLog.Row();
+        many.seen = NpcAttackLog.MIN_SAMPLES; many.withProj = 0;
+        eq("a well-sampled row with no projectile says exactly that, and no style",
+                NpcAttackLog.verdict(many), "never_projectiled");
+        // A mixed row must NOT be averaged into one answer - an animation that
+        // sometimes throws something is a real finding.
+        NpcAttackLog.Row mixed = new NpcAttackLog.Row();
+        mixed.seen = 20; mixed.withProj = 9; mixed.projIds.add(1302);
+        eq("a mixed row stays mixed",
+                NpcAttackLog.verdict(mixed).startsWith("mixed:9_of_20"), true);
+        // THE CHAIN WITH NO GUESS: always one projectile, and the projectile
+        // table knows that id. 1304 is Demonic Gorilla magic in 2.128.
+        NpcAttackLog.Row always = new NpcAttackLog.Row();
+        always.seen = 30; always.withProj = 30; always.projIds.add(1304);
+        eq("an animation always paired with one known projectile resolves to its style",
+                NpcAttackLog.verdict(always), "always_projectile:1304:MAGIC");
+        NpcAttackLog.Row unk = new NpcAttackLog.Row();
+        unk.seen = 30; unk.withProj = 30; unk.projIds.add(999999);
+        eq("and an unlisted projectile says not_in_table rather than guessing",
+                NpcAttackLog.verdict(unk), "always_projectile:999999:not_in_table");
+
+        // IT MUST ACCUMULATE. Loading before writing is the one thing that
+        // separates a catalogue from a per-session log that overwrites itself.
+        eq("the file is read back at startup",
+                tSrc.contains("NpcAttackLog.load(f)"), true);
+        eq("and the load is idempotent, so a slow read cannot run twice",
+                aSrc.contains("if (loaded) return;")
+             && aSrc.contains("loaded = true;"), true);
+        // Written via a temp file and replaced: a truncated accumulation is
+        // worse than never having saved it.
+        eq("the write is atomic, not a truncating overwrite",
+                aSrc.contains("StandardCopyOption.REPLACE_EXISTING"), true);
+        // Flushed off the client thread, and FORCED synchronously on shutdown
+        // or up to 30s of observations die with the JVM.
+        eq("the periodic flush is off the client thread",
+                tSrc.contains("\"gevisualaid-attacklog\""), true);
+        eq("and shutDown forces it synchronously, before anything else",
+                tSrc.matches("(?s).*protected void shutDown\\(\\)\\s*\\{"
+                           + "[^}]{0,600}?attLogFlush\\(true\\);.*"), true);
+        // BOTH switches. A feature that writes to disk because an unrelated
+        // box is ticked is the trap this file keeps recording.
+        eq("the catalogue needs its own setting as well as the attack one",
+                tSrc.contains("config.attackStyleEnabled() && config.npcAttackLogEnabled()"), true);
+        eq("and that setting defaults to OFF",
+                cfgSrc.contains("default boolean npcAttackLogEnabled() { return false; }"), true);
+        // A count alone cannot tell "24 of 50 parsed" from "24 were written".
+        eq("unreadable lines in the file are named, not silently dropped",
+                aSrc.contains("ok_with_"), true);
+
         // THE ORDER. A live projectile must outrank the table, because it is
         // the only thing that can follow a switcher; the table must outrank
         // adjacency, because adjacency can only ever say MELEE.

@@ -534,6 +534,20 @@ public interface GEVisualAidConfig extends Config
             section = combatSection, position = 3)
     default boolean npcStyleDataEnabled() { return false; }
 
+    @ConfigItem(keyName = "npcAttackLogEnabled", name = "NPC attack catalogue",
+            description = "Keep a cumulative record of every attack animation played AT you, "
+                    + "to npc_attacks.txt in the output folder, and read it back at startup so "
+                    + "it builds up over sessions. One row per NPC id + animation, with how "
+                    + "many times it has been seen and which projectile (if any) followed. "
+                    + "THIS IS WHAT IDENTIFIES AN ATTACK THE GAME DOES NOT LABEL: an animation "
+                    + "always paired with one projectile has that projectile's style, and an "
+                    + "animation never paired with anything is either melee or a ranged-styled "
+                    + "attack with nothing in flight - which only watching the fight can tell "
+                    + "apart. Nothing is concluded below 12 samples. Needs \"Incoming attack "
+                    + "style\" on as well, and an output folder set. Read it at /attack.",
+            section = combatSection, position = 4)
+    default boolean npcAttackLogEnabled() { return false; }
+
     @ConfigItem(keyName = "prayerTrackingEnabled", name = "Active prayers",
             description = "List which prayers are currently switched on, with the overhead "
                     + "called out separately. Cheap.",

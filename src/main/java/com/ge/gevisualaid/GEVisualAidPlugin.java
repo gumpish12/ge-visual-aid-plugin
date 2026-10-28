@@ -1859,7 +1859,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.131";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.132";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2475,11 +2475,19 @@ public class GEVisualAidPlugin extends Plugin
     private static final int ATT_SEEN_MAX = 24;
     private final String[] attSeen      = new String[ATT_SEEN_MAX];
     private final int[]    attSeenAnim  = new int[ATT_SEEN_MAX];
+    private final int[]    attSeenNpcId = new int[ATT_SEEN_MAX];
     private final int[]    attSeenTick  = new int[ATT_SEEN_MAX];
     private final int[]    attSeenProj  = new int[ATT_SEEN_MAX];
     private volatile int   attSeenPos   = 0;     // next slot to write
     private volatile int   attSeenCount = 0;
     private volatile String attSeenBlock = "att_seen_state=no_reading_yet\n";
+    // 2.132 - the cumulative catalogue's flush cadence. 30s, because the file
+    // is only valuable as an accumulation and losing the last half minute of a
+    // session matters far less than writing on every swing.
+    private static final long ATT_LOG_FLUSH_MS = 30_000;
+    private static final int  ATT_LOG_SHOW     = 40;   // runaway stop, not a budget
+    private volatile long attLogFlushedMs = 0;
+    private volatile String attLogBlock = "att_log_state=no_reading_yet\n";
 
     private volatile String attSummaryBlock = "att_summary_state=no_reading_yet\n";
     private volatile String attNearbyBlock = "att_nearby_state=no_reading_yet\n";
@@ -2742,6 +2750,27 @@ public class GEVisualAidPlugin extends Plugin
         {
             log.warn("GEVisualAid npc_data warm-up skipped: {}", t.getMessage());
         }
+
+        // 2.132 - READ THE ATTACK CATALOGUE BACK. Without this the file would
+        // be overwritten by each session's own observations instead of added
+        // to, which is the one thing it exists not to do. Off the client
+        // thread for the same reason as above, and NpcAttackLog.load is
+        // idempotent so a slow read cannot be done twice.
+        try
+        {
+            if (attLogOn())
+            {
+                final java.io.File f = attLogFile();
+                Thread warm = new Thread(() -> NpcAttackLog.load(f),
+                                         "gevisualaid-attacklog-load");
+                warm.setDaemon(true);
+                warm.start();
+            }
+        }
+        catch (Throwable t)
+        {
+            log.warn("GEVisualAid attack catalogue load skipped: {}", t.getMessage());
+        }
         // 2.127 - registered unconditionally, not behind holdGroundEnabled. The
         // listener only ever sets a boolean, and the gate lives in
         // onMenuOptionClicked - so ticking the setting takes effect at once
@@ -2851,6 +2880,12 @@ public class GEVisualAidPlugin extends Plugin
     @Override
     protected void shutDown()
     {
+        // 2.132 - FLUSH THE CATALOGUE FIRST, and SYNCHRONOUSLY. Up to 30s of
+        // observations are sitting in memory; handing them to a daemon thread
+        // here races the JVM shutting down, and the whole value of the file is
+        // that it accumulates. Everything else in this method can wait.
+        attLogFlush(true);
+
         // 2.127 - unregister FIRST and clear the flag. A listener left attached
         // to a stopped plugin keeps writing holdGroundDown, and a flag left
         // true with nothing to clear it would suppress "Walk here" for the rest
@@ -3321,6 +3356,16 @@ public class GEVisualAidPlugin extends Plugin
                     + ",attackable=" + npcIsAttackable(n);
             attSeenPos   = (slot + 1) % ATT_SEEN_MAX;
             if (attSeenCount < ATT_SEEN_MAX) attSeenCount++;
+
+            // 2.132 - and into the cumulative catalogue, which is the part
+            // that survives a restart. Josh: "can I leave it running for all
+            // NPCS and we just collate them over time?"
+            if (attLogOn())
+            {
+                attSeenNpcId[slot] = safeNpcId(n);
+                NpcAttackLog.record(safeNpcId(n), anim,
+                        n.getName() == null ? "" : n.getName(), d);
+            }
         }
         catch (Throwable ignored) { }
     }
@@ -3349,6 +3394,69 @@ public class GEVisualAidPlugin extends Plugin
         attSeenProj[prev] = projId;
         attSeen[prev] = attSeen[prev] + ",proj=" + projId
                 + ",proj_after_ticks=" + (tick - attSeenTick[prev]);
+        // 2.132 - the catalogue learns the pairing too, keyed on the same
+        // NPC and animation the row was recorded under rather than on
+        // whatever is attacking now.
+        if (attLogOn())
+            NpcAttackLog.recordProjectile(attSeenNpcId[prev], attSeenAnim[prev], projId);
+    }
+
+    // 2.132 - the catalogue needs BOTH switches. The attack-style box is what
+    // produces the observations at all; this one is what writes a file. A
+    // feature that writes to disk because an unrelated setting is on is the
+    // trap this repo keeps recording.
+    private boolean attLogOn()
+    {
+        try { return config.attackStyleEnabled() && config.npcAttackLogEnabled(); }
+        catch (Throwable t) { return false; }
+    }
+
+    // The file, beside motherlode_log.txt and resolved the same way.
+    private java.io.File attLogFile()
+    {
+        try
+        {
+            String folder = config.outputFolder();
+            if (folder == null || folder.trim().isEmpty()) return null;
+            if (!folder.endsWith("\\") && !folder.endsWith("/")) folder += "\\";
+            java.io.File dir = new java.io.File(folder);
+            if (!dir.exists()) dir.mkdirs();
+            return new java.io.File(dir, NpcAttackLog.fileName());
+        }
+        catch (Throwable t) { return null; }
+    }
+
+    /**
+     * Flush at most every ATT_LOG_FLUSH_MS, and OFF THE CLIENT THREAD.
+     *
+     * The snapshot is taken under the catalogue's own lock (cheap, in memory)
+     * and the disk write happens on a daemon thread, so a slow or contended
+     * filesystem can never stall a game tick. Same reasoning as warming
+     * npc_data off the client thread: nothing here needs the client.
+     */
+    private void attLogFlush(boolean force)
+    {
+        try
+        {
+            if (!attLogOn()) return;
+            long now = System.currentTimeMillis();
+            if (!force && now - attLogFlushedMs < ATT_LOG_FLUSH_MS) return;
+            attLogFlushedMs = now;
+            final String body = NpcAttackLog.snapshotIfDirty();
+            if (body == null) return;                 // nothing changed
+            final java.io.File f = attLogFile();
+            if (f == null) return;
+            if (force)
+            {
+                NpcAttackLog.write(f, body);          // shutdown: must land now
+                return;
+            }
+            Thread t = new Thread(() -> NpcAttackLog.write(f, body),
+                                  "gevisualaid-attacklog");
+            t.setDaemon(true);
+            t.start();
+        }
+        catch (Throwable ignored) { }
     }
 
     @Subscribe
@@ -7263,6 +7371,14 @@ public class GEVisualAidPlugin extends Plugin
                   .append(attSeenCount == 0 ? "nothing_has_attacked_yet" : "ok")
                   .append("\n");
                 attSeenBlock = sq.toString();
+
+                // 2.132 - the cumulative catalogue, and its periodic flush.
+                // Both here because this is the client thread and this block
+                // only runs when the attack-style box is on.
+                attLogBlock = attLogOn()
+                        ? NpcAttackLog.block(ATT_LOG_SHOW)
+                        : "att_log_state=off - tick \"NPC attack catalogue\"\n";
+                attLogFlush(false);
                 try { attNearbyTick = client.getTickCount(); }
                 catch (Throwable ignored2) { }
             }
@@ -14849,6 +14965,7 @@ public class GEVisualAidPlugin extends Plugin
                 r.append(attSummaryBlock);
                 r.append(attNearbyBlock);
                 r.append(attSeenBlock);
+                r.append(attLogBlock);
             }
 
             r.append("# attackable=true means the NPC offers \"Attack\" on"
@@ -14864,6 +14981,16 @@ public class GEVisualAidPlugin extends Plugin
             r.append("# THE GAME NEVER LABELS AN ATTACK STYLE. Checked against"
                    + " runelite-api 1.13.4: Actor has no such field, so every"
                    + " style reading here is an inference.\n");
+            r.append("# att_log_N is the CUMULATIVE catalogue, kept in"
+                   + " npc_attacks.txt and read back at startup, busiest"
+                   + " first. One row per NPC id + animation, for every NPC"
+                   + " and not just bosses. verdict=never_projectiled on a"
+                   + " well-sampled row is the one to look at: that attack"
+                   + " throws nothing, so it is melee OR a ranged-styled"
+                   + " attack, and only watching the fight separates them."
+                   + " verdict=always_projectile:<id>:<style> is a chain with"
+                   + " no guess in it. Nothing is concluded below "
+                   + NpcAttackLog.MIN_SAMPLES + " samples.\n");
             r.append("# att_seen_N is one row per attack animation played at"
                    + " you, newest first. A row with proj= is ranged or magic"
                    + " and its projectile id names which. A row with NO proj"
