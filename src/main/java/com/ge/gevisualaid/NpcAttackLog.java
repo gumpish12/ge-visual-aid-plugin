@@ -194,9 +194,34 @@ final class NpcAttackLog
                     ? ("always_projectile:" + pid + ":not_in_table")
                     : ("always_projectile:" + pid + ":" + st);
         }
-        // Mixed. One animation that sometimes throws something and sometimes
-        // does not is a real finding and must not be averaged away.
-        return "mixed:" + r.withProj + "_of_" + r.seen
+        // 2.136 — ALWAYS A PROJECTILE, SEVERAL KINDS. This is NOT ambiguous
+        // and it was being reported as though it were.
+        //
+        // Josh's second Zulrah run: anim 5069, ten samples, ten projectiles,
+        // ids [1044, 1046] - and the table already knows both of them, 1044
+        // RANGED and 1046 MAGIC. She uses ONE ANIMATION for both attacks and
+        // the projectile is the only thing that separates them. That is
+        // completely actionable: pray by whatever is in flight.
+        //
+        // The old single "mixed" bucket put that in with "sometimes throws
+        // nothing at all", which needs the opposite response. One label for
+        // two findings that need opposite handling is the mislabel trap.
+        if (r.withProj == r.seen)
+        {
+            StringBuilder st = new StringBuilder();
+            for (Integer pid : r.projIds)
+            {
+                if (st.length() > 0) st.append('+');
+                String s = ProjectileStyles.styleOf(pid);
+                st.append(pid).append(':')
+                  .append(ProjectileStyles.UNKNOWN.equals(s) ? "not_in_table" : s);
+            }
+            return "always_projectile_multi:" + st;
+        }
+        // GENUINELY MIXED: sometimes a projectile, sometimes none. A real
+        // finding and not to be averaged away - it is the one shape that
+        // cannot be resolved from here at all.
+        return "sometimes_projectile:" + r.withProj + "_of_" + r.seen
              + ":projectiles=" + r.projIds;
     }
 

@@ -1932,8 +1932,24 @@ public class MlmCheck
         // sometimes throws something is a real finding.
         NpcAttackLog.Row mixed = new NpcAttackLog.Row();
         mixed.seen = 20; mixed.withProj = 9; mixed.projIds.add(1302);
-        eq("a mixed row stays mixed",
-                NpcAttackLog.verdict(mixed).startsWith("mixed:9_of_20"), true);
+        eq("sometimes-a-projectile stays unresolved and says so",
+                NpcAttackLog.verdict(mixed).startsWith("sometimes_projectile:9_of_20"), true);
+        // 2.136 - ALWAYS a projectile but SEVERAL ids is not ambiguous, and
+        // was being reported as though it were. Josh's Zulrah anim 5069:
+        // ten of ten, ids [1044, 1046], and the table knows both - 1044
+        // RANGED, 1046 MAGIC. One animation for two attacks, told apart by
+        // the projectile, which is entirely actionable.
+        NpcAttackLog.Row multi = new NpcAttackLog.Row();
+        multi.seen = 20; multi.withProj = 20;
+        multi.projIds.add(1044); multi.projIds.add(1046);
+        eq("always-a-projectile with several ids resolves each one",
+                NpcAttackLog.verdict(multi),
+                "always_projectile_multi:1044:RANGED+1046:MAGIC");
+        // And the two must not share a label, because they need opposite
+        // handling: one is "pray by what is in flight", the other is
+        // "this cannot be resolved from here".
+        eq("the two are different verdicts",
+                NpcAttackLog.verdict(multi).equals(NpcAttackLog.verdict(mixed)), false);
         // THE CHAIN WITH NO GUESS: always one projectile, and the projectile
         // table knows that id. 1304 is Demonic Gorilla magic in 2.128.
         NpcAttackLog.Row always = new NpcAttackLog.Row();

@@ -1859,7 +1859,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.135";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.136";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -2510,6 +2510,7 @@ public class GEVisualAidPlugin extends Plugin
     private volatile int attProjUnsourced = 0;
     private volatile int attProjAmbiguous = 0;
     private volatile int attProjPaired    = 0;
+    private volatile int attProjBossMismatch = 0;
     private volatile String attLogBlock = "att_log_state=no_reading_yet\n";
 
     private volatile String attSummaryBlock = "att_summary_state=no_reading_yet\n";
@@ -3515,7 +3516,42 @@ public class GEVisualAidPlugin extends Plugin
             if (tick >= 0 && attSeenTick[ix] >= 0 && tick - attSeenTick[ix] > 4)
                 return;                              // its last animation is stale
             attSeenProj[ix] = projId;
-            attSeen[ix] = attSeen[ix] + ",proj=" + projId + ",proj_src=" + how;
+            // 2.136 — NAME IT WHEN THE PROJECTILE BELONGS TO A DIFFERENT BOSS.
+            //
+            // Josh, 2026-10-28: "I have that projectile override, so i make
+            // her look like leviathan magic or range!" - and that is why 2489
+            // (Leviathan, in our table) turned up under Zulrah. Read out of
+            // Loze-Put-projectile-override's own source rather than guessed:
+            // it CREATES A NEW PROJECTILE with the override id, adds it to the
+            // client's list, and hides the original with setEndCycle(0). Both
+            // exist for a moment, so this handler can legitimately record
+            // either id depending on event order.
+            //
+            // His own mappings keep magic as magic, so his readings are sound.
+            // But the plugin does not require that: re-skin a magic attack as
+            // a ranged one and ProjectileStyles would answer RANGED for it,
+            // and auto-pray would pray the wrong overhead with total
+            // confidence. That is a mislabel, which is the failure this repo
+            // refuses to ship silently.
+            //
+            // So the mismatch is NAMED and nothing is changed by it. The id
+            // may be a re-skin, or a genuinely shared id, and this cannot tell
+            // those apart - which is exactly why it reports instead of acting.
+            String pb = ProjectileStyles.bossOf(projId);
+            String mism = "";
+            if (pb != null && !pb.isEmpty())
+            {
+                String an = attSeen[ix];
+                // The attacker's name is already in the row; compare on it
+                // rather than re-deriving who is attacking, which could have
+                // moved on since the animation was recorded.
+                if (an != null && !an.contains(",npc=" + pb + ","))
+                {
+                    mism = ",proj_boss=" + pb + ",proj_boss_mismatch=true";
+                    attProjBossMismatch++;
+                }
+            }
+            attSeen[ix] = attSeen[ix] + ",proj=" + projId + ",proj_src=" + how + mism;
             if (attLogOn())
                 NpcAttackLog.recordProjectile(srcId, attSeenAnim[ix], projId);
             return;
@@ -7494,6 +7530,11 @@ public class GEVisualAidPlugin extends Plugin
                 sq.append("att_proj_paired=").append(attProjPaired).append("\n");
                 sq.append("att_proj_unsourced=").append(attProjUnsourced).append("\n");
                 sq.append("att_proj_ambiguous=").append(attProjAmbiguous).append("\n");
+                // Non-zero means a projectile resolved to a boss that is not
+                // the one that fired it: a re-skin, or a shared id. Either
+                // way the STYLE behind that id may not be this monster's.
+                sq.append("att_proj_boss_mismatch=")
+                  .append(attProjBossMismatch).append("\n");
                 sq.append("att_seen_state=")
                   .append(attSeenCount == 0 ? "nothing_has_attacked_yet" : "ok")
                   .append("\n");
