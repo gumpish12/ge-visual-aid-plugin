@@ -587,6 +587,23 @@ public interface GEVisualAidConfig extends Config
             section = widgetSection, position = 1)
     default String widgetList() { return ""; }
 
+    @ConfigItem(keyName = "widgetBuiltinsEnabled", name = "Built-in interface widgets",
+            description = "Publish the 29 interface widgets this suite actually clicks "
+                    + "without anyone typing an id: the 13 sidebar tabs, the prayer / run "
+                    + "/ health orbs, the compass, the logout button and its X, the Grand "
+                    + "Exchange history and back buttons, the bank X and deposit-inventory "
+                    + "buttons, and the six prayers the scripts switch. Every one is "
+                    + "spelled from an InterfaceID SYMBOL, not a number, so a component "
+                    + "renamed in a future client fails the BUILD here instead of matching "
+                    + "nothing for ever. Appended LAST and only if that label is absent, so "
+                    + "anything you write in the Widgets box above still wins. "
+                    + "On a machine that only flips, turning this OFF and listing the two "
+                    + "or three ids it really uses is measurably cheaper - 29 widgets is "
+                    + "about 460 extra fields on /state every tick. high_alch and "
+                    + "inv_1..inv_28 are NOT gated by this and are always present.",
+            section = widgetSection, position = 2)
+    default boolean widgetBuiltinsEnabled() { return true; }
+
     @ConfigItem(keyName = "playerActivityEnabled", name = "Player activity",
             description = "Emit what the local player is doing - animation id, how long it "
                     + "has been running, how long since any animation, whether they are "

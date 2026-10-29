@@ -2127,6 +2127,116 @@ public class MlmCheck
         eq("as do NONE and UNKNOWN",
                 NpcStyleData.overheadFor("NONE") + NpcStyleData.overheadFor("UNKNOWN"), "");
 
+        // ---- 2.137: THE BUILT-IN INTERFACE WIDGETS ------------------------
+        // Josh wanted the widgets the suite clicks hard-coded so nobody has to
+        // push ids to a VM. They are spelled from InterfaceID SYMBOLS, which
+        // means a renamed component fails the build - but a symbol that still
+        // exists and has been RENUMBERED would compile and point somewhere else
+        // in silence, which is the whole varbit-4398 failure again.
+        //
+        // So the real compiled method is called here and its output compared
+        // against the ids Josh read out of the Widget Inspector and I confirmed
+        // live on Gumps-Credit, 2026-10-29. This is the only thing standing
+        // between a future renumber and a confident click on the wrong glyph.
+        String bi = GEVisualAidPlugin.wgBuiltinInterface();
+
+        String[][] wantPairs = {
+                // the three the flipper actually asks for
+                { "UI_Tabs_Stats_Tab_Click_Box",     "164.53" },
+                { "UI_Tabs_Inventory_Tab_Click_Box", "164.55" },
+                { "UI_Tabs_Friends_Tab_Click_Box",   "164.40" },
+                // the two whose SYMBOL NAMES look wrong and are right.
+                // ICON8=Account, ICON7=Clan. Drawn order is Friends, Account,
+                // Clan - not id order. If these two ever swap, the idle tab
+                // click lands on the wrong panel and nothing errors.
+                { "UI_Tabs_Account_Tab_Click_Box",   "164.45" },
+                { "UI_Tabs_Clan_Tab_Click_Box",      "164.44" },
+                { "Orbs_Prayer_Orb",                 "160.25" },
+                { "Orbs_Run_Orb",                    "160.30" },
+                { "Orbs_Health_Orb",                 "160.11" },
+                { "Compass_Compass_Click_Area",      "164.31" },
+                // the insets are part of the id and must survive
+                { "Logout_Panel_Logout_Button_Click_Area", "182.8@50" },
+                { "Logout_Panel_Logout_X_Button",    "164.34@80" },
+                // a BRACKETED CHILD, not a component
+                { "GE_Buttons_Bank_X_Button",        "12.2.11" },
+                { "Bank_Bank_Deposit_Inventory",     "12.47" },
+                { "GE_Buttons_History_Exchange_Button", "465.3" },
+                { "GE_Buttons_Exchange_Back_Button", "383.2" },
+                // PRAYER13/14/15 are magic/missiles/melee in that order
+                { "Prayers_Protect_from_Magic",      "541.21" },
+                { "Prayers_Protect_from_Missiles",   "541.22" },
+                { "Prayers_Protect_from_Melee",      "541.23" },
+                { "Prayers_Rigour",                  "541.25" },
+                { "Prayers_Augury",                  "541.33" },
+                { "Prayers_Piety",                   "541.35" },
+        };
+        for (String[] wp : wantPairs)
+            eq("built-in widget " + wp[0] + " resolves to the id read off the live client",
+                    countOccurrences(bi, wp[0] + "=" + wp[1]), 1);
+
+        String[] entries = bi.split(",");
+        eq("the built-in set is 29 widgets", entries.length, 29);
+
+        // A DUPLICATE LABEL IS SILENTLY DROPPED by selectResults, so the second
+        // one matches nothing for ever while looking configured. Counted, not
+        // contained - a label could legitimately appear twice in this file.
+        java.util.Set<String> seenLabels = new java.util.HashSet<>();
+        boolean dupLabel = false;
+        for (String e : entries)
+        {
+            int q = e.indexOf('=');
+            if (q <= 0) { dupLabel = true; break; }
+            if (!seenLabels.add(e.substring(0, q))) { dupLabel = true; break; }
+        }
+        eq("no built-in label is duplicated, and every entry has an id", dupLabel, false);
+
+        // Exactly two insets. An inset silently applied to the other 27 would
+        // shrink every target about its centre - still inside the rect, so it
+        // would look fine and quietly stop hitting small glyphs at the edges.
+        eq("only the two measured insets are present", countOccurrences(bi, "@"), 2);
+
+        // ---- the call site, not just the method -------------------------
+        // A correct list nobody merges is the same as no list. Same reason
+        // filterNameMatches asserts its caller.
+        eq("rebuildEntitySets appends the built-in interface widgets",
+                src.contains("wgBuiltinInterface().split(\",\")"), true);
+        eq("and it is gated on widgetBuiltinsEnabled, because 29 widgets is not free",
+                src.contains("config.widgetBuiltinsEnabled()"), true);
+        eq("appended PER LABEL, so hand-writing one tab cannot suppress the other 28",
+                src.contains("if (wgts.indexOf(entry.substring(0, eq) + \"=\") >= 0) continue;"), true);
+
+        // high_alch and inv_1..28 must NOT fall inside the new gate - they ship
+        // unconditionally today and a VM that turns the built-ins off still
+        // needs its inventory, which Flipping.ahk V11.2 now asks for by inv_N.
+        int iHigh  = src.indexOf("wgts.append(WG_BUILTIN_HIGH_ALCH);");
+        int iInv   = src.indexOf("wgts.append(wgBuiltinInventory());");
+        int iGate  = src.indexOf("boolean wantBuiltinInterface");
+        eq("high_alch is appended before the built-in gate, so it stays unconditional",
+                iHigh > 0 && iGate > iHigh, true);
+        eq("inv_1..28 are appended before the built-in gate too",
+                iInv > 0 && iGate > iInv, true);
+
+        // ---- the merge runs even with Scene & Tiles off -------------------
+        // rebuildEntitySets had ONE caller, inside buildSceneBlock, so with
+        // scene tracking off esWidgets stayed "" and /widgets blamed the
+        // operator for ids that were present. ORDER asserted, not presence:
+        // after updateSceneState it would be a tick late every tick.
+        int iTickFn = src.indexOf("public void onGameTick(GameTick tick)");
+        int iRebuild = src.indexOf("try { rebuildEntitySets(); } catch (Throwable ignored) { }", iTickFn);
+        int iScene   = src.indexOf("updateSceneState();", iTickFn);
+        eq("onGameTick rebuilds the entity sets itself", iTickFn > 0 && iRebuild > iTickFn, true);
+        eq("and does it BEFORE updateSceneState, which used to be its only caller",
+                iRebuild > 0 && iScene > iRebuild, true);
+
+        // ---- the blank says which blank it is ----------------------------
+        eq("/widgets names Scene & Tiles when that is why there is no reading",
+                src.contains("SCENE & TILES IS OFF"), true);
+        eq("and tells 'not yet' from 'not ever' by reading the toggle",
+                src.contains("sceneOn = config.sceneTrackingEnabled()"), true);
+        eq("the empty-list message no longer blames the operator on its own",
+                src.contains("the built-ins are switched off AND nothing is"), true);
+
         System.out.println(fails == 0 ? "MlmCheck: PASS" : ("MlmCheck: " + fails + " FAILURE(S)"));
         if (fails != 0) System.exit(1);
     }

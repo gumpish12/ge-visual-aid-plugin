@@ -1859,7 +1859,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.136";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.137";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -3666,6 +3666,30 @@ public class GEVisualAidPlugin extends Plugin
         // and a tick stamp taken after updateSceneState() would carry that
         // latency silently into every consumer's timing.
         stampGameTick();
+
+        // 2.137: the merged entity-set strings - INCLUDING the widget list -
+        // are rebuilt here, unconditionally, BEFORE updateSceneState.
+        //
+        // rebuildEntitySets() had exactly ONE caller and it was inside
+        // buildSceneBlock, so with Scene & Tiles switched off esWidgets stayed
+        // "" for ever. /widgets then reported "the widget list is EMPTY. Put
+        // ids in the Widgets setting" on a machine with 2029 characters of ids
+        // configured - measured on Gumps-Credit, 2026-10-29 - and sent the
+        // reader off to type in what was already there. It could not even have
+        // meant what it said: with a genuinely empty list the built-in
+        // high_alch and inv_1..28 alone would make esWidgets non-empty, so
+        // "empty" never could have meant "nothing configured".
+        //
+        // NOT guarded on a spec string. 2.65 tried that, left the sets' own
+        // filter text out of the spec, and edits and deletions silently never
+        // took effect; 2.70 made the assignment unconditional for exactly this
+        // reason. Guard only things whose staleness is harmless.
+        //
+        // The call inside buildSceneBlock is LEFT IN PLACE. It is idempotent,
+        // and buildSceneBlock is also reached from the logged-out writer, which
+        // does not pass through here. Rebuilding twice on a tick costs a string
+        // build; removing the wrong one costs a stale merged filter.
+        try { rebuildEntitySets(); } catch (Throwable ignored) { }
 
         // V2.21: FIRST, and outside the copilot gate — the scene/camera block
         // must keep refreshing even when Flipping Copilot is not linked, and
@@ -6045,6 +6069,29 @@ public class GEVisualAidPlugin extends Plugin
         {
             if (wgts.length() > 0) wgts.append(",");
             wgts.append(wgBuiltinInventory());
+        }
+        // 2.137: and the 29 interface widgets the suite clicks, on the same
+        // terms once more - but filtered PER LABEL rather than all-or-nothing.
+        // high_alch and inv_1 are each a single decision; this is 29 of them,
+        // and hand-writing one tab must not suppress the other 28.
+        //
+        // GATED, unlike the two above, because it is not free: 29 widgets is
+        // ~460 fields on /state every tick, and a machine that only flips uses
+        // three of them. Default ON - Josh asked for them hard-coded - so an
+        // existing VM gains them on a pull and a flipping VM can opt out.
+        boolean wantBuiltinInterface = true;
+        try { wantBuiltinInterface = config.widgetBuiltinsEnabled(); }
+        catch (Throwable ignored) { }
+        if (wantBuiltinInterface)
+        {
+            for (String entry : wgBuiltinInterface().split(","))
+            {
+                int eq = entry.indexOf('=');
+                if (eq <= 0) continue;
+                if (wgts.indexOf(entry.substring(0, eq) + "=") >= 0) continue;
+                if (wgts.length() > 0) wgts.append(",");
+                wgts.append(entry);
+            }
         }
         esWidgets   = wgts.toString();
         esActive    = act.toString();
@@ -11686,6 +11733,10 @@ public class GEVisualAidPlugin extends Plugin
             // set was supplying every id in use.
             String spec = esWidgets;
             boolean online = client.getGameState() == GameState.LOGGED_IN;
+            // 2.137: needed to tell "no reading yet" from "no reading EVER",
+            // which read identically and need opposite repairs.
+            boolean sceneOn = false;
+            try { sceneOn = config.sceneTrackingEnabled(); } catch (Throwable ignored) { }
 
             if (!on)
             {
@@ -11695,8 +11746,19 @@ public class GEVisualAidPlugin extends Plugin
             }
             else if (spec == null || spec.trim().isEmpty())
             {
-                reply.append("Widget coordinates is on, but the widget list is EMPTY.\n\n")
-                     .append("Put ids in the \"Widgets\" setting as label=group.child, or\n")
+                // 2.137: this can now only mean the BUILT-INS ARE OFF TOO, and
+                // it says so. Before 2.137 it was the message a machine with
+                // 2029 characters of configured ids got, because the merged
+                // string was only built inside the scene build and Scene &
+                // Tiles was off - so it blamed the operator for the one thing
+                // that was not wrong. The merge is unconditional now.
+                reply.append("Widget coordinates is on, but the MERGED widget list is EMPTY.\n\n")
+                     .append("With \"Built-in interface widgets\" on, this list can never be\n")
+                     .append("empty - high_alch and inv_1..inv_28 alone would fill it. So\n")
+                     .append("this means the built-ins are switched off AND nothing is\n")
+                     .append("written in the \"Widgets\" box. Either:\n")
+                     .append("  /config?widgetBuiltinsEnabled=true\n")
+                     .append("or put ids in the \"Widgets\" setting as label=group.child, or\n")
                      .append("label=group.child.index for a bracketed child, or push the\n")
                      .append("whole set from the calibrator with Shift+F12.\n");
             }
@@ -11723,10 +11785,39 @@ public class GEVisualAidPlugin extends Plugin
             else
             {
                 String block = wgReportBlock;
-                reply.append(block == null || block.isEmpty()
-                        ? "Logged in, but no widget reading has been taken yet.\n"
-                        + "Give it a game tick and reload.\n"
-                        : block);
+                if (block != null && !block.isEmpty())
+                {
+                    reply.append(block);
+                }
+                else if (!sceneOn)
+                {
+                    // 2.137: THE BLANK HAS TO SAY WHY. This branch said "give it
+                    // a game tick and reload" about a reading that was never
+                    // going to arrive: appendWidgets runs INSIDE the scene build,
+                    // so with Scene & Tiles off no widget geometry is ever
+                    // measured, however many ids are configured and however long
+                    // anyone waits. "Not yet" and "not ever" read identically and
+                    // need opposite repairs - the same trap as 2.84's not_found.
+                    reply.append("Logged in, ").append(wgNames.size())
+                         .append(" id(s) configured - but SCENE & TILES IS OFF.\n\n")
+                         .append("The widget rectangles are measured inside the scene build,\n")
+                         .append("so with that switched off no reading is ever taken and\n")
+                         .append("waiting will not help. Turn it on with:\n")
+                         .append("  /config?sceneTrackingEnabled=true\n")
+                         .append("or tick \"Scene tracking\" in the GEVisualAid panel.\n\n")
+                         .append("The ids themselves are fine and waiting:\n\n");
+                    for (int i = 0; i < wgNames.size(); i++)
+                        reply.append("  ").append(wgNames.get(i)).append(" = ")
+                             .append(wgSpecs.get(i).describe()).append("\n");
+                }
+                else
+                {
+                    reply.append("Logged in, scene tracking on, ").append(wgNames.size())
+                         .append(" id(s) configured, but no widget reading has been\n")
+                         .append("taken yet. Give it a game tick and reload. If this does not\n")
+                         .append("clear within a few seconds the scene build is throwing before\n")
+                         .append("it reaches the widgets - check the client log.\n");
+                }
             }
         }
         catch (Throwable t) { reply.append("err ").append(t.getMessage()).append("\n"); }
@@ -16568,6 +16659,114 @@ public class GEVisualAidPlugin extends Plugin
     private static String idPath(int id)
     {
         return (id >>> 16) + "." + (id & 0xFFFF);
+    }
+
+    // ------------------------------------------------------------------
+    // 2.137 - THE INTERFACE WIDGETS THE SUITE ACTUALLY CLICKS, BUILT IN.
+    // ------------------------------------------------------------------
+    // Josh, 2026-10-29: "The important widgets, all of the boxes, special
+    // attack, all of the main ones we use, I want to be hard coded in. So they
+    // are default ones, the widget box is only for odd extra ones i thought".
+    //
+    // Same terms as high_alch (2.108) and inv_1..28 (2.121): appended LAST and
+    // only if that label is absent, so anything hand-written still wins and is
+    // never reported as a duplicate rejection.
+    //
+    // THE LABELS ARE THE COORDINATES-INI'S OWN NAMES, deliberately. The skiller
+    // and the emergency script already ask for Prayers_Protect_from_Magic,
+    // Logout_Panel_Logout_X_Button, Bank_Bank_Deposit_Inventory and the rest by
+    // exactly these strings. Built in under these names, this is a DROP-IN for
+    // the list the calibrator used to have to push: no script changes, and a VM
+    // nobody has ever calibrated resolves them anyway. Short names would have
+    // been tidier and would have broken two scripts.
+    //
+    // EVERY ID IS A SYMBOL, and that is the varbit-4398 lesson paid forward.
+    // Written as a number, 4398 compiled happily against a runelite-api that had
+    // already DELETED the constant naming it, and the breakage arrived as a
+    // flipper clicking the inventory in a loop. Written as a symbol, a component
+    // renamed in a future client fails the BUILD with a name on it. All 29 were
+    // verified against runelite-api-1.13.4 - the version all three VMs run - by
+    // matching the packed group<<16|child value against the javap dump.
+    //
+    // THE SYMBOL NAMES ARE POSITIONAL AND THEY LOOK WRONG. STONE9 is Friends,
+    // ICON7 is Clan, ICON8 is Account, PRAYER13 is Protect from Magic. They are
+    // RIGHT: read live off Gumps-Credit on 2026-10-29, the drawn order of the
+    // tab row is Combat 1218, Stats 1251, Quest 1284, Inventory 1317,
+    // Equipment 1350, Prayer 1383, Magic 1416, FRIENDS 1449, ACCOUNT 1482,
+    // CLAN 1515, Settings 1548, Emotes 1581, Music 1614. The client does not
+    // draw them in id order. Do NOT "tidy" this mapping by name.
+    static String wgBuiltinInterface()
+    {
+        StringBuilder b = new StringBuilder();
+
+        // The 13 sidebar tabs. Listed in DRAWN order, so the comment above can
+        // be checked against this list by eye.
+        wgAdd(b, "UI_Tabs_Combat_Tab_Click_Box",    InterfaceID.ToplevelPreEoc.STONE0);
+        wgAdd(b, "UI_Tabs_Stats_Tab_Click_Box",     InterfaceID.ToplevelPreEoc.STONE1);
+        wgAdd(b, "UI_Tabs_Quest_Tab_Click_Box",     InterfaceID.ToplevelPreEoc.STONE2);
+        wgAdd(b, "UI_Tabs_Inventory_Tab_Click_Box", InterfaceID.ToplevelPreEoc.STONE3);
+        wgAdd(b, "UI_Tabs_Equipment_Tab_Click_Box", InterfaceID.ToplevelPreEoc.STONE4);
+        wgAdd(b, "UI_Tabs_Prayer_Tab_Click_Box",    InterfaceID.ToplevelPreEoc.STONE5);
+        wgAdd(b, "UI_Tabs_Magic_Tab_Click_Box",     InterfaceID.ToplevelPreEoc.STONE6);
+        wgAdd(b, "UI_Tabs_Friends_Tab_Click_Box",   InterfaceID.ToplevelPreEoc.STONE9);
+        wgAdd(b, "UI_Tabs_Account_Tab_Click_Box",   InterfaceID.ToplevelPreEoc.ICON8);
+        wgAdd(b, "UI_Tabs_Clan_Tab_Click_Box",      InterfaceID.ToplevelPreEoc.ICON7);
+        wgAdd(b, "UI_Tabs_Settings_Tab_Click_Box",  InterfaceID.ToplevelPreEoc.ICON11);
+        wgAdd(b, "UI_Tabs_Emotes_Tab_Click_Box",    InterfaceID.ToplevelPreEoc.ICON12);
+        wgAdd(b, "UI_Tabs_Music_Tab_Click_Box",     InterfaceID.ToplevelPreEoc.ICON13);
+
+        // Orbs and compass.
+        wgAdd(b, "Orbs_Prayer_Orb",                 InterfaceID.Orbs.PRAYER_ICON);
+        wgAdd(b, "Orbs_Run_Orb",                    InterfaceID.Orbs.RUNENERGY_INDICATOR);
+        wgAdd(b, "Orbs_Health_Orb",                 InterfaceID.Orbs.HEALTH_INDICATOR);
+        wgAdd(b, "Compass_Compass_Click_Area",      InterfaceID.ToplevelPreEoc.COMPASSCLICK);
+
+        // Logout. The INSETS are the calibrator's measured ones and they matter:
+        // the logout button is a wide bar whose outer pixels are border, and the
+        // X is a small glyph. @N keeps N% of the rect about its centre.
+        wgAdd(b, "Logout_Panel_Logout_Button_Click_Area", InterfaceID.Logout.LOGOUT, 50);
+        wgAdd(b, "Logout_Panel_Logout_X_Button",    InterfaceID.ToplevelPreEoc.STONE10, 80);
+
+        // Grand Exchange. GeHistory.EXCHANGE is the button that returns FROM the
+        // history screen, which is why the INI calls it the back button.
+        wgAdd(b, "GE_Buttons_History_Exchange_Button", InterfaceID.GeOffers.HISTORY);
+        wgAdd(b, "GE_Buttons_Exchange_Back_Button",    InterfaceID.GeHistory.EXCHANGE);
+
+        // Bank. The X is a BRACKETED CHILD of the bank frame, index 11 - what the
+        // Widget Inspector shows as 12.2[11] - not a component of its own.
+        wgAddChild(b, "GE_Buttons_Bank_X_Button",   InterfaceID.Bankmain.FRAME, 11);
+        wgAdd(b, "Bank_Bank_Deposit_Inventory",     InterfaceID.Bankmain.DEPOSITINV);
+
+        // The six prayers the scripts switch.
+        wgAdd(b, "Prayers_Protect_from_Magic",      InterfaceID.Prayerbook.PRAYER13);
+        wgAdd(b, "Prayers_Protect_from_Missiles",   InterfaceID.Prayerbook.PRAYER14);
+        wgAdd(b, "Prayers_Protect_from_Melee",      InterfaceID.Prayerbook.PRAYER15);
+        wgAdd(b, "Prayers_Rigour",                  InterfaceID.Prayerbook.PRAYER17);
+        wgAdd(b, "Prayers_Augury",                  InterfaceID.Prayerbook.PRAYER25);
+        wgAdd(b, "Prayers_Piety",                   InterfaceID.Prayerbook.PRAYER27);
+
+        return b.toString();
+    }
+
+    private static void wgAdd(StringBuilder b, String label, int id)
+    {
+        wgAdd(b, label, id, 100);
+    }
+
+    private static void wgAdd(StringBuilder b, String label, int id, int inset)
+    {
+        if (b.length() > 0) b.append(",");
+        b.append(label).append("=").append(idPath(id));
+        // 100 is omitted rather than written, so the list stays readable and an
+        // older plugin - which would treat the whole "164.34@100" as an
+        // unparseable id - still gets a usable list for everything unmodified.
+        if (inset != 100) b.append("@").append(inset);
+    }
+
+    private static void wgAddChild(StringBuilder b, String label, int id, int index)
+    {
+        if (b.length() > 0) b.append(",");
+        b.append(label).append("=").append(idPath(id)).append(".").append(index);
     }
 
     static final String WG_BUILTIN_HIGH_ALCH =
