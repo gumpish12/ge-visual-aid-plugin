@@ -1859,7 +1859,7 @@ public class GEVisualAidPlugin extends Plugin
     //
     //         Box source order is now: rooftop_object, agility_plugin
     //         (clickbox), agility_tile (the object's own tile), none.
-    static final String PLUGIN_OUTPUT_VERSION = "2.137";   // package-visible: the panel shows it
+    static final String PLUGIN_OUTPUT_VERSION = "2.138";   // package-visible: the panel shows it
 
     // ---- THE COPILOT PREFERENCES LINK (2.92) ------------------------------
     // Every copilot_* preference had been publishing BLANK on all three VMs,
@@ -3667,8 +3667,13 @@ public class GEVisualAidPlugin extends Plugin
         // latency silently into every consumer's timing.
         stampGameTick();
 
+        // V2.21: FIRST, and outside the copilot gate — the scene/camera block
+        // must keep refreshing even when Flipping Copilot is not linked, and
+        // it must be computed here because this is the client thread.
+        updateSceneState();
+
         // 2.137: the merged entity-set strings - INCLUDING the widget list -
-        // are rebuilt here, unconditionally, BEFORE updateSceneState.
+        // are rebuilt here unconditionally.
         //
         // rebuildEntitySets() had exactly ONE caller and it was inside
         // buildSceneBlock, so with Scene & Tiles switched off esWidgets stayed
@@ -3677,24 +3682,24 @@ public class GEVisualAidPlugin extends Plugin
         // configured - measured on Gumps-Credit, 2026-10-29 - and sent the
         // reader off to type in what was already there. It could not even have
         // meant what it said: with a genuinely empty list the built-in
-        // high_alch and inv_1..28 alone would make esWidgets non-empty, so
-        // "empty" never could have meant "nothing configured".
+        // high_alch and inv_1..28 alone would make esWidgets non-empty.
+        //
+        // AFTER updateSceneState, not before. 2.137 first put it above, with a
+        // comment claiming that below it the merged filters would be "a tick
+        // stale every tick" - WRONG, because buildSceneBlock calls this itself
+        // before its own appenders, so the scene path is never stale either
+        // way. The only thing this call exists for is the scene-OFF path, which
+        // does not care where in the tick it runs. Meanwhile putting it above
+        // pushed work between stampGameTick() and the scene work and turned
+        // test_tick_toggle red - correctly. The tick stamp is the moment the
+        // client processed a server tick and nothing belongs in front of the
+        // scene build but that stamp.
         //
         // NOT guarded on a spec string. 2.65 tried that, left the sets' own
         // filter text out of the spec, and edits and deletions silently never
-        // took effect; 2.70 made the assignment unconditional for exactly this
+        // took effect; 2.70 made the assignment unconditional for the same
         // reason. Guard only things whose staleness is harmless.
-        //
-        // The call inside buildSceneBlock is LEFT IN PLACE. It is idempotent,
-        // and buildSceneBlock is also reached from the logged-out writer, which
-        // does not pass through here. Rebuilding twice on a tick costs a string
-        // build; removing the wrong one costs a stale merged filter.
         try { rebuildEntitySets(); } catch (Throwable ignored) { }
-
-        // V2.21: FIRST, and outside the copilot gate — the scene/camera block
-        // must keep refreshing even when Flipping Copilot is not linked, and
-        // it must be computed here because this is the client thread.
-        updateSceneState();
 
         if (suggestionManager == null)
         {

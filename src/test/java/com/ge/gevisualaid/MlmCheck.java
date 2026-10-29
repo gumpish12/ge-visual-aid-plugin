@@ -2226,8 +2226,15 @@ public class MlmCheck
         int iRebuild = src.indexOf("try { rebuildEntitySets(); } catch (Throwable ignored) { }", iTickFn);
         int iScene   = src.indexOf("updateSceneState();", iTickFn);
         eq("onGameTick rebuilds the entity sets itself", iTickFn > 0 && iRebuild > iTickFn, true);
-        eq("and does it BEFORE updateSceneState, which used to be its only caller",
-                iRebuild > 0 && iScene > iRebuild, true);
+        // AFTER the scene build, not before. Putting it before pushed work in
+        // between stampGameTick() and updateSceneState() and turned
+        // test_tick_toggle red, correctly: nothing belongs in front of the
+        // scene work but the tick stamp. Nothing is lost by running after -
+        // buildSceneBlock calls this itself before its own appenders, so the
+        // scene path is never stale, and the scene-OFF path (the only reason
+        // this call exists) does not care when in the tick it runs.
+        eq("and does it AFTER updateSceneState, so the tick stamp stays the first thing in onGameTick",
+                iRebuild > 0 && iScene > 0 && iRebuild > iScene, true);
 
         // ---- the blank says which blank it is ----------------------------
         eq("/widgets names Scene & Tiles when that is why there is no reading",
